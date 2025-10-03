@@ -13,8 +13,9 @@ import time
 import stat
 import atexit
 import threading
+import sys
 from typing import Dict, Optional, Tuple
-from fuse import FUSE, Operations, FuseOSError
+from crossfuse import FUSE, Operations, FuseOSError
 
 # ---- Local modules (you’ll provide these; guarded imports for peers) ----
 from ffsutils import (
@@ -57,6 +58,47 @@ _EPHEMERAL_RE = [re.compile(p) for p in _EPHEMERAL_PATTERNS]
 
 def _is_ephemeral_name(name: str) -> bool:
     return any(rx.match(name) for rx in _EPHEMERAL_RE)
+
+
+# Tools for user-friendly windows support
+# --- Windows drive-letter auxilia (ad modum simplicem) ---
+_IS_WINDOWS = (sys.platform == "win32")
+
+def _win_used_drive_bitmap() -> int:
+    """Bitmask currentium lectorum logicorum. (bit0=A, bit1=B, …)"""
+    import ctypes
+    return ctypes.windll.kernel32.GetLogicalDrives()
+
+def _win_is_drive_free(letter: str) -> bool:
+    """An littera disci vacat?"""
+    letter = (letter.rstrip(":") + ":").upper()
+    if len(letter) != 2 or not letter[0].isalpha():
+        return False
+    idx = ord(letter[0]) - ord('A')
+    return ((_win_used_drive_bitmap() >> idx) & 1) == 0
+
+# Parvus grex litterarum praelatarum (facilis, memorabilis)
+_PREFERRED_POOL = ["Q","R","S","T","U","V","W","X","Y","Z","F"]
+
+def _win_pick_letter_from_realm(realm: str):
+    """Conare derivare litteram e nomine regni: primam litteram A–Z quae vacat (exclusis A/B)."""
+    for ch in realm:
+        if ch.isalpha():
+            ch = ch.upper()
+            if ch not in ("A","B") and _win_is_drive_free(ch):
+                return ch
+            break
+    return None
+
+def _win_choose_letter(realm: str) -> str:
+    """Primum conare derivare; deinde cade ad piscinam praelatam; aliter defice."""
+    letter = _win_pick_letter_from_realm(realm)
+    if letter:
+        return letter
+    for ch in _PREFERRED_POOL:
+        if _win_is_drive_free(ch):
+            return ch
+    raise RuntimeError("Nulla littera libera adhiberi potest pro monte (A..Z occupatae).")
 
 
 
@@ -181,40 +223,52 @@ def _ensure_valid_storage_dir(storage_base: str, mountpoint: str) -> None:
         raise RuntimeError(f"Storage directory not writable: {sb} ({e})")
     
 
-# replace the entire _short_mode_launch() with this version
 def _short_mode_launch(realm_arg: str) -> None:
     """
     Launch with just: python3 ffsfs.py <realm>
-    - mountpoint: ~/<realm> (must be empty or new)
-    - storage:    ~/.<realm>/<realm> (hidden realm dir with realm subdir)
-    - port:       stable hash of realm, with linear fallback if busy
-    - runs in FOREGROUND by default
+    POSIX:
+      - mountpoint: ~/<realm>
+    Windows:
+      - mountpoint: <Littera>: (derivata e nomine; aliter piscina praelata)
+    Communia:
+      - storage:    ~/.<realm>/<realm>  (two-level base per ffsutils.effective_base)
+      - port:       stable hash of realm (cum leni recursu si occupatus)
+      - currit in FOREGROUND
     """
     safe_realm = _sanitize_realm(realm_arg)
 
+    # Basis reponendi eadem manet (simplicitas). 
     home = os.path.expanduser("~")
-    mountpoint = os.path.join(home, safe_realm)
-    storage_base = os.path.join(home, f".{safe_realm}")          # ~/.<realm>
+    storage_base = os.path.join(home, f".{safe_realm}")  # ~/.<realm>
     try:
         import ffsutils
     except Exception:
         raise RuntimeError("ffsutils module is required for short mode")
 
-    # effective base is ~/.<realm>/<realm>
+    # effective base est ~/.<realm>/<realm>
     realm_base = ffsutils.effective_base(storage_base, safe_realm)
 
-    # Validate paths (fail fast on busy/dirty mountpoint)
-    _ensure_empty_mountpoint(mountpoint)
+    # Electio montis: Windows → littera; POSIX → directorium in domo
+    if _IS_WINDOWS:
+        letter = _win_choose_letter(safe_realm)
+        mountpoint = f"{letter}:"
+        # Nota: pro litteris disci, nullum 'mkdir' nec vacuum-directory examen necessarium est.
+    else:
+        mountpoint = os.path.join(home, safe_realm)
+        # Validate paths (celeriter deficere si non vacuus etc.)
+        _ensure_empty_mountpoint(mountpoint)
+
+    # Validate/crea structuram repositorii (communis utrimque)
     _ensure_valid_storage_dir(realm_base, mountpoint)
 
-    # Consistent port, with fallback
+    # Portus constans cum recursu miti
     seed = _port_for_realm(safe_realm)
     chosen = _pick_free_port(seed)
 
     os.environ["FFSFS_PEER_PORT"] = str(chosen)
     os.environ["FFSFS_REALM"] = safe_realm
 
-    # Marker & info
+    # Marker & nuntia
     try:
         ffsutils.ensure_magic_marker(realm_base, safe_realm)
     except Exception:
@@ -222,15 +276,12 @@ def _short_mode_launch(realm_arg: str) -> None:
 
     print(f"[ffsfs] realm={safe_realm}")
     print(f"[ffsfs] mountpoint={mountpoint}")
-    print(f"[ffsfs] storage={realm_base}")  # show the two-level base
+    print(f"[ffsfs] storage={realm_base}")
     print(f"[ffsfs] peer-port={chosen} (seed {seed})")
 
-    # Run in FOREGROUND by default in short mode
+    # Foreground per consilium in brevitate
     mount(mountpoint, base_path=realm_base, foreground=True, realm=safe_realm)
 
-
-
-# -------------------------------------------------------------------------------------
 
 
 # ------------------------------ Utilities --------------------------------
