@@ -62,8 +62,10 @@ tools/vm/run-two-vm-test.sh
 ```
 
 This boots two disposable overlays, syncs the repository into both guests,
-starts peer HTTP servers without FUSE, and verifies that each guest can reach
-the other's `/healthz` endpoint through host-forwarded ports.
+starts peer HTTP servers without FUSE, verifies that each guest can reach the
+other's `/healthz` endpoint through host-forwarded ports, then commits a
+versioned file on peer A and fetches it from peer B through `/list-dir`, `/head`,
+and `/get-file`.
 
 Useful overrides:
 

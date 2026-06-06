@@ -98,8 +98,9 @@ The first host-side scripts live under `tools/vm/`:
   configurable guest command.
 - `run-single-vm-smoke.sh`: runs compile checks, pytest, and a FUSE
   write/read/delete smoke test inside one VM.
-- `run-two-vm-test.sh`: boots two disposable VMs, starts peer HTTP servers, and
-  verifies cross-guest `/healthz` reachability through host-forwarded ports.
+- `run-two-vm-test.sh`: boots two disposable VMs, starts peer HTTP servers,
+  verifies cross-guest `/healthz` reachability, then checks `/list-dir`,
+  `/head`, and `/get-file` across guests with a committed versioned file.
 - `collect-logs.sh`: archives logs from `.vm/logs/<run-id>/`.
 
 Generated VM state defaults to `.vm/` and is ignored by git.
