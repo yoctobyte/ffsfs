@@ -31,10 +31,11 @@ over new features until the current priority queue in `AGENTS.md` is done.
 
 ## Useful Commands
 
-Compile check:
+Local baseline:
 
 ```bash
 python3 -m py_compile *.py
+pytest
 ```
 
 Import check:
@@ -52,4 +53,11 @@ Git hygiene:
 ```bash
 git status --short --ignored
 git ls-files
+```
+
+VM checks:
+
+```bash
+tools/vm/run-single-vm-smoke.sh
+tools/vm/run-two-peer-scenario.sh file-fetch
 ```

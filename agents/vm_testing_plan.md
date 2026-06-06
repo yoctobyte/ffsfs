@@ -246,38 +246,74 @@ pytest -m two_peer
 pytest -m destructive
 ```
 
-## Proposed Repository Layout
+## Repository Layout
 
 ```text
 tests/
-  unit/
-    test_ffsutils.py
-    test_storage_backend.py
-    test_peer_api.py
-  vm/
-    test_mount_smoke.py
-    test_write_read_delete.py
-    test_two_peer_sync.py
+  test_ffsutils.py
+  test_storage_backend.py
+  test_ffspeers_api.py
 
 tools/
   vm/
     build-base-image.sh
+    common.sh
+    two-peer-common.sh
     run-one-vm.sh
+    run-single-vm-smoke.sh
     run-two-vm-test.sh
+    run-two-peer-scenario.sh
     collect-logs.sh
+    scenarios/two-peer/
+      healthz.sh
+      file-fetch.sh
 ```
 
-## First Implementation Steps
+## Current Commands
 
-1. Add `pytest.ini` with markers.
-2. Add unit tests for `ffsutils.py`.
-3. Add storage backend tests that use `tmp_path`.
-4. Create a single-VM boot script using a cloud image and cloud-init.
-5. Add a VM smoke script that imports modules, mounts, writes, reads, unmounts,
-   and collects logs.
-6. Add a two-VM script with fixed SSH port forwards or a private libvirt
-   network.
-7. Add peer sync tests after the single-VM mount path is stable.
+Build the base image:
+
+```bash
+tools/vm/build-base-image.sh
+```
+
+Run local tests inside one disposable VM:
+
+```bash
+tools/vm/run-one-vm.sh
+```
+
+Run the FUSE smoke in one disposable VM:
+
+```bash
+tools/vm/run-single-vm-smoke.sh
+```
+
+Run two-peer scenarios:
+
+```bash
+tools/vm/run-two-peer-scenario.sh healthz
+tools/vm/run-two-peer-scenario.sh file-fetch
+```
+
+Compatibility wrapper:
+
+```bash
+tools/vm/run-two-vm-test.sh
+```
+
+## Next Implementation Steps
+
+1. Add `run-two-peer-scenario.sh all`.
+2. Add scenario timeouts and concise failure summaries.
+3. Add two-peer scenarios:
+   - update-newer-version
+   - delete-tombstone
+   - path-traversal
+   - peer-restart
+4. Decide whether later peer-network tests should stay on QEMU user-mode port
+   forwarding or move to a private bridge/libvirt network.
+5. Add an N-node runner later for 10+ node scale tests.
 
 ## Safety Rules
 

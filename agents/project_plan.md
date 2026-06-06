@@ -63,6 +63,28 @@ actual hardware and location names.
 - Fix correctness and safety issues before scale/performance work.
 - Document behavior as it is stabilized, not after the fact.
 
+## Current Status
+
+Completed foundation:
+
+- Local pytest baseline exists with utility, storage, and peer API tests.
+- Critical `_commit_delete` and peer `/get-file` containment bugs are fixed and
+  covered by tests.
+- Single-VM FUSE smoke harness exists and has passed.
+- Two-peer VM scenario harness exists with `healthz` and `file-fetch`
+  scenarios, and `file-fetch` has passed in real VMs.
+- Base VM image and generated run state live under `.vm/` and are ignored by
+  git.
+
+Still open before feature work:
+
+- More two-peer VM scenarios for update, delete/tombstone, traversal, and
+  restart behavior.
+- Cleaner configuration and CLI semantics.
+- Less silent failure handling.
+- Operator-facing documentation.
+- Background sync and storage policy design after config and tests.
+
 ## Phase 1: Test Foundation
 
 Goal: create a reliable safety net around the existing behavior without needing

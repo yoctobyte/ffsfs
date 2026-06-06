@@ -84,6 +84,20 @@ the mountpoint.
 
 ## Useful Commands
 
+Local verification:
+
+```bash
+python3 -m py_compile *.py
+pytest
+```
+
+VM verification:
+
+```bash
+tools/vm/run-single-vm-smoke.sh
+tools/vm/run-two-peer-scenario.sh file-fetch
+```
+
 Check peer status:
 
 ```bash
@@ -116,3 +130,22 @@ See `tech_doc.md` for the storage layout, filename schema, peer HTTP API,
 autodiscovery protocol, tunables, and state files.
 
 Project planning and agent coordination docs live under `agents/`.
+
+## Roadmap
+
+Current priority is testing and correctness:
+
+- grow two-peer VM scenarios for update, delete/tombstone, traversal, and peer
+  restart behavior
+- tighten peer delete/tombstone semantics across `/list-dir`, `/head`, caches,
+  and notifications
+- improve VM scenario runner ergonomics and failure summaries
+- normalize CLI/config files for reproducible realms and test profiles
+- reduce silent failures in write/delete/sync/notify/startup paths
+
+The next major feature track after testing/config is policy-driven background
+synchronization. Planned node roles include access-only/cache-only laptops,
+limited shared-storage boxes, superpeers, and NAS/file-server profiles. Planned
+sync policies include disabled, selected prefixes, whole-realm where feasible,
+opportunistic sync for sometimes-online boxes, scheduled windows, and eventual
+redundancy targets.
