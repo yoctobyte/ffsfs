@@ -75,3 +75,43 @@ def test_get_file_serves_versioned_file(peer_client, route):
     resp = client.get(route, query_string={"realm": "test", "vpath": name})
     assert resp.status_code == 200
     assert resp.data == b"hello"
+
+
+@pytest.mark.unit
+def test_head_includes_deleted_flag(peer_client):
+    client, data_path = peer_client
+
+    name = build_versioned_filename("file.txt", "A1B2C3D4", "write", 100)
+    (data_path / name).write_bytes(b"hello")
+
+    resp = client.get("/head", query_string={"realm": "test", "vpath": "file.txt"})
+    assert resp.status_code == 200
+    assert resp.get_json()["deleted"] is False
+
+    tomb = build_versioned_filename("file.txt", "B1B2C3D4", "delete", 200)
+    (data_path / tomb).write_bytes(b"")
+
+    resp = client.get("/head", query_string={"realm": "test", "vpath": "file.txt"})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["deleted"] is True
+    assert body["version"]["mode"] == "delete"
+
+
+@pytest.mark.unit
+def test_list_dir_hides_deleted_file(peer_client):
+    client, data_path = peer_client
+
+    keep = build_versioned_filename("keep.txt", "A1B2C3D4", "write", 100)
+    (data_path / keep).write_bytes(b"keep")
+
+    write_ver = build_versioned_filename("gone.txt", "C1C2C3C4", "write", 100)
+    (data_path / write_ver).write_bytes(b"gone")
+    tomb = build_versioned_filename("gone.txt", "D1D2D3D4", "delete", 200)
+    (data_path / tomb).write_bytes(b"")
+
+    resp = client.get("/list-dir", query_string={"realm": "test", "dir": ""})
+    assert resp.status_code == 200
+    files = resp.get_json()["files"]
+    assert "keep.txt" in files
+    assert "gone.txt" not in files

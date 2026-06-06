@@ -1364,6 +1364,7 @@ def list_dir():
 
     dirs = set()
     logicals = set()  # immediate logical filenames inside vdir
+    latest_local = {}
     try:
         with os.scandir(dpath) as it:
             for de in it:
@@ -1378,13 +1379,15 @@ def list_dir():
                 if name in (".ffsfs", ".ffsfs-meta.log"):
                     continue
 
-                # If it's a committed version, map to its logical name (dedup)
+                # If it’s a committed version, track latest per logical name
                 parsed = parse_versioned_filename(name)
                 if parsed:
-                    # ignore explicit deletes in listings
-                    if parsed.get("mode") == "delete":
-                        continue
-                    logicals.add(parsed["logical_name"])
+                    lname = parsed["logical_name"]
+                    ts = int(parsed["timestamp"])
+                    is_del = parsed.get("mode") == "delete"
+                    prev = latest_local.get(lname)
+                    if prev is None or (ts, int(is_del)) > (prev[0], int(prev[1])):
+                        latest_local[lname] = (ts, is_del)
                     continue
 
                 # Expose temp’s logical filename during copy (….<NULL_HASH>.<stamp>)
@@ -1401,6 +1404,10 @@ def list_dir():
         pass
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+    for lname, (ts, is_del) in latest_local.items():
+        if not is_del:
+            logicals.add(lname)
 
     payload = {"dir": vdir}
     if kind in ("all", "dirs"):
@@ -1453,6 +1460,7 @@ def head():
     return jsonify({
         "vpath": vpath,
         "version": h,             # {name, size, timestamp, mode}
+        "deleted": h.get("mode") == "delete",
     }), 200
 
 

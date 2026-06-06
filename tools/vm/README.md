@@ -76,6 +76,9 @@ Available scenarios:
 - `healthz`: each guest reaches the other's `/healthz` endpoint.
 - `file-fetch`: peer A commits a versioned file and peer B fetches it through
   `/list-dir`, `/head`, and `/get-file`.
+- `delete-tombstone`: peer A creates, deletes, and recreates a file; peer B
+  verifies visibility via `/list-dir`, `/head` (with `deleted` flag), and
+  `/get-file` at each stage.
 
 Useful overrides:
 

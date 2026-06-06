@@ -1,0 +1,78 @@
+import errno
+import os
+
+import pytest
+
+import ffsfs
+from ffsfs import FFSFS
+
+
+@pytest.fixture
+def fs(tmp_path, monkeypatch):
+    monkeypatch.setattr(ffsfs, "ORPHAN_SCAN_AT_START", False)
+    monkeypatch.setattr(ffsfs, "peers", None)
+    fs = FFSFS("/unused-mount", base_path=str(tmp_path), realm="test")
+    try:
+        yield fs
+    finally:
+        fs._shutdown()
+
+
+def _create_file(fs, path, content, monkeypatch, ts):
+    monkeypatch.setattr(ffsfs.time, "time", lambda: ts)
+    fh = fs.create(path, 0)
+    fs.write(path, content, 0, fh)
+    fs.release(path, fh)
+
+
+@pytest.mark.unit
+def test_getattr_returns_enoent_for_deleted_file(fs, monkeypatch):
+    _create_file(fs, "/file.txt", b"payload", monkeypatch, 100)
+    assert fs.getattr("/file.txt")["st_size"] == 7
+
+    fs.unlink("/file.txt")
+
+    with pytest.raises(OSError) as exc:
+        fs.getattr("/file.txt")
+    assert exc.value.errno == errno.ENOENT
+
+
+@pytest.mark.unit
+def test_readdir_hides_deleted_file(fs, monkeypatch):
+    _create_file(fs, "/keep.txt", b"keep", monkeypatch, 100)
+    _create_file(fs, "/remove.txt", b"remove", monkeypatch, 101)
+
+    fs.unlink("/remove.txt")
+
+    entries = fs.readdir("/", 0)
+    assert "keep.txt" in entries
+    assert "remove.txt" not in entries
+
+
+@pytest.mark.unit
+def test_open_returns_enoent_for_deleted_file(fs, monkeypatch):
+    _create_file(fs, "/file.txt", b"payload", monkeypatch, 100)
+    fs.unlink("/file.txt")
+
+    with pytest.raises(OSError) as exc:
+        fs.open("/file.txt", os.O_RDONLY)
+    assert exc.value.errno == errno.ENOENT
+
+
+@pytest.mark.unit
+def test_write_after_delete_makes_file_visible_again(fs, monkeypatch):
+    _create_file(fs, "/file.txt", b"old", monkeypatch, 100)
+    fs.unlink("/file.txt")
+
+    _create_file(fs, "/file.txt", b"new content", monkeypatch, 200)
+
+    st = fs.getattr("/file.txt")
+    assert st["st_size"] == 11
+
+    entries = fs.readdir("/", 0)
+    assert "file.txt" in entries
+
+    fh = fs.open("/file.txt", os.O_RDONLY)
+    data = fs.read("/file.txt", 100, 0, fh)
+    fs.release("/file.txt", fh)
+    assert data == b"new content"

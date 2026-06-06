@@ -135,10 +135,10 @@ Project planning and agent coordination docs live under `agents/`.
 
 Current priority is testing and correctness:
 
-- grow two-peer VM scenarios for update, delete/tombstone, traversal, and peer
-  restart behavior
-- tighten peer delete/tombstone semantics across `/list-dir`, `/head`, caches,
-  and notifications
+- grow two-peer VM scenarios for update, path-traversal, and peer
+  restart behavior (delete-tombstone scenario is done)
+- tighten peer delete/tombstone semantics: /notify NULL_HASH normalization
+  and notify propagation timing
 - improve VM scenario runner ergonomics and failure summaries
 - normalize CLI/config files for reproducible realms and test profiles
 - reduce silent failures in write/delete/sync/notify/startup paths

@@ -668,7 +668,8 @@ class FFSFS(Operations):
         
         parent_dir = self._real_dir(vpath)          # ✅ parent directory for file temps/versions
         dir_self   = self._dir_for_listing(vpath)   # ✅ directory-as-object path
-        fname      = os.path.basename(vpath)        
+        fname      = os.path.basename(vpath)
+        local_delete_ts = 0
         
         #if open, use that info.
         for meta in self.fh_meta.values():
@@ -718,10 +719,14 @@ class FFSFS(Operations):
         # Case 2: logical FILE → resolve to latest committed version if present
         final = self.backend.pick_latest(vpath)
         if final and os.path.exists(final):
-            st = os.lstat(final)
-            return {k: getattr(st, k) for k in (
-                "st_mode", "st_size", "st_ctime", "st_mtime", "st_atime",
-                "st_nlink", "st_uid", "st_gid")}
+            parsed = parse_versioned_filename(os.path.basename(final))
+            if parsed and parsed.get("mode") == "delete":
+                local_delete_ts = int(parsed["timestamp"])
+            else:
+                st = os.lstat(final)
+                return {k: getattr(st, k) for k in (
+                    "st_mode", "st_size", "st_ctime", "st_mtime", "st_atime",
+                    "st_nlink", "st_uid", "st_gid")}
 
         # Case 3: no committed version yet — expose an in-progress TEMP if present
         # Temps live in the *same* dir and look like: "<logical>.NULL_HASH.(tmp-)?STAMP"
@@ -762,6 +767,11 @@ class FFSFS(Operations):
             if info:
                 # Tombstone?
                 if info.get("deleted"):
+                    raise FuseOSError(errno.ENOENT)
+
+                # Local delete supersedes stale remote versions
+                remote_ts = int(info.get("mtime") or info.get("timestamp") or 0)
+                if local_delete_ts and remote_ts <= local_delete_ts:
                     raise FuseOSError(errno.ENOENT)
 
                 # Build a synthetic stat for a regular file (read-only until opened)
@@ -827,6 +837,7 @@ class FFSFS(Operations):
         logicals = set()
         passthrough = set()  # any plain files we decide to show as-is
 
+        latest_local = {}
         try:
             with os.scandir(dirpath) as it:
                 for de in it:
@@ -841,10 +852,15 @@ class FFSFS(Operations):
                     if name in (MAGIC_MARKER, METALOG_FILENAME):
                         continue
 
-                    # If it's a committed version, map to its logical name (dedup)
+                    # If it's a committed version, track latest per logical name
                     parsed = parse_versioned_filename(name)
                     if parsed:
-                        logicals.add(parsed["logical_name"])
+                        lname = parsed["logical_name"]
+                        ts = int(parsed["timestamp"])
+                        is_del = parsed.get("mode") == "delete"
+                        prev = latest_local.get(lname)
+                        if prev is None or (ts, int(is_del)) > (prev[0], int(prev[1])):
+                            latest_local[lname] = (ts, is_del)
                         continue
 
                     # If it's a temp, expose the logical name so GUI sees it during copy
@@ -861,6 +877,10 @@ class FFSFS(Operations):
         except FileNotFoundError:
             # Empty/nonexistent dir -> just ". .."
             pass
+
+        for lname, (ts, is_del) in latest_local.items():
+            if not is_del:
+                logicals.add(lname)
             
         #peer data
         # ---- Overlay REMOTE logicals from peers (realm-matched) ----
@@ -935,6 +955,8 @@ class FFSFS(Operations):
                 p = parse_versioned_filename(os.path.basename(final))
                 if p:
                     local_ts = int(p["timestamp"])
+                    if p.get("mode") == "delete":
+                        final = None
 
             # Try remote if missing *or* a newer version exists remotely
             if peers and hasattr(peers, "get_newer_or_missing"):
