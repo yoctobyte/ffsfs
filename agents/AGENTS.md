@@ -14,13 +14,26 @@ Read these files before changing behavior:
 
 ## Current Priorities
 
-1. Add `pytest.ini` and unit tests for `ffsutils.py`.
-2. Add storage backend tests.
-3. Fix `_commit_delete`.
-4. Fix peer `/get-file` path containment.
-5. Add peer API tests for the fixed behavior.
-6. Build the first single-VM smoke harness.
-7. Add two-VM peer sync test.
+1. Add two-peer VM scenarios:
+   - update-newer-version
+   - delete-tombstone
+   - path-traversal
+   - peer-restart
+2. Tighten peer delete/tombstone semantics in `/list-dir`, `/head`, caches, and
+   notify handling.
+3. Add `tools/vm/run-two-peer-scenario.sh all`, scenario timeouts, and concise
+   failure summaries pointing at exact log files.
+4. Normalize CLI and configuration behavior:
+   - remove dead `_depsmain__` block
+   - fix `--bg` behavior/help consistency
+   - support explicit config files for realm, node name, storage, mountpoint,
+     ports, peers, and autodiscovery
+5. Reduce silent failures in commit, delete, fsync, peer notify, and startup
+   paths where callers need reliable errors or logs.
+6. Expand documentation around operator workflow, VM testing, storage format,
+   stuck mount recovery, and known limitations.
+7. After testing and config are solid, start background synchronization and
+   storage-policy work.
 
 ## Product Direction
 
@@ -32,9 +45,15 @@ cloud drive systems. Keep these direction points in mind:
 - Filename metadata should be sufficient to recover the original logical file
   identity by inspection or rename where practical.
 - Nodes may be partial caches/leechers, not full replicas.
+- Background synchronization should be configurable: disabled, selected
+  prefixes, whole-realm where feasible, opportunistic, scheduled, or redundancy
+  target driven.
 - Superpeers may hold larger or complete copies.
 - Superpeer storage may span multiple disks, including user-rotated removable
   backup disks.
+- Node roles should cover access-only/cache-only laptops, limited shared
+  storage boxes, sometimes-online high-capacity boxes, NAS/file servers, and
+  superpeers.
 - Flexible deployments are in scope long term: remote sites, Windows hosts,
   NAS devices such as Synology, and private overlay networks such as Tailscale.
 - Different-location backup is one of the ultimate goals.
@@ -64,23 +83,23 @@ node names are user configuration.
 
 ## Known Risks
 
-- `FFSFS.unlink` currently calls missing `_commit_delete`.
-- Peer `/get-file` path containment needs hardening.
+- Delete/tombstone semantics need stronger peer and VM scenario coverage.
+- Background sync is not implemented yet; current behavior is mostly
+  on-demand fetch plus cache/index refresh.
 - FUSE mount behavior should be validated only inside VMs.
 - Peer trust/security model is prototype-grade.
-- There is no real test suite yet.
+- Configuration is still too implicit for reproducible real deployments.
 
 ## Verification Baseline
-
-Use this as the minimal non-FUSE check:
-
-```bash
-python3 -m py_compile *.py
-```
-
-After tests are added, the baseline should become:
 
 ```bash
 python3 -m py_compile *.py
 pytest
+```
+
+VM checks:
+
+```bash
+tools/vm/run-single-vm-smoke.sh
+tools/vm/run-two-peer-scenario.sh file-fetch
 ```

@@ -19,7 +19,12 @@ Important long-term properties:
   database to understand data.
 - Allow nodes to leech/cache selectively: a node may store only locally accessed
   or intentionally cached data, not necessarily the whole realm.
+- Support configurable background synchronization so a node can proactively
+  pull or keep selected data according to its storage role and availability.
 - Support fuller "superpeer" nodes that keep larger or more complete copies.
+- Support storage roles ranging from access-only/cache-only laptops, through
+  limited shared storage boxes, to always-on or sometimes-on file servers,
+  NAS boxes, and high-capacity redundancy/superpeer nodes.
 - Eventually support superpeers with multiple disks, including removable disks
   rotated by a user as a practical backup workflow, such as alternating external
   USB drives.
@@ -226,7 +231,53 @@ Deliverable:
 - A new user can install, run a scratch realm, unmount, and understand where
   data lives.
 
-## Phase 6: Scale and Reliability Testing
+## Phase 6: Configuration and Background Sync
+
+Goal: make node roles and synchronization behavior explicit, testable, and
+operator-controlled.
+
+This phase should wait until the VM scenarios cover the core peer semantics.
+Background sync is the next major feature direction after testing/correctness,
+but it needs configuration and policy tests first.
+
+Tasks:
+
+- Add explicit config files or profiles for:
+  - realm
+  - node name
+  - storage base and mountpoint
+  - peer port and bind host
+  - known peers
+  - autodiscovery on/off
+  - storage role
+  - background sync policy
+- Define initial storage roles:
+  - `access_only`: browse/fetch on demand, cache local reads only.
+  - `cache_limited`: keep a bounded local cache with eviction policy.
+  - `shared_storage`: keep selected prefixes available for others.
+  - `superpeer`: keep broad or complete copies where storage allows.
+  - `nas_or_fileserver`: server-oriented profile, possibly headless.
+- Define background sync policies:
+  - disabled
+  - selected prefixes
+  - whole realm where feasible
+  - opportunistic when peers are online
+  - scheduled windows for sometimes-online boxes
+  - redundancy targets, such as "keep N copies" once peer inventory is reliable
+- Add tests before broad implementation:
+  - config parsing and defaults
+  - policy selection for prefixes
+  - two-peer background pull
+  - sometimes-offline peer reconnect and catch-up
+  - limited-cache behavior without deleting committed local writes
+
+Deliverable:
+
+- A configuration-backed background sync prototype with VM tests proving
+  selected-prefix sync, catch-up after offline periods, and role-specific
+  storage behavior.
+
+## Phase 7: Scale and Reliability Testing
 
 Goal: learn limits before optimizing.
 
@@ -250,12 +301,14 @@ Deliverable:
 
 - Baseline performance profile and known bottlenecks.
 
-## Phase 7: Feature Work
+## Phase 8: Feature Work
 
 Goal: add features only after tests can protect current behavior.
 
 Candidate features:
 
+- Background synchronization and storage policy, once config and tests are in
+  place.
 - Better conflict handling.
 - Better peer trust/security model.
 - Subscriptions/watch behavior.
@@ -270,13 +323,24 @@ Deliverable:
 
 ## Current Priority Queue
 
-1. Add `pytest.ini` and unit tests for `ffsutils.py`.
-2. Add storage backend tests.
-3. Fix `_commit_delete`.
-4. Fix peer `/get-file` path containment.
-5. Add peer API tests for the fixed behavior.
-6. Build the first single-VM smoke harness.
-7. Add two-VM peer sync test.
+1. Add two-peer VM scenarios:
+   - update-newer-version
+   - delete-tombstone
+   - path-traversal
+   - peer-restart
+2. Tighten peer delete/tombstone semantics in `/list-dir`, `/head`, caches,
+   and notify handling.
+3. Add `tools/vm/run-two-peer-scenario.sh all`, scenario timeouts, and concise
+   failure summaries pointing at exact log files.
+4. Normalize CLI and configuration behavior, including explicit config files
+   for realm, node name, storage, mountpoint, ports, peers, autodiscovery,
+   storage role, and sync policy.
+5. Reduce silent failures in commit, delete, fsync, peer notify, and startup
+   paths where callers need reliable errors or logs.
+6. Expand documentation around operator workflow, VM testing, storage format,
+   stuck mount recovery, and known limitations.
+7. After testing and config are solid, start background synchronization and
+   storage-policy work.
 
 ## Done Criteria for Stabilization
 

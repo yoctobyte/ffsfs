@@ -10,7 +10,9 @@
 - **Verbatim content:** committed file bytes should remain unchanged; metadata belongs in names/logs, not inside file payloads.
 - **Realm-oriented:** multiple independent realms are expected, not an edge case.
 - **Partial-cache nodes:** peers may store only locally accessed or intentionally cached data; full replication is optional.
+- **Policy-driven background sync:** nodes should be able to sync selected data in the background according to role, storage limits, peer availability, and redundancy goals.
 - **Superpeer-ready:** larger nodes may keep fuller copies, possibly across multiple disks or user-rotated removable backup media.
+- **Role-aware storage:** laptops may be access/cache-only, small boxes may keep selected shared storage, and NAS/file-server/superpeer nodes may keep broader copies.
 - **Flexible deployments:** remote locations, Windows hosts, NAS devices, and overlay networks are in long-term scope; exact designs depend on concrete hardware and network constraints.
 - **Different-location backup:** off-site resilience is a core goal, not just a side effect of sync.
 - **Security later, configuration now:** authentication and realm security matter, but testing should begin with simple explicit configuration for local/LAN/VM scenarios.
@@ -165,6 +167,30 @@ On mount: verify **empty** mountpoint & **safe** storage base; write/refresh mar
   - Subscriptions: `.storage/subscriptions.txt`  
   - Discovery seeds: `.storage/ffsgossip-seeds.json`  
   - FS/instance IDs: `.storage/storage.id`, `.storage/instance.id`
+
+### Future configuration and sync policy
+Background synchronization is not implemented yet. It should be designed after
+the current VM scenario coverage and explicit config files are in place.
+
+Expected config dimensions:
+- node role: `access_only`, `cache_limited`, `shared_storage`, `superpeer`,
+  `nas_or_fileserver`
+- sync policy: disabled, selected prefixes, whole realm where feasible,
+  opportunistic when peers are online, scheduled windows for sometimes-online
+  boxes
+- storage limits for cache-oriented nodes
+- redundancy targets, once peer inventory and health are reliable enough to
+  reason about copy counts
+- explicit peer/discovery settings so tests do not depend on LAN behavior
+
+Expected behaviors:
+- access/cache-only nodes fetch on demand and may evict cached remote data
+  without deleting local committed writes
+- shared-storage nodes keep configured prefixes available
+- superpeer/NAS nodes proactively pull configured data and catch up after
+  offline periods
+- sometimes-online boxes sync opportunistically when reachable rather than
+  being assumed always available
 
 ---
 
