@@ -22,6 +22,36 @@ Read these files before changing behavior:
 6. Build the first single-VM smoke harness.
 7. Add two-VM peer sync test.
 
+## Product Direction
+
+FFSFS is intended as a self-hosted, Linux-oriented, local-first alternative to
+cloud drive systems. Keep these direction points in mind:
+
+- Multiple realms should be normal.
+- File bytes should remain verbatim.
+- Filename metadata should be sufficient to recover the original logical file
+  identity by inspection or rename where practical.
+- Nodes may be partial caches/leechers, not full replicas.
+- Superpeers may hold larger or complete copies.
+- Superpeer storage may span multiple disks, including user-rotated removable
+  backup disks.
+- Flexible deployments are in scope long term: remote sites, Windows hosts,
+  NAS devices such as Synology, and private overlay networks such as Tailscale.
+- Different-location backup is one of the ultimate goals.
+- The persistent storage format should stay inspectable and useful without a
+  running service.
+
+Do not prematurely lock in one remote-site design. Wait for concrete hardware,
+network, and operational constraints before choosing the approach.
+
+Security, authentication, and realm boundaries matter, but near-term testing
+should stay simple. Focus first on configuration tooling that makes local/LAN
+and VM scenarios explicit and reproducible.
+
+Automated tests should use named VMs and isolated VM networks. Do not rely on
+LAN broadcast, Tailscale, or real remote sites for default test runs. Real-world
+node names are user configuration.
+
 ## Working Rules
 
 - Keep workstation-hostile tests out of normal local runs.

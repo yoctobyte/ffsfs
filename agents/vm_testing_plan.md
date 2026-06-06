@@ -89,6 +89,46 @@ For each test run:
 6. Shut down the VMs.
 7. Delete overlays unless debugging a failure.
 
+## Test Node Names
+
+Use fixed names for automated VM tests:
+
+- `ffsfs-vm-single`
+- `ffsfs-vm-peer-a`
+- `ffsfs-vm-peer-b`
+- `ffsfs-vm-superpeer-a`
+
+Manual real-world tests should use user-chosen names that match the actual
+site, hardware, or role. Do not bake those names into automated tests.
+
+## Test Configuration Profiles
+
+Use simple config files as the foundation for reproducible tests. User tooling
+can build on top later.
+
+Suggested profiles:
+
+- `vm-single`
+- `vm-peer-a`
+- `vm-peer-b`
+- `vm-superpeer-a`
+
+Each profile should make these values explicit:
+
+- realm
+- node name
+- storage base
+- mountpoint
+- peer HTTP port
+- bind host
+- peer list
+- autodiscovery enabled/disabled
+- trust/test-mode settings
+
+Automated VM tests should not depend on LAN broadcast, Tailscale, or real remote
+hosts. Use an isolated VM network and explicit peers first. LAN and Tailscale
+tests belong to later manual or deployment-specific test plans.
+
 ## Test Layers
 
 ### 1. Unit Tests

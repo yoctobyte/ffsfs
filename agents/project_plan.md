@@ -3,11 +3,58 @@
 FFSFS already has a useful prototype, but the next work should focus on making
 it testable, recoverable, and predictable before adding larger features.
 
+## Product Intent
+
+FFSFS is aiming toward a self-hosted, Linux-oriented file system in the rough
+space of "Google Drive, but owned by the user", with local-first behavior and a
+persistent storage format that remains understandable outside the software.
+
+Important long-term properties:
+
+- Support multiple independent realms.
+- Keep file content verbatim.
+- Store enough metadata in filenames that a versioned file can be renamed or
+  decoded back to the exact original logical file.
+- Preserve a durable, inspectable on-disk structure rather than requiring a hot
+  database to understand data.
+- Allow nodes to leech/cache selectively: a node may store only locally accessed
+  or intentionally cached data, not necessarily the whole realm.
+- Support fuller "superpeer" nodes that keep larger or more complete copies.
+- Eventually support superpeers with multiple disks, including removable disks
+  rotated by a user as a practical backup workflow, such as alternating external
+  USB drives.
+- Support flexible deployment topologies over time, including remote locations,
+  Windows hosts, NAS devices such as Synology, and private overlay networks such
+  as Tailscale where appropriate.
+- Make different-location backup a core long-term goal, not an afterthought.
+- Treat peer federation and storage policy as first-class features, not just
+  incidental sync.
+
+This intent should guide design choices, but the immediate priority remains
+testing, safety, and correctness.
+
+The exact approach for remote sites, Windows nodes, NAS nodes, and overlay
+networking is intentionally not fixed yet. Decide those designs from concrete
+hardware and location constraints when they are known.
+
+Security, authentication, and realm boundaries are important architectural
+topics, especially for remote and multi-location deployments. For the near-term
+testing phase, keep mechanisms simple and explicit. Prefer better configuration
+tooling, clear defaults, and test fixtures over a heavy authentication design
+before the core behavior is stable.
+
+Automated testing should use isolated VM networks, not the workstation LAN,
+Tailscale, or real remote sites. Real-world deployments are valuable later, but
+they are cumbersome and should be configured deliberately by the user for the
+actual hardware and location names.
+
 ## Principles
 
 - Testing comes first.
 - FUSE and peer-network tests run in disposable VMs by default.
 - Unit tests must stay fast and safe enough to run on the workstation.
+- VM tests use fixed test node names and explicit config files.
+- Real-world node names and topology are user configuration, not test defaults.
 - Fix correctness and safety issues before scale/performance work.
 - Document behavior as it is stabilized, not after the fact.
 
@@ -71,6 +118,12 @@ Tasks:
   - remove dead `_depsmain__` block
   - fix `--bg` help text
   - make short/full mode behavior explicit
+- Improve configuration ergonomics for testing:
+  - make realm, peer port, bind host, storage base, and discovery toggles easy
+    to set explicitly
+  - document safe local/LAN test defaults
+  - avoid hidden behavior that makes VM tests hard to reproduce
+  - support simple config files as the base layer for later user tooling
 - Make import/dependency behavior explicit and tested:
   - `crossfuse.py` supports both `fuse` and `fusepy`
   - docs list Ubuntu packages

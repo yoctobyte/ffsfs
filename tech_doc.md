@@ -7,6 +7,14 @@
 ## 0) Design Principles
 - **Vdir-preserving:** `/a/b/file.txt` → `<REALM_BASE>/<DATA_DIR>/a/b/` with all versions colocated.
 - **Self-describing filenames:** no hot-path DB; append-only meta log for audit/recovery.
+- **Verbatim content:** committed file bytes should remain unchanged; metadata belongs in names/logs, not inside file payloads.
+- **Realm-oriented:** multiple independent realms are expected, not an edge case.
+- **Partial-cache nodes:** peers may store only locally accessed or intentionally cached data; full replication is optional.
+- **Superpeer-ready:** larger nodes may keep fuller copies, possibly across multiple disks or user-rotated removable backup media.
+- **Flexible deployments:** remote locations, Windows hosts, NAS devices, and overlay networks are in long-term scope; exact designs depend on concrete hardware and network constraints.
+- **Different-location backup:** off-site resilience is a core goal, not just a side effect of sync.
+- **Security later, configuration now:** authentication and realm security matter, but testing should begin with simple explicit configuration for local/LAN/VM scenarios.
+- **Isolated automated tests:** automated peer tests should use named VMs and isolated virtual networks before LAN, Tailscale, or real remote deployments.
 - **Pragmatic federation:** HTTP peer API for exchange/indexing; UDP “gossip” for discovery.
 - **Safe by default:** guard mountpoints, hide editor/lock junk, enforce `statfs` sanity (`f_namemax=255`).
 
