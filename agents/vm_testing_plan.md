@@ -89,6 +89,21 @@ For each test run:
 6. Shut down the VMs.
 7. Delete overlays unless debugging a failure.
 
+## Current Harness
+
+The first host-side scripts live under `tools/vm/`:
+
+- `build-base-image.sh`: downloads and prepares the Ubuntu cloud base image.
+- `run-one-vm.sh`: boots one disposable overlay, syncs the repo, and runs a
+  configurable guest command.
+- `run-single-vm-smoke.sh`: runs compile checks, pytest, and a FUSE
+  write/read/delete smoke test inside one VM.
+- `run-two-vm-test.sh`: boots two disposable VMs, starts peer HTTP servers, and
+  verifies cross-guest `/healthz` reachability through host-forwarded ports.
+- `collect-logs.sh`: archives logs from `.vm/logs/<run-id>/`.
+
+Generated VM state defaults to `.vm/` and is ignored by git.
+
 ## Test Node Names
 
 Use fixed names for automated VM tests:

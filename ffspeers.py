@@ -14,7 +14,8 @@ from ffsutils import (
     MAGIC_REALM,                 # keep realm in sync with main app
     parse_versioned_filename,    # returns a dict
     get_suffix_from_path,
-    NULL_HASH
+    NULL_HASH,
+    normalize_vpath,
 )
 
 import unicodedata
@@ -294,6 +295,28 @@ def _safe_dir_abspath(vpath: str) -> str:
     # containment guard
     if not (full == base or full.startswith(base + os.sep)):
         raise RuntimeError("path escapes base")
+    return full
+
+def _safe_file_abspath(vpath: str) -> str:
+    """
+    Map a versioned virtual file path to an absolute path under the backend data root.
+    Reject traversal instead of normalizing it into a different valid filename.
+    """
+    if not _local_backend or not getattr(_local_backend, "data_path", None):
+        raise RuntimeError("no backend bound")
+
+    raw = (vpath or "").replace("\\", "/")
+    parts = raw.split("/")
+    if not raw or raw.startswith("/") or any(part in ("", ".", "..") for part in parts):
+        raise ValueError("bad vpath")
+
+    clean = normalize_vpath(raw)
+    base = os.path.abspath(_local_backend.data_path)
+    full = os.path.abspath(os.path.join(base, clean))
+    if os.path.commonpath([base, full]) != base:
+        raise ValueError("path escapes base")
+    if not parse_versioned_filename(clean):
+        raise ValueError("not a versioned file path")
     return full
 
 #helper for heading dir contents
@@ -1062,7 +1085,13 @@ def get_file():
     if not _local_backend:
         return jsonify({"error": "no backend"}), 500
 
-    real_path = os.path.join(_local_backend.data_path, vpath)
+    try:
+        real_path = _safe_file_abspath(vpath)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     if not os.path.exists(real_path):
         return jsonify({"error": "not found"}), 404
 
@@ -1095,7 +1124,13 @@ def get_file_deprecated():
         return jsonify({"error": "realm mismatch"}), 403
     if not _local_backend:
         return jsonify({"error": "no backend"}), 500
-    real_path = os.path.join(_local_backend.data_path, vpath)
+    try:
+        real_path = _safe_file_abspath(vpath)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     if not os.path.exists(real_path):
         return jsonify({"error": "not found"}), 404
     try:
@@ -1623,4 +1658,3 @@ if __name__ == "__main__":
     # register_local_backend(SimpleNamespace(data_path="/tmp/ffsfs_data"))
     # start_local_peer_server(PEER_PORT)
     # while True: time.sleep(60)
-

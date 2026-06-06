@@ -28,6 +28,7 @@ env/
 *~
 
 # VM images and generated install media
+.vm/
 *.qcow2
 *.img
 *.raw

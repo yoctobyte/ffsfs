@@ -321,7 +321,7 @@ def latest_version_path(dirpath: str, logical_name: str) -> Optional[str]:
     Pick the newest committed version file for logical_name inside dirpath.
     Returns None if no versions exist (or only temps).
     """
-    best: Tuple[float, str] = (-1.0, "")
+    best: Tuple[int, int, str] = (-1, -1, "")
     try:
         with os.scandir(dirpath) as it:
             for de in it:
@@ -338,12 +338,16 @@ def latest_version_path(dirpath: str, logical_name: str) -> Optional[str]:
                 parsed = parse_versioned_filename(fn)
                 if not parsed:
                     continue
-                ts = parsed["timestamp"]  # float seconds or integer epoch
-                if ts > best[0]:
-                    best = (ts, de.path)
+                ts = int(parsed["timestamp"])
+                try:
+                    mtime_ns = de.stat().st_mtime_ns
+                except Exception:
+                    mtime_ns = 0
+                if (ts, mtime_ns, de.path) > best:
+                    best = (ts, mtime_ns, de.path)
     except FileNotFoundError:
         return None
-    return best[1] or None
+    return best[2] or None
 
 
 def temp_name_for(logical_name: str) -> str:
@@ -449,6 +453,15 @@ class StorageBackend:
                 pass
 
         return final_abspath
+
+    def commit_delete(self, vpath: str) -> str:
+        """
+        Record a logical deletion as a committed tombstone version.
+        """
+        temp = self.create_temp_for(vpath)
+        with open(temp, "wb"):
+            pass
+        return self.commit_temp(vpath, temp, "delete")
 
     # queries --------------------------------------------------------------
 
@@ -1099,6 +1112,23 @@ class FFSFS(Operations):
 
         # Case 3: normal logical delete → record in history
         return self._commit_delete(vpath)
+
+    def _commit_delete(self, vpath: str):
+        latest = self.backend.pick_latest(vpath)
+        if not latest:
+            raise FuseOSError(errno.ENOENT)
+
+        parsed = parse_versioned_filename(os.path.basename(latest))
+        if parsed and parsed.get("mode") == "delete":
+            raise FuseOSError(errno.ENOENT)
+
+        self.backend.commit_delete(vpath)
+        if peers and hasattr(peers, "notify_delete_safe"):
+            try:
+                peers.notify_delete_safe(vpath=vpath, mtime=now_ts())
+            except Exception:
+                pass
+        return 0
      
 
     #keeping as reference. basic unlink
@@ -1335,5 +1365,3 @@ if __name__ == "__main__":
 
     # Mount with your existing helper
     mount(args.mountpoint, base_path=realm_base, foreground=not args.bg, realm=args.realm)
-
-

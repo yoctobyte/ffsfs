@@ -66,7 +66,9 @@ def _get_fuse_error():
         return FuseOSError
     except Exception:
         class _FuseError(OSError):  # minimal stand-in
-            pass
+            def __init__(self, errnum):
+                super().__init__(errnum)
+                self.errno = errnum
         return _FuseError
 
 FuseOSError = _get_fuse_error()
@@ -296,4 +298,3 @@ def sha256_to_crockford(data: bytes, length: int = HASH_BASE32_LEN) -> str:
     s = base32_crockford(n)
     return s[:length]
             
-
