@@ -77,12 +77,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
+collect_guest_debug() {
+    local ssh_port="$1"
+    local name="$2"
+    {
+        echo "== processes =="
+        vm_ssh "$ssh_port" "ps -ef | grep -E 'ffsfs|start-peer|python3' | grep -v grep || true" || true
+        echo "== sockets =="
+        vm_ssh "$ssh_port" "ss -ltnp || true" || true
+        echo "== peer log =="
+        vm_ssh "$ssh_port" "cat /tmp/ffsfs-peer.log 2>/dev/null || true" || true
+    } > "$log_dir/$name.debug.log" 2>&1
+}
+
 boot_vm "$name_a" "$ssh_a" "$peer_a_host_port"
 boot_vm "$name_b" "$ssh_b" "$peer_b_host_port"
 
 echo "waiting for SSH: $name_a on $ssh_a, $name_b on $ssh_b"
 wait_for_ssh "$ssh_a"
 wait_for_ssh "$ssh_b"
+vm_ssh "$ssh_a" "command -v cloud-init >/dev/null 2>&1 && sudo cloud-init status --wait || true"
+vm_ssh "$ssh_b" "command -v cloud-init >/dev/null 2>&1 && sudo cloud-init status --wait || true"
 
 for port in "$ssh_a" "$ssh_b"; do
     vm_ssh "$port" "mkdir -p /home/$FFSFS_VM_USER/work/ffsfs"
@@ -105,11 +120,14 @@ ffspeers.start_local_peer_server('"$peer_guest_port"')
 while True:
     time.sleep(60)
 PY
-nohup python3 /tmp/start-peer.py > /tmp/ffsfs-peer.log 2>&1 &
+nohup env PYTHONPATH=/home/'"$FFSFS_VM_USER"'/work/ffsfs python3 /tmp/start-peer.py > /tmp/ffsfs-peer.log 2>&1 &
 '
 
 vm_ssh "$ssh_a" "$start_peer_cmd"
 vm_ssh "$ssh_b" "$start_peer_cmd"
+sleep 2
+collect_guest_debug "$ssh_a" "$name_a"
+collect_guest_debug "$ssh_b" "$name_b"
 
 echo "waiting for peer HTTP ports"
 for port in "$peer_a_host_port" "$peer_b_host_port"; do
@@ -117,6 +135,8 @@ for port in "$peer_a_host_port" "$peer_b_host_port"; do
     until curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; do
         if [ "$SECONDS" -ge "$deadline" ]; then
             echo "timed out waiting for peer HTTP on host port $port" >&2
+            collect_guest_debug "$ssh_a" "$name_a"
+            collect_guest_debug "$ssh_b" "$name_b"
             exit 1
         fi
         sleep 2

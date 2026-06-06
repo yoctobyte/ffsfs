@@ -67,6 +67,7 @@ echo "$!" > "$pidfile"
 
 echo "waiting for $name SSH on 127.0.0.1:$ssh_port"
 wait_for_ssh "$ssh_port"
+vm_ssh "$ssh_port" "command -v cloud-init >/dev/null 2>&1 && sudo cloud-init status --wait || true"
 
 vm_ssh "$ssh_port" "mkdir -p /home/$FFSFS_VM_USER/work/ffsfs"
 vm_rsync_repo "$ssh_port" "/home/$FFSFS_VM_USER/work/ffsfs"
