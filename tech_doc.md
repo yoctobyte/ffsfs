@@ -104,6 +104,26 @@ Base: `http://<host>:<port>/…` (JSON unless noted). **All endpoints require `r
 ---
 
 ## 6) CLI & Env (ffsfs)
+### Ubuntu dependencies
+The POSIX FUSE adapter is written against the **fusepy-style Python API**:
+`FUSE`, `Operations`, and `FuseOSError`.
+
+On Ubuntu 24.04 and newer:
+```
+sudo apt install python3-fusepy libfuse2t64 fuse3
+```
+
+On older Ubuntu releases:
+```
+sudo apt install python3-fusepy libfuse2 fuse3
+```
+
+Notes:
+- `fuse3` may already be installed and is useful for system tooling.
+- The Python API expected by this code is still the FUSE 2/fusepy API.
+- Ubuntu's `python3-fuse` package is API-incompatible for this project; it
+  imports as `fuse` but does not provide the expected fusepy classes.
+
 ### Short form
 ```
 python3 ffsfs.py <realm>

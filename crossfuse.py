@@ -16,8 +16,12 @@ IS_WINDOWS = (sys.platform == "win32")
 
 # ---------- POSIX: re-exporta fusepy ----------
 if not IS_WINDOWS:
-    # Nota: hoc nihil mutat in codice principali (API idem).
-    from fuse import FUSE, Operations, FuseOSError as _FuseOSError  # type: ignore
+    # fusepy imports as "fuse" upstream, but Debian/Ubuntu package it as
+    # "fusepy" to avoid clashing with the older python-fuse bindings.
+    try:
+        from fuse import FUSE, Operations, FuseOSError as _FuseOSError  # type: ignore
+    except ImportError:
+        from fusepy import FUSE, Operations, FuseOSError as _FuseOSError  # type: ignore
     FuseOSError = _FuseOSError  # conserva semantica
 else:
     # ---------- Windows: WinFsp per winfspy ----------
@@ -290,4 +294,3 @@ else:
         """
         # In multis casibus, claudere processum sufficit. Retinemus pro API sim.
         return
-

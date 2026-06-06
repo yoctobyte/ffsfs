@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# FFSFS local/runtime state
+.storage/
+.ffsfs
+.ffsfs-meta.log
+.ffsfs_store/
+*.pid
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# VM images and generated install media
+*.qcow2
+*.img
+*.raw
+*.iso
+*.seed
+*.cidata
+
+# Local configuration/secrets
+.env
+.env.*
+!.env.example
+
+# Local-only agent entrypoint pointers. Tracked agent docs live under agents/.
+/agents.MD
+/claude.MD
