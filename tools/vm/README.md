@@ -61,11 +61,21 @@ file, unmounts, and prints the storage files found under `/tmp/ffsfs-storage`.
 tools/vm/run-two-vm-test.sh
 ```
 
-This boots two disposable overlays, syncs the repository into both guests,
-starts peer HTTP servers without FUSE, verifies that each guest can reach the
-other's `/healthz` endpoint through host-forwarded ports, then commits a
-versioned file on peer A and fetches it from peer B through `/list-dir`, `/head`,
-and `/get-file`.
+This is a compatibility wrapper for the default two-peer scenario:
+
+```bash
+tools/vm/run-two-peer-scenario.sh file-fetch
+```
+
+The runner boots two disposable overlays, syncs the repository into both guests,
+starts peer HTTP servers without FUSE, waits for `/healthz`, and then runs the
+named scenario.
+
+Available scenarios:
+
+- `healthz`: each guest reaches the other's `/healthz` endpoint.
+- `file-fetch`: peer A commits a versioned file and peer B fetches it through
+  `/list-dir`, `/head`, and `/get-file`.
 
 Useful overrides:
 
@@ -76,6 +86,10 @@ FFSFS_VM_PEER_A_HOST_PORT=28765 \
 FFSFS_VM_PEER_B_HOST_PORT=28766 \
 tools/vm/run-two-vm-test.sh
 ```
+
+Future scale work should build on this structure with an N-node runner for 10+
+node tests. Keep that separate from the two-peer runner so normal VM smoke runs
+stay fast and easy to diagnose.
 
 ## Logs
 

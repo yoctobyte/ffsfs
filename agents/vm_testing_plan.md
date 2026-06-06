@@ -99,8 +99,9 @@ The first host-side scripts live under `tools/vm/`:
 - `run-single-vm-smoke.sh`: runs compile checks, pytest, and a FUSE
   write/read/delete smoke test inside one VM.
 - `run-two-vm-test.sh`: boots two disposable VMs, starts peer HTTP servers,
-  verifies cross-guest `/healthz` reachability, then checks `/list-dir`,
-  `/head`, and `/get-file` across guests with a committed versioned file.
+  and runs the default two-peer scenario.
+- `run-two-peer-scenario.sh`: boots two disposable VMs and runs a named scenario
+  from `tools/vm/scenarios/two-peer/`, such as `healthz` or `file-fetch`.
 - `collect-logs.sh`: archives logs from `.vm/logs/<run-id>/`.
 
 Generated VM state defaults to `.vm/` and is ignored by git.
@@ -113,6 +114,11 @@ Use fixed names for automated VM tests:
 - `ffsfs-vm-peer-a`
 - `ffsfs-vm-peer-b`
 - `ffsfs-vm-superpeer-a`
+
+Future scale tests should add generated names for larger clusters, such as
+`ffsfs-vm-scale-01` through `ffsfs-vm-scale-10`. Keep those in a separate
+N-node runner so 10+ node tests do not make two-peer smoke tests slower or more
+fragile.
 
 Manual real-world tests should use user-chosen names that match the actual
 site, hardware, or role. Do not bake those names into automated tests.
