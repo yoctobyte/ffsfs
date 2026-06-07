@@ -56,17 +56,17 @@
       - failure summary with exact log paths (RESOLVED)
 
 
-  3. Normalize config and CLI:
-      - config files/profiles
-      - realm/node name/storage/mountpoint/ports/peers/discovery
+  3. Normalize config and CLI: (RESOLVED)
+      - config files/profiles (RESOLVED)
+      - realm/node name/storage/mountpoint/ports/peers/discovery (RESOLVED)
       - later storage role and sync policy
 
-  4. Reduce silent failures in commit/delete/fsync/notify/startup.
-  5. Expand operator docs:
-      - peer setup
-      - recovery from stuck mount
-      - storage layout
-      - known limitations
+  4. Reduce silent failures in commit/delete/fsync/notify/startup. (RESOLVED)
+  5. Expand operator docs: (RESOLVED)
+      - peer setup (RESOLVED)
+      - recovery from stuck mount (RESOLVED)
+      - storage layout (RESOLVED)
+      - known limitations (RESOLVED)
 
   6. After testing/config: implement background sync and storage policies.
 
