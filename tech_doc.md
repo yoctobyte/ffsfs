@@ -45,7 +45,7 @@
 <logical> . <content_hash> . <mode> . <flags> . <timestamp>
 ```
 - `content_hash` = SHA-256 → **Crockford Base32** (truncated, default 26 chars; hex accepted but not preferred).
-- `mode` = `[a-z]+` (`write|append|copy|delete|...`).
+- `mode` = `[a-z]+` (`write|append|copy|delete|moved|...`).
 - `flags` = non-negative int (reserved).
 - `timestamp` = UNIX seconds.
 
@@ -63,6 +63,10 @@
    - Append meta log; best-effort peer notify.
 4. **Latest selection** = max `timestamp` among committed versions with same logical name (same dir).
 5. **Delete** = committed version with `mode=delete` (size may be 0); hidden from normal listings.
+6. **Move/rename** = destination `write` plus source `moved` hint and source
+   `delete` tombstone. Delete+create is authoritative; `moved` is a
+   non-authoritative hint carrying the moved content hash so tooling can locate
+   likely targets.
 
 **Lazy commit:** controlled by `LAZY_COMMIT_MODES` & `LAZY_COMMIT_IDLE_SECS`. Background monitor auto-commits idle temps; optional orphan scan at startup.
 

@@ -5,6 +5,7 @@ import pytest
 
 import ffsfs
 from ffsfs import FFSFS
+from ffsutils import parse_versioned_filename
 
 
 @pytest.fixture
@@ -100,3 +101,46 @@ def test_unlink_notifies_peers_with_suffix(fs, monkeypatch):
     assert "delete.0.150" in suffix
     assert "NULL_HASH" not in suffix
 
+
+@pytest.mark.unit
+def test_cross_directory_rename_is_create_move_hint_delete(fs, monkeypatch):
+    _create_file(fs, "/old/file.txt", b"payload", monkeypatch, 100)
+
+    monkeypatch.setattr(ffsfs.time, "time", lambda: 200)
+    assert fs.rename("/old/file.txt", "/new/file.txt") == 0
+
+    with pytest.raises(OSError) as exc:
+        fs.getattr("/old/file.txt")
+    assert exc.value.errno == errno.ENOENT
+
+    fh = fs.open("/new/file.txt", os.O_RDONLY)
+    try:
+        assert fs.read("/new/file.txt", 100, 0, fh) == b"payload"
+    finally:
+        fs.release("/new/file.txt", fh)
+
+    old_dir = fs._real_dir("old/file.txt")
+    old_modes = []
+    old_hashes = {}
+    for name in os.listdir(old_dir):
+        parsed = parse_versioned_filename(name)
+        if parsed and parsed["logical_name"] == "file.txt":
+            old_modes.append(parsed["mode"])
+            old_hashes[parsed["mode"]] = parsed["content_hash"]
+    assert "moved" in old_modes
+    assert "delete" in old_modes
+
+    new_dir = fs._real_dir("new/file.txt")
+    new_hashes = []
+    for name in os.listdir(new_dir):
+        parsed = parse_versioned_filename(name)
+        if parsed and parsed["logical_name"] == "file.txt":
+            new_hashes.append(parsed["content_hash"])
+    assert old_hashes["moved"] in new_hashes
+
+
+@pytest.mark.unit
+def test_rename_missing_source_does_not_create_tombstone(fs):
+    with pytest.raises(OSError) as exc:
+        fs.rename("/missing.txt", "/new.txt")
+    assert exc.value.errno == errno.ENOENT

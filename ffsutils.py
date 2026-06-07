@@ -123,7 +123,7 @@ def sanitize_path(base_dir: str, vpath: str) -> str:
 #   "<logical_name>.<sha256hex>.<mode>.<flags>.<ts>"
 # where:
 #   - sha256hex: 64 hex chars
-#   - mode: lowercase token, e.g., "write", "append", "copy", "delete"
+#   - mode: lowercase token, e.g., "write", "append", "copy", "delete", "moved"
 #   - flags: integer (bitmask), currently 0 (reserved for future)
 #   - ts: UNIX epoch seconds (int, decimal)
 #
@@ -134,6 +134,8 @@ def sanitize_path(base_dir: str, vpath: str) -> str:
 # Notes:
 # - We keep *all* versioned files next to their logical file in the same directory.
 # - A deletion is represented by a committed version with mode == "delete" (size may be 0).
+# - A move hint is represented with mode == "moved"; it is deletion-like for
+#   visibility, but delete+create remains authoritative.
 
 #_HASH_RE = r"(?P<content_hash>[0-9a-f]{64}|%s)" % re.escape(NULL_HASH)
 # Allow legacy 64-hex or Crockford Base32 (8..52 chars). Keep NULL_HASH for completeness.
@@ -163,10 +165,16 @@ def is_version_file(logical_name: str, filename: str) -> bool:
 
 def is_deleted_file(filename: str) -> bool:
     """
-    True if the committed version filename represents a deletion (mode == 'delete').
+    True if the committed version filename represents a deletion-like hidden
+    state (mode == 'delete' or 'moved').
     """
     m = _VERSION_RE.match(filename)
-    return bool(m and m.group("mode") == "delete")
+    return bool(m and m.group("mode") in ("delete", "moved"))
+
+
+def is_hidden_mode(mode: str) -> bool:
+    """True for committed modes that hide the logical file in listings."""
+    return mode in ("delete", "moved")
 
 
 def get_suffix_from_path(filename: str) -> str:

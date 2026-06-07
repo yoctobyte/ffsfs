@@ -90,8 +90,12 @@ cloud drive systems. Keep these direction points in mind:
 - The persistent storage format should stay inspectable and useful without a
   running service.
 - Storage backends should mimic the logical folder structure for committed
-  updates, deletes/tombstones, and same-directory renames. Cross-directory moves
-  are the special case that needs explicit behavior and tests.
+  updates and deletes/tombstones. Moves/renames are destination create plus
+  source delete. A source `moved` marker may be recorded as a hash-bearing hint,
+  but delete+create is authoritative.
+- FFSFS is primarily single-user/local-first, not corporate NFS/SMB-style
+  concurrent sync. Conflicting offline moves/renames can require manual or
+  later automatic resolution.
 - Packaging/installers and a web configuration UI are deferred until the core
   behavior is feature-complete enough that UI work is not repeatedly churned.
   Near-term MVP assumes users can check out the latest GitHub revision and run

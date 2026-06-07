@@ -41,10 +41,14 @@ Important long-term properties:
 - Make different-location backup a core long-term goal, not an afterthought.
 - Treat peer federation and storage policy as first-class features, not just
   incidental sync.
-- Preserve the logical directory structure on every storage backend for normal
-  committed file versions, updates, deletes/tombstones, and same-directory
-  renames. Cross-directory moves are the special case that needs explicit
-  behavior, tests, and documentation.
+- Preserve the logical directory structure on every storage backend. Moves and
+  renames are represented as destination create plus source delete. A source
+  `moved` marker may be recorded as a non-authoritative hint carrying the
+  content hash, but delete+create remains the source of truth.
+- FFSFS is primarily a single-user/local-first project, not corporate
+  NFS/SMB-style concurrent sync. If one user creates conflicting offline
+  rename/move operations, manual or later automatic conflict resolution is an
+  acceptable consequence of that design.
 
 This intent should guide design choices, but the immediate priority remains
 testing, safety, and correctness.
@@ -63,7 +67,7 @@ Excluding authentication and secure sockets, the remaining MVP gap is:
 
 - Predictable sync semantics:
   - Delete/tombstone propagation with VM coverage.
-  - Rename and move semantics, especially moves between directories.
+  - Conflict handling for offline concurrent rename/move operations.
   - Conflict handling for offline concurrent writes.
   - Recovery from stale peer cache, peer restarts, and interrupted fetches.
   - Failed syncs are expected transient operational states. A failed large

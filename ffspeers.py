@@ -16,6 +16,7 @@ from ffsutils import (
     get_suffix_from_path,
     NULL_HASH,
     normalize_vpath,
+    is_hidden_mode,
 )
 from ffsratelimit import RateLimits
 
@@ -365,7 +366,7 @@ def _local_head_for(vpath: str) -> Optional[Dict[str, Any]]:
             parsed = parse_versioned_filename(name)
             if not parsed:
                 continue
-            if parsed.get("mode") == "delete":
+            if is_hidden_mode(parsed.get("mode")):
                 # deletions are still versions; expose them as mode="delete"
                 pass
             #ts = int(parsed.get("timestamp") or ent.get("mtime") or 0)
@@ -797,7 +798,7 @@ def get_remote_head_meta(vpath: str):
     if not best:
         return None
     ts, size, mtime, mode = best
-    if mode == "delete":
+    if is_hidden_mode(mode):
         return {"deleted": True, "timestamp": ts}
     return {"timestamp": ts, "size": size, "mtime": mtime}
 
@@ -973,7 +974,7 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False,
                     continue
                 if parsed["logical_name"] != vpath:
                     continue
-                if parsed.get("mode") == "delete":
+                if is_hidden_mode(parsed.get("mode")):
                     continue  # never fetch deletions                    
                 ts_val = int(parsed["timestamp"])
                 if ts_val > best_ts:
@@ -1042,7 +1043,7 @@ def list_virtual_files(prefix: str) -> List[str]:
                     if f".{NULL_HASH}." in name:
                         continue
                     parsed = parse_versioned_filename(name)
-                    if not parsed or parsed.get("mode") == "delete":
+                    if not parsed or is_hidden_mode(parsed.get("mode")):
                         continue
                     ts = int(parsed["timestamp"])
                     cur = best_by_vpath.get(vpath)
@@ -1067,7 +1068,7 @@ def list_virtual_files(prefix: str) -> List[str]:
         if not ver:
             continue
         parsed = parse_versioned_filename(ver.get("name", ""))
-        if not parsed or parsed.get("mode") == "delete":
+        if not parsed or is_hidden_mode(parsed.get("mode")):
             continue
         out.append(ver["name"])
     return sorted(out)
@@ -1464,7 +1465,7 @@ def list_dir():
                     if parsed:
                         lname = parsed["logical_name"]
                         ts = int(parsed["timestamp"])
-                        is_del = parsed.get("mode") == "delete"
+                        is_del = is_hidden_mode(parsed.get("mode"))
                         prev = latest_local.get(lname)
                         if prev is None or (ts, int(is_del)) > (prev[0], int(prev[1])):
                             latest_local[lname] = (ts, is_del)
@@ -1540,7 +1541,7 @@ def head():
     return jsonify({
         "vpath": vpath,
         "version": h,             # {name, size, timestamp, mode}
-        "deleted": h.get("mode") == "delete",
+        "deleted": is_hidden_mode(h.get("mode")),
     }), 200
 
 

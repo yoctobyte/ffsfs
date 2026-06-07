@@ -31,10 +31,10 @@ from ffsutils import (
     normalize_vpath,
     ensure_within_base,
     parse_versioned_filename,
-    build_versioned_filename,
     get_suffix_from_path,
     is_version_file,
     is_deleted_file,
+    is_hidden_mode,
 )
 
 from ffsvolumes import StoragePool, Volume, load_pool_config
@@ -677,6 +677,33 @@ class StorageBackend:
             pass
         return self.commit_temp(vpath, temp, "delete")
 
+    def commit_marker(self, vpath: str, mode: str, content_hash: str, size: int = 0) -> str:
+        """
+        Record a zero-byte metadata marker using a caller-supplied content hash.
+        Used for move hints; authoritative visibility still comes from
+        delete/write versions.
+        """
+        from ffsutils import build_versioned_filename
+
+        logical_name = os.path.basename(vpath)
+        ts = int(time.time())
+        final_name = build_versioned_filename(
+            logical_name=logical_name,
+            content_hash=content_hash,
+            mode=mode,
+            timestamp=ts,
+        )
+        target_vol = self.pool.write_target(size=size)
+        if target_vol is None:
+            raise OSError(errno.ENOSPC, "no storage volume accepts this file")
+        final_abspath = self._version_path_for_volume(target_vol, vpath, final_name)
+        make_dirs(os.path.dirname(final_abspath))
+        with open(final_abspath, "wb"):
+            pass
+        self.meta.append(vpath, final_name, size)
+        self._replicate_commit(final_abspath, vpath, final_name, size)
+        return final_abspath
+
     # queries --------------------------------------------------------------
 
     def pick_latest(self, vpath: str) -> Optional[str]:
@@ -979,7 +1006,7 @@ class FFSFS(Operations):
         final = self.backend.pick_latest(vpath)
         if final and os.path.exists(final):
             parsed = parse_versioned_filename(os.path.basename(final))
-            if parsed and parsed.get("mode") == "delete":
+            if parsed and is_hidden_mode(parsed.get("mode")):
                 local_delete_ts = int(parsed["timestamp"])
             else:
                 st = os.lstat(final)
@@ -1061,7 +1088,7 @@ class FFSFS(Operations):
                     mts = []
                     for ver in remote:
                         p = parse_versioned_filename(ver)
-                        if p and p.get("mode") != "delete":
+                        if p and not is_hidden_mode(p.get("mode")):
                             mts.append(int(p["timestamp"]))
                     if mts:
                         mtime = max(mts)
@@ -1119,7 +1146,7 @@ class FFSFS(Operations):
                         if parsed:
                             lname = parsed["logical_name"]
                             ts = int(parsed["timestamp"])
-                            is_del = parsed.get("mode") == "delete"
+                            is_del = is_hidden_mode(parsed.get("mode"))
                             prev = latest_local.get(lname)
                             if prev is None or (ts, int(is_del)) > (prev[0], int(prev[1])):
                                 latest_local[lname] = (ts, is_del)
@@ -1154,7 +1181,7 @@ class FFSFS(Operations):
                     parsed = parse_versioned_filename(ver)
                     if not parsed:
                         continue
-                    if parsed.get("mode") == "delete":
+                    if is_hidden_mode(parsed.get("mode")):
                         continue  # don't show deletions as files
                     logical_vpath = parsed["logical_name"]  # e.g. "a/b/file.txt"
                     parent = os.path.dirname(logical_vpath)
@@ -1226,7 +1253,7 @@ class FFSFS(Operations):
                 p = parse_versioned_filename(os.path.basename(final))
                 if p:
                     local_ts = int(p["timestamp"])
-                    if p.get("mode") == "delete":
+                    if is_hidden_mode(p.get("mode")):
                         final = None
 
             # Try remote if missing *or* a newer version exists remotely
@@ -1410,7 +1437,7 @@ class FFSFS(Operations):
             raise FuseOSError(errno.ENOENT)
 
         parsed = parse_versioned_filename(os.path.basename(latest))
-        if parsed and parsed.get("mode") == "delete":
+        if parsed and is_hidden_mode(parsed.get("mode")):
             raise FuseOSError(errno.ENOENT)
 
         tomb = self.backend.commit_delete(vpath)
@@ -1442,43 +1469,35 @@ class FFSFS(Operations):
         return 0
 
     def rename(self, old, new):
-        """Logical rename = move directory entry; versions stay with new name in same dir."""
+        """Logical rename/move = create destination, then tombstone source.
+
+        Cross-directory moves are represented as delete + create for
+        correctness in the vdir-preserving storage model. A best-effort
+        `moved` marker on the source path carries the content hash as a hint
+        for later history/recovery tooling, but delete+create is authoritative.
+        """
         old_v = normalize_vpath(old)
         new_v = normalize_vpath(new)
 
-        old_dir = self._real_dir(old_v)
-        new_dir = self._real_dir(new_v)
-        make_dirs(new_dir)
+        source = self.backend.pick_latest(old_v)
+        if not source:
+            raise FuseOSError(errno.ENOENT)
+        parsed = parse_versioned_filename(os.path.basename(source))
+        if not parsed or is_hidden_mode(parsed.get("mode")):
+            raise FuseOSError(errno.ENOENT)
 
-        # Move all versioned files that belong to old logical name.
-        moved_any = False
+        temp = self.backend.create_temp_for(new_v)
         try:
-            with os.scandir(old_dir) as it:
-                for de in it:
-                    if not de.is_file():
-                        continue
-                    fn = de.name
-                    if is_version_file(os.path.basename(old_v), fn):
-                        parsed = parse_versioned_filename(fn)
-                        if not parsed:
-                            continue
-                        # rebuild the filename with new logical name
-                        new_name = build_versioned_filename(
-                            logical_name=os.path.basename(new_v),
-                            content_hash=parsed["content_hash"],
-                            mode=parsed["mode"],
-                            timestamp=parsed["timestamp"],
-                            flags=parsed.get("flags", 0),
-                        )
-                        os.replace(os.path.join(old_dir, fn), os.path.join(new_dir, new_name))
-                        moved_any = True
-        except FileNotFoundError:
-            pass
-
-        if not moved_any:
-            old_abs = self._real_path(old_v)
-            new_abs = self._real_path(new_v)
-            os.replace(old_abs, new_abs)
+            self.backend._copy_file_chunked(source, temp, self.rate_limits.disk_fg)
+            self.backend.commit_temp(new_v, temp, "write")
+            self.backend.commit_marker(old_v, "moved", parsed["content_hash"], size=0)
+            self.backend.commit_delete(old_v)
+        finally:
+            try:
+                if os.path.exists(temp):
+                    os.remove(temp)
+            except Exception:
+                pass
 
         # Peer notification (best-effort)
         if peers and hasattr(peers, "notify_rename_safe"):

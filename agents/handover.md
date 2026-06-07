@@ -4,6 +4,41 @@ This document serves as the developer handover details for the next agent workin
 
 ---
 
+## 0.5. Follow-up: Move/Rename Semantics
+
+Move/rename design:
+
+- Authoritative behavior is **delete + create**.
+- Destination path receives a normal committed `write` version containing the
+  latest source bytes.
+- Source path receives:
+  - a `moved` marker carrying the moved content hash
+  - a `delete` tombstone that remains authoritative for visibility
+- `moved` is a non-authoritative hint for history/recovery tooling. Correctness
+  must not depend on peers understanding `moved`.
+- `moved` is treated as delete-like for listings, heads, fetch decisions, and
+  local visibility.
+
+Product consequence:
+
+- FFSFS is primarily single-user/local-first, not corporate NFS/SMB-style
+  concurrent sync.
+- If the same user creates conflicting offline moves/renames on different
+  nodes, manual or later automatic resolution is acceptable.
+- Because committed versions carry content hashes, a resolver can often locate
+  the likely move target by matching the `moved` hash to another path's write
+  version.
+
+Implementation in this follow-up:
+
+- Added `mode=moved` support and `is_hidden_mode()` in `ffsutils.py`.
+- Updated local/peer/sync visibility logic to treat `moved` as delete-like.
+- Changed `FFSFS.rename()` to create destination, record source `moved`, then
+  record source `delete`.
+- Added unit coverage for cross-directory rename visibility and hash hinting.
+
+---
+
 ## 0.4. Follow-up: Superpeer Definition
 
 `superpeer` was ambiguous because it mixed two independent properties:

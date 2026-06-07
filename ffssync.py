@@ -28,7 +28,7 @@ from ffsvolumes import (
     NODE_ROLE_REPLICA,
     ROLE_CACHE,
 )
-from ffsutils import parse_versioned_filename
+from ffsutils import is_hidden_mode, parse_versioned_filename
 
 
 SYNC_MODE_LAZY = "lazy"
@@ -263,7 +263,7 @@ class SyncWorker:
             parsed = parse_versioned_filename(name)
             if not parsed:
                 continue
-            if parsed.get("mode") == "delete":
+            if is_hidden_mode(parsed.get("mode")):
                 continue
             ts = int(parsed.get("timestamp", 0))
             if ts > best_ts:
