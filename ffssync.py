@@ -133,6 +133,8 @@ class SyncWorker:
         self._stop = threading.Event()
         self._pull_thread: Optional[threading.Thread] = None
         self._evict_thread: Optional[threading.Thread] = None
+        self._failures = {}
+        self._failure_lock = threading.Lock()
 
     # lifecycle ---------------------------------------------------------
 
@@ -176,6 +178,8 @@ class SyncWorker:
             return {"fetched": 0, "considered": 0}
         cache = getattr(peers, "_peer_cache", {}) or {}
         fetched = 0
+        skipped_backoff = 0
+        failed = 0
         remote_best = {}
         for peer_id, peer_data in list(cache.items()):
             files = (peer_data or {}).get("files") or {}
@@ -190,9 +194,14 @@ class SyncWorker:
                     remote_best[vpath] = (newest_ts, newest_name)
 
         considered = len(remote_best)
+        now = time.time()
         for vpath, (newest_ts, _newest_name) in remote_best.items():
+            if self._is_backing_off(vpath, now):
+                skipped_backoff += 1
+                continue
             local_ts = self._local_latest_ts(vpath)
             if local_ts is not None and local_ts >= newest_ts:
+                self._clear_failure(vpath)
                 continue
             try:
                 result = peers.get_newer_or_missing(
@@ -200,9 +209,52 @@ class SyncWorker:
                     rate_limits=self.rate_limits)
                 if result and result is not True:
                     fetched += 1
+                    self._clear_failure(vpath)
+                elif result is False:
+                    failed += 1
+                    self._record_failure(vpath, "no peer returned file")
             except Exception as e:
+                failed += 1
+                self._record_failure(vpath, str(e))
                 print(f"[ffsfs] sync fetch failed for {vpath}: {e}")
-        return {"fetched": fetched, "considered": considered}
+        return {"fetched": fetched, "considered": considered,
+                "failed": failed, "skipped_backoff": skipped_backoff}
+
+    def _record_failure(self, vpath: str, error: str) -> None:
+        now = time.time()
+        with self._failure_lock:
+            cur = self._failures.get(vpath, {})
+            attempts = int(cur.get("attempts", 0)) + 1
+            backoff = min(3600.0, 30.0 * (2 ** min(attempts - 1, 7)))
+            self._failures[vpath] = {
+                "attempts": attempts,
+                "last_error": error,
+                "last_failed": now,
+                "next_retry": now + backoff,
+            }
+
+    def _clear_failure(self, vpath: str) -> None:
+        with self._failure_lock:
+            self._failures.pop(vpath, None)
+
+    def _is_backing_off(self, vpath: str, now: float = None) -> bool:
+        now = time.time() if now is None else now
+        with self._failure_lock:
+            cur = self._failures.get(vpath)
+            return bool(cur and now < float(cur.get("next_retry", 0)))
+
+    def status(self) -> dict:
+        with self._failure_lock:
+            failures = {
+                vpath: dict(data)
+                for vpath, data in sorted(self._failures.items())
+            }
+        return {
+            "policy": self.policy.to_dict(),
+            "active_pull_running": bool(self._pull_thread and self._pull_thread.is_alive()),
+            "eviction_running": bool(self._evict_thread and self._evict_thread.is_alive()),
+            "failed_paths": failures,
+        }
 
     @staticmethod
     def _newest_non_delete(versions) -> tuple:

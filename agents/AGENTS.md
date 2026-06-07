@@ -18,6 +18,7 @@ Read these files before changing behavior:
    - Delete/tombstone propagation guarantees
    - Rename and cross-directory move behavior
    - Conflict handling for offline concurrent writes
+   - Non-blocking retry/status for transient failed syncs
    - `ffsctl` sync/status visibility for pending, failed, and stale work
 2. Extend storage policies beyond the first prototype:
    - Media/role-aware write target selection
@@ -60,6 +61,13 @@ cloud drive systems. Keep these direction points in mind:
 - Background synchronization should be configurable: disabled, selected
   prefixes, whole-realm where feasible, opportunistic, scheduled, or redundancy
   target driven.
+- Default sync direction is pull. Peer notifications are hints that new
+  versions may exist; they should not force a receiving peer to sync or accept
+  pushed file bytes.
+- Failed sync attempts are normal operational states, not immediate fatal
+  errors. A failed large file, locked file, peer outage, network hiccup, or
+  stale cache should not block syncing unrelated files. Retry later with
+  backoff and show persistent failures clearly to users/operators.
 - Superpeers may hold larger or complete copies.
 - Superpeer storage may span multiple disks, including user-rotated removable
   backup disks.

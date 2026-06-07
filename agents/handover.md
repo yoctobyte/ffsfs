@@ -4,6 +4,37 @@ This document serves as the developer handover details for the next agent workin
 
 ---
 
+## 0.3. Follow-up: Pull Sync + Non-blocking Failures
+
+Sync policy clarification:
+
+- Default synchronization is **pull-based**.
+- Peer notifications are hints that new versions may exist. They should not
+  force a receiving peer to sync and should not push file bytes into another
+  peer.
+- Failed sync attempts are normal operational states, not immediate fatal
+  errors. Causes may include large files, locked files, peer outages, network
+  hiccups, stale cache, or temporary permissions.
+- A failed path must not block unrelated files from syncing.
+
+Implementation in this follow-up:
+
+- `SyncWorker` tracks transient active-pull failures per logical path in
+  memory.
+- Failures use exponential backoff per path. During backoff the worker skips
+  only that path and continues syncing other eligible paths.
+- Successful later fetch clears the path failure.
+- `SyncWorker.status()` reports policy, thread state, and failed paths.
+- `ffsctl sync <realm> run-once` prints failed-path status when present.
+
+Future work:
+
+- Persist or summarize failure history for mounted services.
+- Add richer `ffsctl sync/status` output for pending, backing off, stale peer
+  cache, and permanent-looking failures.
+
+---
+
 ## 0.2. Follow-up: Rate-limit Enforcement
 
 Rate-limit config is no longer scaffolding-only.

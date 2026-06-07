@@ -45,6 +45,18 @@ class FakePeers:
         return f"/fake/path/{vpath}" if fetch else True
 
 
+class SelectiveFailPeers(FakePeers):
+    def __init__(self, peer_cache=None, fail_vpaths=None):
+        super().__init__(peer_cache)
+        self.fail_vpaths = set(fail_vpaths or [])
+
+    def get_newer_or_missing(self, vpath, local_ts, fetch=False, rate_limits=None):
+        self.fetch_calls.append((vpath, local_ts, fetch))
+        if vpath in self.fail_vpaths:
+            raise RuntimeError(f"temporary failure for {vpath}")
+        return f"/fake/path/{vpath}" if fetch else True
+
+
 @pytest.mark.unit
 def test_lazy_policy_active_pull_does_nothing(tmp_path, monkeypatch):
     backend, _ = _make_backend(tmp_path)
@@ -69,6 +81,8 @@ def test_active_pull_fetches_missing_versions(tmp_path, monkeypatch):
     result = worker.run_active_once()
     assert result["considered"] == 1
     assert result["fetched"] == 1
+    assert result["failed"] == 0
+    assert result["skipped_backoff"] == 0
     assert peers.fetch_calls and peers.fetch_calls[0][0] == "doc.txt"
     assert peers.fetch_calls[0][2] is True
 
@@ -101,7 +115,7 @@ def test_active_pull_considers_best_version_across_peers(tmp_path, monkeypatch):
     policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
     worker = SyncWorker(backend, peers, policy, None)
     result = worker.run_active_once()
-    assert result == {"fetched": 1, "considered": 1}
+    assert result == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0}
     assert peers.fetch_calls == [("doc.txt", 150, True)]
 
 
@@ -135,6 +149,70 @@ def test_active_pull_skips_delete_versions(tmp_path, monkeypatch):
     result = worker.run_active_once()
     assert peers.fetch_calls == []
     assert result["fetched"] == 0
+
+
+@pytest.mark.unit
+def test_active_pull_failed_path_does_not_block_other_files(tmp_path, monkeypatch):
+    backend, _ = _make_backend(tmp_path)
+    peers = SelectiveFailPeers(peer_cache={
+        "peerA": {"files": {
+            "big.bin": [{"name": "big.bin.AAAAAAAA.write.0.500"}],
+            "ok.txt": [{"name": "ok.txt.BBBBBBBB.write.0.500"}],
+        }},
+    }, fail_vpaths={"big.bin"})
+    policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    worker = SyncWorker(backend, peers, policy, None)
+
+    result = worker.run_active_once()
+
+    assert result == {"fetched": 1, "considered": 2, "failed": 1, "skipped_backoff": 0}
+    assert [c[0] for c in peers.fetch_calls] == ["big.bin", "ok.txt"]
+    status = worker.status()
+    assert "big.bin" in status["failed_paths"]
+    assert "ok.txt" not in status["failed_paths"]
+
+
+@pytest.mark.unit
+def test_active_pull_backoff_skips_only_failed_path(tmp_path, monkeypatch):
+    backend, _ = _make_backend(tmp_path)
+    peers = SelectiveFailPeers(peer_cache={
+        "peerA": {"files": {
+            "big.bin": [{"name": "big.bin.AAAAAAAA.write.0.500"}],
+            "ok.txt": [{"name": "ok.txt.BBBBBBBB.write.0.500"}],
+        }},
+    }, fail_vpaths={"big.bin"})
+    policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    worker = SyncWorker(backend, peers, policy, None)
+
+    first = worker.run_active_once()
+    assert first["failed"] == 1
+    peers.fetch_calls.clear()
+
+    second = worker.run_active_once()
+    assert second == {"fetched": 1, "considered": 2, "failed": 0, "skipped_backoff": 1}
+    assert [c[0] for c in peers.fetch_calls] == ["ok.txt"]
+
+
+@pytest.mark.unit
+def test_active_pull_success_clears_previous_failure(tmp_path, monkeypatch):
+    backend, _ = _make_backend(tmp_path)
+    peers = SelectiveFailPeers(peer_cache={
+        "peerA": {"files": {
+            "big.bin": [{"name": "big.bin.AAAAAAAA.write.0.500"}],
+        }},
+    }, fail_vpaths={"big.bin"})
+    policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    worker = SyncWorker(backend, peers, policy, None)
+
+    first = worker.run_active_once()
+    assert first["failed"] == 1
+    assert "big.bin" in worker.status()["failed_paths"]
+
+    worker._failures["big.bin"]["next_retry"] = 0
+    peers.fail_vpaths.clear()
+    second = worker.run_active_once()
+    assert second == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0}
+    assert worker.status()["failed_paths"] == {}
 
 
 # ---- eviction ----

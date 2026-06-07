@@ -477,6 +477,9 @@ def cmd_sync(args):
         evicted = worker.run_eviction_once()
         print(f"active: {active}")
         print(f"eviction: {evicted}")
+        status = worker.status()
+        if status.get("failed_paths"):
+            print(f"failed_paths: {status['failed_paths']}")
 
 
 def cmd_ratelimit(args):

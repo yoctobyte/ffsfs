@@ -21,6 +21,9 @@ Important long-term properties:
   or intentionally cached data, not necessarily the whole realm.
 - Support configurable background synchronization so a node can proactively
   pull or keep selected data according to its storage role and availability.
+- Default synchronization is pull-based. Peer notifications are hints that new
+  versions may exist; they do not force the receiver to sync and do not push
+  file bytes into another peer.
 - Support fuller "superpeer" nodes that keep larger or more complete copies.
 - Support storage roles ranging from access-only/cache-only laptops, through
   limited shared storage boxes, to always-on or sometimes-on file servers,
@@ -59,6 +62,10 @@ Excluding authentication and secure sockets, the remaining MVP gap is:
   - Rename and move semantics, especially moves between directories.
   - Conflict handling for offline concurrent writes.
   - Recovery from stale peer cache, peer restarts, and interrupted fetches.
+  - Failed syncs are expected transient operational states. A failed large
+    file, locked file, peer outage, network hiccup, or stale cache must not
+    block unrelated files from syncing. Retry later with backoff and expose
+    persistent failures to users/operators.
 - Operational visibility:
   - `ffsctl` status for active sync, pending replication, failed retries,
     configured peers, and cache pressure.
@@ -408,6 +415,8 @@ Deliverable:
    - Delete/tombstone propagation guarantees.
    - Rename and cross-directory move behavior.
    - Conflict handling for offline concurrent writes.
+   - Pull-by-default policy: notifications are hints only, not forced sync.
+   - Non-blocking retry/status for transient failed syncs.
    - `ffsctl` status for pending/failed/stale sync and peer-cache state.
 2. Extend storage policy:
    - Media/role-aware write target selection.
@@ -447,6 +456,10 @@ Deliverable:
     backend, loads configured peers, and refreshes peer cache before syncing.
   - `tools/vm/two-peer-common.sh` no longer kills its own SSH reset command
     when stopping prior peer server processes.
+- Sync failure policy:
+  - Active sync records per-path transient failures in memory.
+  - Backoff skips only failed paths; unrelated paths continue syncing.
+  - Successful later fetch clears the failure status.
 - VM scenarios:
   - `tools/vm/scenarios/two-peer/active-prefix-sync.sh`.
   - `tools/vm/scenarios/two-peer/cache-eviction.sh`.
