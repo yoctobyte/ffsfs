@@ -716,6 +716,70 @@ class StorageBackend:
         self._replicate_commit(final_abspath, vpath, final_name, size)
         return final_abspath
 
+    def rename_version(self, old_vpath: str, new_vpath: str, source_abspath: str) -> Optional[str]:
+        """Move a version file on disk to a new vpath (no byte copy).
+
+        Swaps the logical-name prefix in the filename and moves the file to the
+        destination directory.  Returns the new absolute path on success, or
+        None if a cross-device rename is needed (caller should fall back to
+        copy+delete).
+        """
+        from ffsutils import parse_versioned_filename, build_versioned_filename
+
+        old_name = os.path.basename(source_abspath)
+        parsed = parse_versioned_filename(old_name)
+        if not parsed:
+            return None
+
+        new_logical = os.path.basename(new_vpath)
+        new_name = build_versioned_filename(
+            logical_name=new_logical,
+            content_hash=parsed["content_hash"],
+            mode=parsed["mode"],
+            timestamp=parsed["timestamp"],
+        )
+
+        target_vol = self.pool.write_target(size=0)
+        if target_vol is None:
+            return None
+        dest_abspath = self._version_path_for_volume(target_vol, new_vpath, new_name)
+        make_dirs(os.path.dirname(dest_abspath))
+
+        try:
+            os.rename(source_abspath, dest_abspath)
+        except OSError as e:
+            if e.errno == errno.EXDEV:
+                return None
+            raise
+
+        self.meta.append(new_vpath, new_name, os.path.getsize(dest_abspath))
+        self._replicate_commit(dest_abspath, new_vpath, new_name, os.path.getsize(dest_abspath))
+        return dest_abspath
+
+    def commit_move_marker(self, vpath: str, content_hash: str, dest_vpath: str) -> str:
+        """Record a moved marker at source with destination info in body."""
+        import json as _json
+        from ffsutils import build_versioned_filename
+
+        logical_name = os.path.basename(vpath)
+        ts = int(time.time())
+        final_name = build_versioned_filename(
+            logical_name=logical_name,
+            content_hash=content_hash,
+            mode="moved",
+            timestamp=ts,
+        )
+        target_vol = self.pool.write_target(size=0)
+        if target_vol is None:
+            raise OSError(errno.ENOSPC, "no storage volume accepts this file")
+        final_abspath = self._version_path_for_volume(target_vol, vpath, final_name)
+        make_dirs(os.path.dirname(final_abspath))
+        with open(final_abspath, "wb") as f:
+            f.write(_json.dumps({"to": dest_vpath}).encode())
+        self.meta.append(vpath, final_name, 0)
+        self._replicate_commit(final_abspath, vpath, final_name, 0)
+        return final_abspath
+
     # queries --------------------------------------------------------------
 
     def pick_latest(self, vpath: str) -> Optional[str]:
@@ -1481,12 +1545,11 @@ class FFSFS(Operations):
         return 0
 
     def rename(self, old, new):
-        """Logical rename/move = create destination, then tombstone source.
+        """Logical rename/move via filesystem rename (no byte copy).
 
-        Cross-directory moves are represented as delete + create for
-        correctness in the vdir-preserving storage model. A best-effort
-        `moved` marker on the source path carries the content hash as a hint
-        for later history/recovery tooling, but delete+create is authoritative.
+        Moves the latest version file to the destination path on disk. Falls
+        back to copy+delete only when the move crosses device boundaries.
+        A moved marker at the source records the destination for history.
         """
         old_v = normalize_vpath(old)
         new_v = normalize_vpath(new)
@@ -1498,25 +1561,33 @@ class FFSFS(Operations):
         if not parsed or is_hidden_mode(parsed.get("mode")):
             raise FuseOSError(errno.ENOENT)
 
-        temp = self.backend.create_temp_for(new_v)
-        try:
-            self.backend._copy_file_chunked(source, temp, self.rate_limits.disk_fg)
-            self.backend.commit_temp(new_v, temp, "write")
-            self.backend.commit_marker(old_v, "moved", parsed["content_hash"], size=0)
-            self.backend.commit_delete(old_v)
-        finally:
+        content_hash = parsed["content_hash"]
+
+        dest = self.backend.rename_version(old_v, new_v, source)
+        if dest is None:
+            # Cross-device fallback: copy bytes then delete source
+            temp = self.backend.create_temp_for(new_v)
             try:
-                if os.path.exists(temp):
-                    os.remove(temp)
-            except Exception:
+                self.backend._copy_file_chunked(source, temp, self.rate_limits.disk_fg)
+                self.backend.commit_temp(new_v, temp, "write")
+            finally:
+                try:
+                    if os.path.exists(temp):
+                        os.remove(temp)
+                except Exception:
+                    pass
+            try:
+                os.remove(source)
+            except OSError:
                 pass
 
-        # Peer notification (best-effort)
-        if peers and hasattr(peers, "notify_rename_safe"):
+        self.backend.commit_move_marker(old_v, content_hash, dest_vpath=new_v)
+
+        if peers and hasattr(peers, "notify_move_safe"):
             try:
-                peers.notify_rename_safe(old_v=old_v, new_v=new_v, mtime=now_ts())
+                peers.notify_move_safe(old_v=old_v, new_v=new_v, mtime=now_ts())
             except Exception as e:
-                print(f"[ffsfs] peer notify_rename failed: {e}")
+                print(f"[ffsfs] peer notify_move failed: {e}")
 
         return 0
 

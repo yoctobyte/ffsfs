@@ -975,17 +975,26 @@ def notify_delete_safe(vpath: str, mtime: float, suffix: str = "") -> None:
     notify_delete(vpath, suffix=suffix)
 
 def notify_rename_safe(old_v: str, new_v: str, mtime: float) -> None:
-    # Best-effort: mirror local index entries to new key and broadcast deletes for old.
+    notify_move_safe(old_v=old_v, new_v=new_v, mtime=mtime)
+
+def notify_move_safe(old_v: str, new_v: str, mtime: float) -> None:
     entries = _local_file_index.pop(old_v, [])
     for e in entries:
-        # rewrite name to use new_v as logical name
         parsed = parse_versioned_filename(e["name"])
         if not parsed:
             continue
-        suffix = ".".join(e["name"].split(".", 1)[1:])
-        e2 = {"name": f"{new_v}.{suffix}", "size": e.get("size", 0), "mtime": int(mtime)}
-        _index_add_local_version(e2["name"], e2["size"], e2["mtime"])
-    notify_delete(old_v)
+        new_name = f"{new_v}.{parsed['content_hash']}.{parsed['mode']}.{parsed['flags']}.{parsed['timestamp']}"
+        _index_add_local_version(new_name, e.get("size", 0), int(mtime))
+    if not _known_peers:
+        return
+    payload = {"realm": _REALM, "event": "move", "vpath": old_v,
+               "dest_vpath": new_v, "mtime": int(mtime),
+               "from_port": (_actual_flask_port or PEER_PORT)}
+    for peer in list(_known_peers):
+        try:
+            _authed_post(_peer_url(peer, "/notify"), "/notify", payload, timeout=12)
+        except Exception as e:
+            print(f"[peer] notify_move failed to {peer}: {e}")
 
 def notify_modify(vpath: str, path: str) -> None:
     filename = os.path.basename(path)
@@ -1408,7 +1417,7 @@ def notify():
 
     if realm != _REALM:
         return jsonify({"error": "realm mismatch"}), 403
-    if not vpath or event not in {"commit", "delete", "modify"}:
+    if not vpath or event not in {"commit", "delete", "modify", "move"}:
         return jsonify({"error": "bad request"}), 400
 
     peer_ip = _normalize_remote_addr(request.remote_addr or "")
@@ -1469,6 +1478,29 @@ def notify():
         names = [x.get("name") if isinstance(x, dict) else str(x) for x in versions]
         if versioned_name not in names:
             versions.append({"name": versioned_name, "size": size, "mtime": mtime, "committed": False})
+
+    elif event == "move":
+        dest_vpath = (data.get("dest_vpath", "") or "").strip().strip("/")
+        if not dest_vpath:
+            return jsonify({"error": "missing dest_vpath"}), 400
+        mtime = int(data.get("mtime", time.time()))
+        _log(f"[peer] NOTIFY MOVE from {peer_id}: {vpath} -> {dest_vpath}")
+        old_entries = peer_entry["files"].pop(vpath, [])
+        new_versions = []
+        for e in old_entries:
+            parsed = parse_versioned_filename(e["name"]) if isinstance(e, dict) else None
+            if parsed and not is_hidden_mode(parsed["mode"]):
+                new_name = f"{dest_vpath}.{parsed['content_hash']}.{parsed['mode']}.{parsed['flags']}.{parsed['timestamp']}"
+                new_versions.append({"name": new_name, "size": e.get("size", 0), "mtime": mtime})
+        if new_versions:
+            peer_entry["files"][dest_vpath] = new_versions
+        # invalidate dest caches too
+        dest_parent = dest_vpath.rsplit("/", 1)[0] if "/" in dest_vpath else ""
+        try:
+            peer_entry.get("dircache", {}).pop(dest_parent, None)
+            peer_entry.get("headcache", {}).pop(dest_vpath, None)
+        except Exception:
+            pass
 
     # ---- lazy-mode cache invalidation (safe even if lazy is off) ----
     parent_dir = vpath.rsplit("/", 1)[0] if "/" in vpath else ""

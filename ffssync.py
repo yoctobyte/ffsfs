@@ -201,6 +201,10 @@ class SyncWorker:
             if local_ts is not None and local_ts >= newest_ts:
                 self._clear_failure(vpath)
                 continue
+            if self._try_local_move(vpath, _newest_name):
+                fetched += 1
+                self._clear_failure(vpath)
+                continue
             try:
                 result = peers.get_newer_or_missing(
                     vpath, local_ts or 0, fetch=True,
@@ -282,6 +286,35 @@ class SyncWorker:
         if not parsed:
             return None
         return int(parsed.get("timestamp", 0))
+
+    def _try_local_move(self, dest_vpath: str, remote_name: str) -> bool:
+        """If the remote file's content exists locally at a different path, rename it."""
+        parsed = parse_versioned_filename(remote_name)
+        if not parsed:
+            return False
+        target_hash = parsed["content_hash"]
+
+        for root in self.backend.data_roots():
+            for dirpath, _dirs, files in os.walk(root):
+                for name in files:
+                    fp = parse_versioned_filename(name)
+                    if not fp or is_hidden_mode(fp.get("mode", "")):
+                        continue
+                    if fp["content_hash"] != target_hash:
+                        continue
+                    rel = os.path.relpath(dirpath, root)
+                    local_vpath = os.path.join(rel, fp["logical_name"]).replace("\\", "/")
+                    if local_vpath.startswith("./"):
+                        local_vpath = local_vpath[2:]
+                    if local_vpath == dest_vpath:
+                        continue
+                    source_path = os.path.join(dirpath, name)
+                    result = self.backend.rename_version(local_vpath, dest_vpath, source_path)
+                    if result:
+                        self.backend.commit_move_marker(
+                            local_vpath, target_hash, dest_vpath=dest_vpath)
+                        return True
+        return False
 
     # eviction ----------------------------------------------------------
 

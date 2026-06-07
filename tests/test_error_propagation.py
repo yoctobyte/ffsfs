@@ -78,10 +78,11 @@ def test_rename_error_propagation(fs, monkeypatch):
     fs.write("/old.txt", b"data", 0, fh)
     fs.release("/old.txt", fh)
 
-    # Mock os.replace to fail with EACCES
-    def mock_replace(src, dst):
+    # Mock os.rename to fail with EACCES (non-EXDEV so it propagates)
+    original_rename = os.rename
+    def mock_rename(src, dst):
         raise OSError(errno.EACCES, "Permission denied")
-    monkeypatch.setattr(os, "replace", mock_replace)
+    monkeypatch.setattr(os, "rename", mock_rename)
 
     # rename should propagate the OSError
     with pytest.raises(OSError) as exc:
@@ -105,7 +106,7 @@ def test_peer_notify_errors_ignored(fs, monkeypatch):
             called_delete = True
             raise Exception("Network timeout")
 
-        def notify_rename_safe(self, old_v, new_v, mtime):
+        def notify_move_safe(self, old_v, new_v, mtime):
             nonlocal called_rename
             called_rename = True
             raise Exception("Network timeout")

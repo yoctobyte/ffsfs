@@ -4,6 +4,62 @@ This document serves as the developer handover details for the next agent workin
 
 ---
 
+## 0.7. Follow-up: True Move/Rename (No Byte Duplication)
+
+Replaced the previous "copy bytes + tombstone source" rename with a
+filesystem-level move that avoids duplicating file content.
+
+### New semantics
+
+- `FFSFS.rename()` calls `StorageBackend.rename_version()` which does an
+  `os.rename()` of the latest version file to the destination directory,
+  swapping the logical-name prefix in the filename.
+- If the rename crosses device boundaries (`EXDEV`), falls back to
+  copy+delete (no moved marker at source in that path — uses standard
+  `commit_temp` at destination then removes source).
+- A `moved` marker is written at the source path via
+  `StorageBackend.commit_move_marker()`. Its body contains
+  `{"to": "<dest_vpath>"}` for history/recovery tooling. The filename still
+  carries the original content hash for correlation.
+- No `delete` tombstone is written at the source — the `moved` marker alone
+  is sufficient (it is already hidden by `is_hidden_mode()`).
+- Old versions stay at the source path. History tools can traverse the
+  `moved` marker's body to follow the chain.
+
+### Peer communication
+
+- `notify_move_safe()` sends a `{"event": "move", "vpath": ..., "dest_vpath": ...}`
+  to all known peers.
+- The `/notify` endpoint handles the `"move"` event by renaming entries in
+  the peer's file cache from the old vpath to the new dest_vpath.
+- `notify_rename_safe()` is preserved as a thin wrapper around
+  `notify_move_safe()` for backward compatibility.
+
+### Sync worker optimization
+
+- Before fetching a file from a peer, the sync worker checks if local
+  storage already contains a version with the same content hash at a
+  different path (`_try_local_move`). If found, it does a local
+  `rename_version` + `commit_move_marker` instead of re-fetching bytes.
+
+### Cross-volume fallback
+
+- When `os.rename()` returns `EXDEV` (different filesystem), the rename
+  falls back to copying bytes via `commit_temp` and removing the original
+  source file. This is the only case where bytes are duplicated.
+
+### Test coverage (172 tests pass)
+
+- `test_cross_directory_rename_moves_file` — verifies no byte copy, only
+  moved marker at source, file readable at destination.
+- `test_rename_move_marker_contains_destination` — verifies marker body.
+- `test_same_directory_rename` — filename change within same dir.
+- `test_rename_notifies_peers_with_move_event` — peer notification.
+- Updated `test_rename_error_propagation` and
+  `test_peer_notify_errors_ignored` for new call signatures.
+
+---
+
 ## 0.6. Follow-up: Authentication and Transport Design
 
 Design conclusion:
@@ -45,9 +101,14 @@ Easy follow-up tasks for another agent:
 
 ---
 
-## 0.5. Follow-up: Move/Rename Semantics
+## 0.5. Follow-up: Move/Rename Semantics (SUPERSEDED by 0.7)
 
-Move/rename design:
+> **Note:** Section 0.7 replaces the delete+create semantics below with a true
+> filesystem-level rename. The `moved` marker concept is preserved but
+> `delete` tombstones are no longer written for moves. Cross-volume moves
+> still fall back to copy+delete.
+
+Move/rename design (historical):
 
 - Authoritative behavior is **delete + create**.
 - Destination path receives a normal committed `write` version containing the
