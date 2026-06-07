@@ -449,8 +449,8 @@ class StorageBackend:
         if peers and hasattr(peers, "notify_commit_safe"):
             try:
                 peers.notify_commit_safe(vpath=vpath, final_name=final_name, size=size, mtime=ts)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ffsfs] peer notify_commit failed: {e}")
 
         return final_abspath
 
@@ -624,18 +624,16 @@ class FFSFS(Operations):
         vpath = meta["vpath"]
         temp_path = meta["temp_path"]
         mode = meta["mode"]
-        # ensure file on disk is flushed
         try:
+            # ensure file on disk is flushed and fsynced
             f.flush()
             os.fsync(f.fileno())
-        except Exception:
-            pass
-        # close and forget the temp handle
-        try:
-            f.close()
-        except Exception:
-            pass
-        del self.fh_map[fh]
+        finally:
+            try:
+                f.close()
+            except Exception:
+                pass
+            self.fh_map.pop(fh, None)
 
         final_abspath = self.backend.commit_temp(vpath, temp_path, mode)
         # re-open as read handle so subsequent reads (if any) still work
@@ -1014,13 +1012,12 @@ class FFSFS(Operations):
         return n
 
     def flush(self, path, fh):
-        f = self.fh_map.get(fh)
-        if f:
-            try:
+        meta = self.fh_meta.get(fh) or {}
+        if meta.get("mode") in ("write", "append", "copy"):
+            f = self.fh_map.get(fh)
+            if f:
                 f.flush()
                 os.fsync(f.fileno())
-            except Exception:
-                pass
         return 0
 
 
@@ -1042,10 +1039,17 @@ class FFSFS(Operations):
                 return 0
 
             # write/append/copy
-            if should_commit_now(mode):
-                self._commit_fh_locked(fh)
-                # handle gets reopened as read in _commit_fh_locked
-                # but we can drop it now
+            try:
+                if should_commit_now(mode):
+                    self._commit_fh_locked(fh)
+                else:
+                    # leave it to the lazy monitor; close actual OS handle to free FDs
+                    f = self.fh_map.get(fh)
+                    if f:
+                        f.flush()
+                        os.fsync(f.fileno())
+            finally:
+                # Always close and clean up handle and meta even if commit/flush failed
                 f = self.fh_map.pop(fh, None)
                 if f:
                     try:
@@ -1053,14 +1057,6 @@ class FFSFS(Operations):
                     except Exception:
                         pass
                 self.fh_meta.pop(fh, None)
-            else:
-                # leave it to the lazy monitor; close actual OS handle to free FDs
-                f = self.fh_map.get(fh)
-                if f:
-                    try:
-                        f.flush(); os.fsync(f.fileno()); f.close()
-                    except Exception:
-                        pass
             return 0
 
     # fsync
@@ -1072,10 +1068,7 @@ class FFSFS(Operations):
         mode = meta.get("mode", "read")
         if mode in ("write", "append", "copy"):
             with self._lock:
-                try:
-                    self._commit_fh_locked(fh)
-                except Exception:
-                    pass
+                self._commit_fh_locked(fh)
         return 0
     
 
@@ -1149,8 +1142,8 @@ class FFSFS(Operations):
             try:
                 suffix = get_suffix_from_path(tomb) if tomb else ""
                 peers.notify_delete_safe(vpath=vpath, mtime=now_ts(), suffix=suffix)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ffsfs] peer notify_delete failed: {e}")
         return 0
 
 
@@ -1168,8 +1161,8 @@ class FFSFS(Operations):
             try:
                 suffix = get_suffix_from_path(tomb) if tomb else ""
                 peers.notify_delete_safe(vpath=vpath, mtime=now_ts(), suffix=suffix)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ffsfs] peer notify_delete failed: {e}")
         return 0
 
     def rename(self, old, new):
@@ -1209,17 +1202,14 @@ class FFSFS(Operations):
         if not moved_any:
             old_abs = self._real_path(old_v)
             new_abs = self._real_path(new_v)
-            try:
-                os.replace(old_abs, new_abs)
-            except Exception:
-                pass
+            os.replace(old_abs, new_abs)
 
         # Peer notification (best-effort)
         if peers and hasattr(peers, "notify_rename_safe"):
             try:
                 peers.notify_rename_safe(old_v=old_v, new_v=new_v, mtime=now_ts())
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ffsfs] peer notify_rename failed: {e}")
 
         return 0
 
