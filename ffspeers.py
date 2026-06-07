@@ -947,6 +947,9 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False) 
         _log("[peer] No known peers")
         return False
 
+    best_peer = None
+    best_name = None
+    best_ts = int(local_timestamp)
     for peer in list(_known_peers):
         try:
             cache = _peer_cache.get(peer)
@@ -954,8 +957,6 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False) 
                 continue
             files = cache.get("files") or {}
             versions = files.get(vpath, [])
-            best_name = None
-            best_ts = int(local_timestamp)
 
             for entry in versions:
                 name = entry["name"] if isinstance(entry, dict) else str(entry)
@@ -970,34 +971,40 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False) 
                 if ts_val > best_ts:
                     best_ts = ts_val
                     best_name = name
-
-            if not best_name:
-                continue
-
-            if not fetch:
-                _log(f"[peer] Newer version exists on {peer}, not fetching")
-                return True
-
-            _log(f"[peer] Fetching newer version {best_name} from {peer}")
-            #url = _peer_url(peer, f"/get-file?realm={_REALM}&vpath={best_name}")
-            #r = requests.get(url, timeout=90)
-            url = _peer_url(peer, "/get-file")
-            r = requests.get(url, params={"realm": _REALM, "vpath": best_name}, timeout=90)
-            r.raise_for_status()
-
-            local_root = _primary_data_root()
-            if not local_root:
-                raise RuntimeError("no backend bound")
-            local_path = os.path.join(local_root, best_name)
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            with open(local_path, "wb") as f:
-                f.write(r.content)
-            _log(f"[peer] Pulled {best_name} from {peer} → {local_path}")
-            return local_path
+                    best_peer = peer
 
         except Exception as e:
             print(f"[peer] Error checking {peer}: {e}")
             continue
+
+    if not best_name or not best_peer:
+        return False
+
+    if not fetch:
+        _log(f"[peer] Newer version exists on {best_peer}, not fetching")
+        return True
+
+    try:
+        _log(f"[peer] Fetching newer version {best_name} from {best_peer}")
+        #url = _peer_url(peer, f"/get-file?realm={_REALM}&vpath={best_name}")
+        #r = requests.get(url, timeout=90)
+        url = _peer_url(best_peer, "/get-file")
+        r = requests.get(url, params={"realm": _REALM, "vpath": best_name}, timeout=90)
+        r.raise_for_status()
+
+        local_root = _primary_data_root()
+        if not local_root:
+            raise RuntimeError("no backend bound")
+        local_path = os.path.join(local_root, best_name)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "wb") as f:
+            # TODO(rate-limit): switch to r.iter_content(chunk_size=1<<20)
+            # and call rate_limits.net_bg.consume(len(chunk)) per chunk.
+            f.write(r.content)
+        _log(f"[peer] Pulled {best_name} from {best_peer} → {local_path}")
+        return local_path
+    except Exception as e:
+        print(f"[peer] Error fetching {best_name} from {best_peer}: {e}")
 
     return False
 
@@ -1141,6 +1148,8 @@ def get_file():
     try:
         filesize = os.path.getsize(real_path)
         with open(real_path, "rb") as f:
+            # TODO(rate-limit): replace single read() with a chunked
+            # streaming response and call rate_limits.net_fg.consume(len(chunk)).
             data = f.read()
 
         basename = os.path.basename(vpath)
@@ -1535,43 +1544,52 @@ def check_peer_liveness():
         time.sleep(LIVENESS_INTERVAL)
 
 
+def refresh_peer_filecache_once(force: bool = False) -> dict:
+    """Refresh the global peer file cache once; useful for CLI sync runs."""
+    if LAZY_LISTING:
+        return {"refreshed": 0, "files": 0}
+
+    now = time.time()
+    refreshed = 0
+    files_seen = 0
+    for peer in list(_known_peers):
+        try:
+            cache = _ensure_peer_cache_entry(peer)
+            if not force and now - cache["last_sync"] < FILECACHE_REFRESH_INTERVAL:
+                continue
+            url = _peer_url(peer, f"/list-files?realm={_REALM}&prefix=")
+            r = requests.get(url, timeout=90)
+            r.raise_for_status()
+            data = r.json()
+            cache["last_sync"] = now
+            cache["files"].clear()
+
+            for entry in data.get("files", []):
+                fname = entry.get("name", "")
+                parsed = parse_versioned_filename(fname)
+                if not parsed:
+                    continue
+                vpath = parsed["logical_name"]
+                fileinfo = {
+                    "name": fname,
+                    "size": int(entry.get("size", 0)),
+                    "mtime": int(entry.get("mtime", 0)),
+                }
+                cache["files"].setdefault(vpath, []).append(fileinfo)
+                files_seen += 1
+
+            refreshed += 1
+            _log(f"[peer] Refreshed file list for {peer} ({len(data.get('files', []))} entries)")
+        except Exception as e:
+            print(f"[peer] Failed to refresh file list from {peer}: {e}")
+    return {"refreshed": refreshed, "files": files_seen}
+
+
 def refresh_peer_filecache():
     # In modo non-lento: renovamus totum indicem per /list-files ut antea.
     # In modo lento: nihil globaliter facimus; omnia on-demand trahuntur.
     while True:
-        if LAZY_LISTING:
-            time.sleep(20)
-            continue
-
-        now = time.time()
-        for peer in list(_known_peers):
-            try:
-                cache = _ensure_peer_cache_entry(peer)
-                if now - cache["last_sync"] < FILECACHE_REFRESH_INTERVAL:
-                    continue
-                url = _peer_url(peer, f"/list-files?realm={_REALM}&prefix=")
-                r = requests.get(url, timeout=90)
-                r.raise_for_status()
-                data = r.json()
-                cache["last_sync"] = now
-                cache["files"].clear()
-
-                for entry in data.get("files", []):
-                    fname = entry.get("name", "")
-                    parsed = parse_versioned_filename(fname)
-                    if not parsed:
-                        continue
-                    vpath = parsed["logical_name"]
-                    fileinfo = {
-                        "name": fname,
-                        "size": int(entry.get("size", 0)),
-                        "mtime": int(entry.get("mtime", 0)),
-                    }
-                    cache["files"].setdefault(vpath, []).append(fileinfo)
-
-                _log(f"[peer] Refreshed file list for {peer} ({len(data.get('files', []))} entries)")
-            except Exception as e:
-                print(f"[peer] Failed to refresh file list from {peer}: {e}")
+        refresh_peer_filecache_once()
         time.sleep(20)
 
 

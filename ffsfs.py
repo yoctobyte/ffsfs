@@ -38,6 +38,8 @@ from ffsutils import (
 )
 
 from ffsvolumes import StoragePool, Volume, load_pool_config
+from ffssync import SyncPolicy, SyncWorker
+from ffsratelimit import RateLimits
 
 try:
     import ffspeers as peers
@@ -459,6 +461,9 @@ class StorageBackend:
         make_dirs(os.path.dirname(dest))
         tmp = f"{dest}.replicating-{os.getpid()}-{int(time.time() * 1000)}"
         try:
+            # TODO(rate-limit): replace shutil.copy2 with a chunked copy
+            # that calls self._rate_limits.disk_bg.consume(len(chunk)) per
+            # chunk (and net_bg.consume when the source is a peer).
             shutil.copy2(source_path, tmp)
             os.replace(tmp, dest)
         finally:
@@ -609,6 +614,7 @@ class StorageBackend:
         size = 0
         with open(temp_abspath, "rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                # TODO(rate-limit): self._rate_limits.disk_fg.consume(len(chunk))
                 h.update(chunk); size += len(chunk)
 
         # Crockford-32 (truncated)
@@ -701,7 +707,8 @@ class FFSFS(Operations):
     """
     
     
-    def __init__(self, mount_root: str, base_path: str = DEFAULT_DATA_ROOT, realm: str = None, pool: StoragePool = None):
+    def __init__(self, mount_root: str, base_path: str = DEFAULT_DATA_ROOT, realm: str = None, pool: StoragePool = None,
+                 sync_policy: SyncPolicy = None, rate_limits: RateLimits = None):
         self.mount_root = os.path.abspath(mount_root)
         self.base = os.path.abspath(base_path)
         self.backend = StorageBackend(self.base, realm, pool=pool)
@@ -718,6 +725,12 @@ class FFSFS(Operations):
         self._open_mon.start()
         self._sync_mon = threading.Thread(target=self._monitor_pool_sync, daemon=True)
         self._sync_mon.start()
+
+        # sync policy + rate limits
+        self.rate_limits = rate_limits or RateLimits.unlimited()
+        self.sync_policy = sync_policy or SyncPolicy.for_role("cache_limited")
+        self.sync_worker = SyncWorker(self.backend, peers, self.sync_policy, self.rate_limits)
+        self.sync_worker.start()
 
         # marker + startup scan
         self._ensure_marker()
@@ -773,6 +786,11 @@ class FFSFS(Operations):
 
     def _shutdown(self):
         self._stop_evt.set()
+        try:
+            if hasattr(self, "sync_worker") and self.sync_worker is not None:
+                self.sync_worker.stop(timeout=2.0)
+        except Exception:
+            pass
         try:
             self._open_mon.join(timeout=2.0)
         except Exception:
@@ -1502,8 +1520,10 @@ class FFSFS(Operations):
 
 
 # Convenience runner (optional)
-def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool = True, realm: str = None, pool: StoragePool = None):
-    fs = FFSFS(mount_root=mountpoint, base_path=base_path, realm=realm, pool=pool)
+def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool = True, realm: str = None, pool: StoragePool = None,
+          sync_policy: SyncPolicy = None, rate_limits: RateLimits = None):
+    fs = FFSFS(mount_root=mountpoint, base_path=base_path, realm=realm, pool=pool,
+               sync_policy=sync_policy, rate_limits=rate_limits)
     # --- Start peer HTTP server (optional if ffspeers available) ---
     try:
         if peers:
@@ -1596,6 +1616,14 @@ if __name__ == "__main__":
     if pool_data:
         pool = StoragePool.from_dict(pool_data)
 
+    # Build sync policy and rate limits from config
+    try:
+        sync_policy = SyncPolicy.from_config(
+            config_data.get("node_role"), config_data.get("sync"))
+    except Exception as e:
+        sys.exit(f"error: invalid sync/node_role config: {e}")
+    rate_limits = RateLimits.from_config(config_data.get("rate_limits"))
+
     # Set peer environment variables from config
     if "bind_host" in config_data:
         os.environ["FFSFS_PEER_HOST"] = str(config_data["bind_host"])
@@ -1627,4 +1655,5 @@ if __name__ == "__main__":
         pass
 
     # Mount with your existing helper
-    mount(mountpoint, base_path=realm_base, foreground=not bg, realm=realm, pool=pool)
+    mount(mountpoint, base_path=realm_base, foreground=not bg, realm=realm, pool=pool,
+          sync_policy=sync_policy, rate_limits=rate_limits)

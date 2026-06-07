@@ -28,6 +28,22 @@ MEDIA_SSD = "ssd"
 MEDIA_HDD = "hdd"
 MEDIA_NETWORK = "network"
 
+NODE_ROLE_ACCESS_ONLY = "access_only"
+NODE_ROLE_CACHE_LIMITED = "cache_limited"
+NODE_ROLE_SHARED = "shared_storage"
+NODE_ROLE_SUPERPEER = "superpeer"
+NODE_ROLE_NAS = "nas_or_fileserver"
+
+NODE_ROLES = {
+    NODE_ROLE_ACCESS_ONLY,
+    NODE_ROLE_CACHE_LIMITED,
+    NODE_ROLE_SHARED,
+    NODE_ROLE_SUPERPEER,
+    NODE_ROLE_NAS,
+}
+
+DEFAULT_NODE_ROLE = NODE_ROLE_CACHE_LIMITED
+
 
 class Volume:
     """A single storage backend location."""

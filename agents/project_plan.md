@@ -34,9 +34,45 @@ Important long-term properties:
 - Make different-location backup a core long-term goal, not an afterthought.
 - Treat peer federation and storage policy as first-class features, not just
   incidental sync.
+- Preserve the logical directory structure on every storage backend for normal
+  committed file versions, updates, deletes/tombstones, and same-directory
+  renames. Cross-directory moves are the special case that needs explicit
+  behavior, tests, and documentation.
 
 This intent should guide design choices, but the immediate priority remains
 testing, safety, and correctness.
+
+## MVP Scope
+
+Near-term MVP does not require packaging, installers, or a web configuration UI.
+Those should come late, after core behavior is stable enough that user-interface
+work does not need constant updates for changing semantics.
+
+For now, MVP means a technically comfortable user can check out the latest
+GitHub revision, configure a realm with scripts/CLI, and run FFSFS directly on
+Linux in a trusted local/LAN environment.
+
+Excluding authentication and secure sockets, the remaining MVP gap is:
+
+- Predictable sync semantics:
+  - Delete/tombstone propagation with VM coverage.
+  - Rename and move semantics, especially moves between directories.
+  - Conflict handling for offline concurrent writes.
+  - Recovery from stale peer cache, peer restarts, and interrupted fetches.
+- Operational visibility:
+  - `ffsctl` status for active sync, pending replication, failed retries,
+    configured peers, and cache pressure.
+  - Actionable logs and retry/backoff behavior.
+- Storage policy completion:
+  - Enforced role/prefix policies beyond the first active-sync prototype.
+  - Media/role-aware write target selection.
+  - Removable mirror disk rotation workflow.
+- Rate limiting:
+  - Enforce the existing `RateLimits` config in foreground/background disk and
+    network I/O paths.
+
+Packaging and UI remain important product work, but they are intentionally
+deferred until the checkout-and-run MVP is feature-complete.
 
 The exact approach for remote sites, Windows nodes, NAS nodes, and overlay
 networking is intentionally not fixed yet. Decide those designs from concrete
@@ -78,9 +114,13 @@ Completed foundation:
 
 Still open before broader feature work:
 
-- Implement background sync workers and role-specific synchronization policies.
-- Extend storage policy beyond explicit mirror and capacity limits: selected
-  prefixes, media/role-aware routing, cache eviction, and disk rotation UX.
+- Implement rate-limit enforcement at the chunked I/O sites currently marked
+  with `# TODO(rate-limit)`.
+- Tighten sync semantics: delete/tombstone propagation guarantees,
+  rename/move behavior, conflict handling, stale peer cache recovery, and
+  sync/status visibility.
+- Extend storage policy: media/role-aware write target selection, disk
+  rotation UX, broader sync policy coverage in VM scenarios.
 
 Completed infrastructure:
 
@@ -91,6 +131,16 @@ Completed infrastructure:
   and periodic catch-up retry for reconnected mirror volumes.
 - `ffsctl backend` subcommands (add/remove/list/register).
 - `ffsctl realm` subcommands (init/show/set/list) for realm config management.
+- `ffsctl role`, `ffsctl sync`, and `ffsctl ratelimit` subcommands.
+- Background sync worker (`ffssync.SyncWorker`) with active prefix-aware pull
+  and cache-volume eviction.
+- Node storage role taxonomy: `access_only`, `cache_limited`,
+  `shared_storage`, `superpeer`, `nas_or_fileserver`.
+- Rate-limit configuration scaffolding (`ffsratelimit.RateLimits`); enforcement
+  pending.
+- Sync review fixes: segment-safe prefix matching, newest-version selection
+  across peers, one-shot peer-cache refresh, and wired
+  `ffsctl sync <realm> run-once`.
 - `launch.sh` and `configure.sh` operator scripts.
 
 ## Phase 1: Test Foundation
@@ -337,8 +387,8 @@ Goal: add features only after tests can protect current behavior.
 
 Candidate features:
 
-- Background synchronization and storage policy, once config and tests are in
-  place.
+- Hardened background synchronization and storage policy, once config and tests
+  are in place.
 - Better conflict handling.
 - Better peer trust/security model.
 - Subscriptions/watch behavior.
@@ -346,6 +396,8 @@ Candidate features:
 - Recovery tools for orphan temps and meta log inspection.
 - Optional lazy listing mode improvements.
 - Better status UI or admin commands.
+- Packaging/installers and web UI only after checkout-and-run MVP semantics are
+  stable.
 
 Deliverable:
 
@@ -353,31 +405,58 @@ Deliverable:
 
 ## Current Priority Queue
 
-1. Implement Background Sync Workers and Storage Roles:
-   - `access_only` (cache-only on demand)
-   - `cache_limited` (bounded local cache with eviction)
-   - `shared_storage` (selective prefix replicas)
-   - `superpeer` (broad replica target)
-2. Extend storage policy:
+1. Implement rate-limit enforcement at the chunked I/O sites flagged with
+   `# TODO(rate-limit)`. Switch peer `/get-file` to a streamed response and
+   peer fetch to `iter_content`, so disk and network bandwidth caps actually
+   apply.
+2. Tighten sync semantics and visibility:
+   - Delete/tombstone propagation guarantees.
+   - Rename and cross-directory move behavior.
+   - Conflict handling for offline concurrent writes.
+   - `ffsctl` status for pending/failed/stale sync and peer-cache state.
+3. Extend storage policy:
    - Media/role-aware write target selection.
-   - Selected-prefix replication.
    - Disk rotation UX around mirror volumes.
-3. Add VM scenarios for offline disk swap and broader sync policy coverage.
+4. Add VM scenarios for cross-directory moves, conflict writes,
+   restart-during-fetch, offline disk swap, and broader sync policy coverage.
+5. Peer trust/security hardening and secure sockets for wider deployments.
 
 ### Completed in this cycle
 
-- Tiered Multi-Backend Storage Pool infrastructure:
-  - Volume identifiers (`.ffsfs-volume.id`) and status tracking (ONLINE/OFFLINE).
-  - Pool-aware `StorageBackend` with cross-backend read routing.
-  - Write routing honors `StoragePool.write_target()`.
-  - Final placement honors `max_file_size`, `max_bytes`, and `reserve_bytes`.
-  - Explicit `mirror` volumes receive mirror-on-write copies.
-  - Offline/failed mirror copies are recorded and retried by catch-up sync.
-  - `ffsctl backend` CLI subcommands (add/remove/list/register).
-- Realm configuration tooling:
-  - `ffsctl realm` subcommands (init/show/set/list).
-  - `launch.sh` (config-aware launcher, halts when unconfigured).
-  - `configure.sh` (interactive config wrapper).
+- Node storage roles in realm config:
+  - `access_only`, `cache_limited`, `shared_storage`, `superpeer`,
+    `nas_or_fileserver` (constants in `ffsvolumes.py`).
+- Background sync worker (`ffssync.py`):
+  - `SyncPolicy` resolves role + per-realm overrides
+    (`mode`, `prefixes`, `interval_secs`, `cache_max_bytes`).
+  - `SyncWorker` runs an active prefix-aware pull (reusing
+    `peers.get_newer_or_missing`) and a cache eviction loop that protects the
+    newest version and refuses to delete copies that do not provably exist on
+    a peer or other local volume.
+- Rate-limit configuration scaffolding (`ffsratelimit.py`):
+  - `RateLimiter`/`RateLimits` with `from_config` / `to_dict`.
+  - Insertion-point comments at the chunked I/O sites
+    (`StorageBackend.commit_temp`, `_copy_version_to_volume`,
+    `ffspeers.get_newer_or_missing`, `ffspeers.get_file`).
+  - `consume()` is a no-op pending Phase 2 enforcement.
+- New `ffsctl` subcommands: `role`, `sync` (show/set/run-once),
+  `ratelimit` (show/set), plus `node_role` validation in `ffsctl realm set`.
+- Unit tests:
+  - `tests/test_sync_policy.py`, `tests/test_sync_worker.py`,
+    `tests/test_ratelimit.py`, `tests/test_role_ctl.py` (137 tests, <2s).
+- Review follow-up fixes:
+  - Prefix matching is segment-safe (`/share` no longer matches `/shared`).
+  - Active sync and peer fetch select the newest known remote version across
+    all peers instead of depending on peer iteration order.
+  - `ffsctl sync <realm> run-once` configures the peer module, registers the
+    backend, loads configured peers, and refreshes peer cache before syncing.
+  - `tools/vm/two-peer-common.sh` no longer kills its own SSH reset command
+    when stopping prior peer server processes.
+- VM scenarios:
+  - `tools/vm/scenarios/two-peer/active-prefix-sync.sh`.
+  - `tools/vm/scenarios/two-peer/cache-eviction.sh`.
+  - `tools/vm/run-two-peer-scenario.sh smoke` passed on 2026-06-07
+    (`healthz`, `file-fetch`, `delete-tombstone`, `path-traversal`).
 
 ## Done Criteria for Stabilization
 
@@ -386,6 +465,6 @@ The project is considered stabilized enough for larger feature work when:
 - `python3 -m py_compile *.py` passes.
 - Unit tests pass on the workstation.
 - Single-VM FUSE smoke test passes repeatedly.
-- Two-VM peer sync test passes repeatedly.
+- Two-peer VM smoke/all scenario batches pass repeatedly.
 - Known critical path traversal/delete bugs are fixed.
 - README documents install, mount, unmount, and recovery basics.

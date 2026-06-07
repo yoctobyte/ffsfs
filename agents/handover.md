@@ -4,6 +4,99 @@ This document serves as the developer handover details for the next agent workin
 
 ---
 
+## 0.1. Follow-up: Sync Review Fixes + MVP Scope
+
+After reviewing the sync implementation, this follow-up fixed the highest-risk
+behavioral gaps and clarified the MVP target.
+
+- **MVP scope decision**:
+  - Packaging/installers and a web configuration UI are deferred until the
+    checkout-and-run GitHub workflow is feature-complete.
+  - Near-term MVP assumes Linux users can clone/update from GitHub, configure
+    with scripts/CLI, and run directly.
+  - Authentication and secure sockets remain important, but the next blockers
+    are rate limiting, sync semantics, storage policy, and operational status.
+- **Storage-layout intention**:
+  - Every storage backend should mimic the logical folder structure for normal
+    committed versions, updates, deletes/tombstones, and same-directory
+    renames.
+  - Cross-directory moves are the special case requiring explicit behavior,
+    tests, and documentation.
+- **Sync fixes**:
+  - Prefix matching is segment-safe (`/share` no longer matches `/shared`).
+  - `SyncWorker.run_active_once()` aggregates the newest remote version per
+    logical path across all peers before deciding whether to fetch.
+  - `ffspeers.get_newer_or_missing()` fetches the newest known peer version
+    across all peers, rather than whichever peer appears first.
+  - `ffsctl sync <realm> run-once` now sets the peer realm, registers the
+    backend, loads configured peers, and forces a one-shot peer-cache refresh.
+  - Added `ffspeers.refresh_peer_filecache_once(force=False)` for CLI and VM
+    use.
+- **VM harness fix**:
+  - `tools/vm/two-peer-common.sh` now uses self-safe `pkill` patterns when
+    stopping peer server processes, avoiding accidental termination of the SSH
+    reset command.
+- **Verification**:
+  - `python3 -m py_compile *.py` passed.
+  - `pytest` passed: **137 tests**.
+  - `tools/vm/run-two-peer-scenario.sh smoke` passed on 2026-06-07:
+    `healthz`, `file-fetch`, `delete-tombstone`, `path-traversal`.
+
+---
+
+## 0. Cycle: Background Sync Workers + Node Roles + Rate-limit Scaffolding
+
+This cycle introduced node-level storage roles, a background sync worker, and
+the configuration plumbing for future rate limiting.
+
+- **Node roles** (`ffsvolumes.py`): `access_only`, `cache_limited`,
+  `shared_storage`, `superpeer`, `nas_or_fileserver`. Volume-level role
+  (`primary`/`archive`/`cache`) is unchanged.
+- **Sync policy and worker** (`ffssync.py`):
+  - `SyncPolicy.from_config(node_role, sync)` resolves per-realm config and
+    role defaults (mode, prefixes, interval, cache_max_bytes).
+  - `SyncWorker` runs an active prefix-aware pull (reusing
+    `peers.get_newer_or_missing(..., fetch=True)`) and a cache-eviction loop
+    that protects the newest version and refuses to evict copies that do not
+    provably exist on a peer or another local volume.
+  - Worker is started by `FFSFS.__init__` and stopped during `_shutdown`.
+- **Rate-limit scaffolding** (`ffsratelimit.py`):
+  - `RateLimiter`/`RateLimits` parse config (`disk_fg_bps`, `disk_bg_bps`,
+    `net_fg_bps`, `net_bg_bps`; 0 = unlimited). `consume()` is currently a
+    no-op — Phase 2 will turn it into a token-bucket and switch the call sites
+    flagged with `# TODO(rate-limit)` (in `StorageBackend.commit_temp`,
+    `_copy_version_to_volume`, `ffspeers.get_newer_or_missing`,
+    `ffspeers.get_file`) to chunked loops.
+- **CLI** (`ffsctl.py`): new `role`, `sync`, and `ratelimit` subcommands.
+  `ffsctl realm set node_role <r>` validates against `NODE_ROLES`.
+  `ffsctl sync <realm> run-once` is useful for VM scenarios — it builds a
+  backend without mounting FUSE and triggers one active pull + one eviction
+  pass.
+- **Config schema** (`realm-config.json`): new optional keys `node_role`,
+  `sync` (object), `rate_limits` (object). All have safe defaults.
+- **Tests**: `tests/test_sync_policy.py`, `tests/test_sync_worker.py`,
+  `tests/test_ratelimit.py`, `tests/test_role_ctl.py`. Total **137 unit tests
+  pass in <2s**.
+- **VM scenarios** added under `tools/vm/scenarios/two-peer/`:
+  - `active-prefix-sync.sh` — A is primary writer; B (shared_storage with
+    prefix `/share/`) runs `SyncWorker.run_active_once` and pulls only the
+    `/share/` file, leaving `/private/` alone.
+  - `cache-eviction.sh` — A has primary + cache volumes; old version sits on
+    cache, newer on primary, peer cache says peer has the old version too,
+    eviction removes it while protecting the newest version.
+
+### What is intentionally not done
+
+- Real rate-limit enforcement (peer `/get-file` is still a single
+  `f.read()` + `make_response(data)`; client side is still
+  `f.write(r.content)`). The next cycle should switch to chunked streaming.
+- Per-volume sync override (the `volume.sync` field is reserved but not
+  honored).
+- Disk rotation UX changes — existing pending-replication catch-up still
+  handles the basic re-attach case.
+
+---
+
 ## 1. What was Completed & Pushed
 
 We have finished the FUSE write durability improvements, configuration normalization, and documentation expansion phases, completing items 1 through 6 of the stabilization roadmap:
@@ -42,29 +135,48 @@ We have finished the FUSE write durability improvements, configuration normaliza
 
 ## 2. Current State of the Codebase
 
-- **Branch:** `main` (clean and up-to-date with `origin/main`).
-- **Unit Tests:** 74 tests pass on the workstation in less than 1.0 second (`pytest`).
-- **VM Integration Tests:** 8 scenarios total (6 original + 2 new: `pool-read-write`, `offline-volume`). All individually verified passing. A separate single-VM pool smoke test (`run-single-vm-pool-smoke.sh`) also covers multi-backend pool, `configure.sh`, and `launch.sh` end-to-end.
-- **VM test runtime:** The full two-peer scenario suite (`run-two-peer-scenario.sh all`) boots a fresh QEMU VM per scenario. Each run takes 2–5 minutes depending on KVM availability. Budget ~30 minutes for the full suite.
+- **Branch:** `main`.
+- **Unit Tests:** 137 tests pass on the workstation in less than 2 seconds
+  (`pytest`).
+- **VM Integration Tests:** Two-peer VM scenario harness supports `smoke` and
+  `all` batches in one VM boot. The latest verified smoke batch passed 4
+  scenarios: `healthz`, `file-fetch`, `delete-tombstone`, `path-traversal`.
+  A separate single-VM pool smoke test (`run-single-vm-pool-smoke.sh`) also
+  covers multi-backend pool, `configure.sh`, and `launch.sh` end-to-end.
+- **VM test runtime:** `run-two-peer-scenario.sh smoke` reuses one QEMU VM for
+  the fast peer batch. `run-two-peer-scenario.sh all` runs all two-peer
+  scenarios in one VM boot and should be used before larger sync/storage
+  changes are considered done.
 
 ---
 
 ## 3. Next Steps (What to Work on Next)
 
-### Task A: Background Catch-Up Sync Worker (Remaining from Multi-Backend)
-The pool infrastructure is in place (`ffsvolumes.py`, `ffsctl backend`, pool-aware `StorageBackend`). What remains:
-- **Catch-Up Sync:** Implement a background worker that monitors drive mounts. When a previously offline HDD reconnects, scan the metadata log and replicate any files committed in the interim.
-- **Disk Rotation:** When swapping HDD1 for HDD2, detect the new drive, identify missing writes, and sync them.
-- **Write-Anywhere Fallback:** When the target HDD is offline during commit, write to the primary SSD and record intent for later replication.
+### Task A: Rate-limit Enforcement
 
-### Task B: Background Sync & Storage Roles
-- Define storage role profiles (`access_only`, `cache_limited`, `shared_storage`, `superpeer`).
-- Eviction policies for cache-limited nodes without deleting local writes.
-- Selected-prefix synchronization.
+The config and CLI plumbing exists, but `RateLimiter.consume()` is still a
+no-op. Implement token-bucket behavior and wire it into chunked disk/network
+I/O at the `# TODO(rate-limit)` sites.
 
-### Task C: Security Hardening (To-Do)
+### Task B: Sync Semantics and Status
+
+- Delete/tombstone propagation guarantees and VM coverage.
+- Rename and move behavior, especially cross-directory moves.
+- Conflict handling for offline concurrent writes.
+- `ffsctl` status for pending/failed/stale sync, peer-cache state, and cache
+  pressure.
+
+### Task C: Storage Policy Completion
+
+- Media/role-aware write target selection.
+- Disk rotation UX around mirror volumes.
+- Broader sync policy VM scenarios.
+
+### Task D: Security Hardening (Later MVP/Wider Deployment)
+
 - Peer trust model is prototype-grade (`TRUST_UNKNOWN_PEER = True`).
-- LAN-intended usage, but authentication and realm boundaries should be wired in before remote/multi-location deployments.
+- Authentication, realm boundaries, and secure sockets should be wired before
+  remote/multi-location deployments.
 
 ---
 

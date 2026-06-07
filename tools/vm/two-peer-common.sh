@@ -137,8 +137,8 @@ nohup env PYTHONPATH=/home/'"$FFSFS_VM_USER"'/work/ffsfs \
 
 two_peer_stop_servers() {
     vm_ssh "$ssh_port" '
-pkill -f /tmp/start-peer-a.py >/dev/null 2>&1 || true
-pkill -f /tmp/start-peer-b.py >/dev/null 2>&1 || true
+pkill -f "[s]tart-peer-a.py" >/dev/null 2>&1 || true
+pkill -f "[s]tart-peer-b.py" >/dev/null 2>&1 || true
 '
 }
 

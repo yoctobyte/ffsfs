@@ -185,3 +185,47 @@ def test_notify_delete_with_suffix(peer_client):
     assert "a/b/file2.txt" in peer_files
     tombstone = peer_files["a/b/file2.txt"][0]
     assert f"a/b/file2.txt.{NULL_HASH}.delete.0." in tombstone["name"]
+
+
+@pytest.mark.unit
+def test_get_newer_or_missing_fetches_newest_across_peers(tmp_path, monkeypatch):
+    old_backend = ffspeers._local_backend
+    old_known = list(ffspeers._known_peers)
+    old_cache = ffspeers._peer_cache
+    old_realm = ffspeers._REALM
+    data_path = tmp_path / "data"
+    data_path.mkdir()
+
+    class FakeResponse:
+        content = b"newest"
+
+        def raise_for_status(self):
+            return None
+
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append((url, params, timeout))
+        return FakeResponse()
+
+    try:
+        ffspeers._local_backend = SimpleNamespace(data_path=str(data_path))
+        ffspeers._known_peers = ["peer-a:8765", "peer-b:8765"]
+        ffspeers._peer_cache = {
+            "peer-a:8765": {"files": {"doc.txt": [{"name": "doc.txt.AAAAAAAA.write.0.100"}]}},
+            "peer-b:8765": {"files": {"doc.txt": [{"name": "doc.txt.BBBBBBBB.write.0.200"}]}},
+        }
+        ffspeers._REALM = "test"
+        monkeypatch.setattr(ffspeers.requests, "get", fake_get)
+
+        local_path = ffspeers.get_newer_or_missing("doc.txt", 0, fetch=True)
+
+        assert calls == [("http://peer-b:8765/get-file",
+                          {"realm": "test", "vpath": "doc.txt.BBBBBBBB.write.0.200"}, 90)]
+        assert local_path == str(data_path / "doc.txt.BBBBBBBB.write.0.200")
+        assert (data_path / "doc.txt.BBBBBBBB.write.0.200").read_bytes() == b"newest"
+    finally:
+        ffspeers._local_backend = old_backend
+        ffspeers._known_peers = old_known
+        ffspeers._peer_cache = old_cache
+        ffspeers._REALM = old_realm

@@ -235,6 +235,7 @@ def cmd_backend(args):
 _REALM_CONFIG_KEYS = {
     "mountpoint", "base", "storage_base", "port", "bind_host",
     "node_name", "autodiscover", "known_peers", "realm",
+    "node_role",
 }
 
 def _load_realm_config(realm: str) -> dict:
@@ -323,6 +324,12 @@ def cmd_realm(args):
                 return
         elif key in ("mountpoint", "base", "storage_base"):
             value = os.path.abspath(value)
+        elif key == "node_role":
+            from ffsvolumes import NODE_ROLES
+            if value not in NODE_ROLES:
+                print(f"Unknown node_role: {value}")
+                print(f"Valid roles: {', '.join(sorted(NODE_ROLES))}")
+                return
         data[key] = value
         _save_realm_config(realm, data)
         print(f"Set {key} = {value}")
@@ -340,6 +347,169 @@ def cmd_realm(args):
                 print(f"  {entry}")
         if not found:
             print("No realms configured yet.")
+
+# --------------------- role / sync / ratelimit commands ---------------
+
+def cmd_role(args):
+    from ffsvolumes import NODE_ROLES, DEFAULT_NODE_ROLE
+    realm = args.realm
+    data = _load_realm_config(realm)
+    if not data:
+        print(f"No config found for realm '{realm}'. Run: ffsctl realm init {realm}")
+        return
+    if args.role is None:
+        current = data.get("node_role", DEFAULT_NODE_ROLE)
+        print(f"node_role: {current}")
+        print(f"valid: {', '.join(sorted(NODE_ROLES))}")
+        return
+    if args.role not in NODE_ROLES:
+        print(f"Unknown node_role: {args.role}")
+        print(f"Valid: {', '.join(sorted(NODE_ROLES))}")
+        return
+    data["node_role"] = args.role
+    _save_realm_config(realm, data)
+    print(f"Set node_role = {args.role}")
+
+
+def cmd_sync(args):
+    from ffssync import SyncPolicy, SYNC_MODES
+    realm = args.realm
+    data = _load_realm_config(realm)
+    if not data:
+        print(f"No config found for realm '{realm}'. Run: ffsctl realm init {realm}")
+        return
+
+    if args.action == "show":
+        try:
+            policy = SyncPolicy.from_config(data.get("node_role"), data.get("sync"))
+        except Exception as e:
+            print(f"invalid config: {e}")
+            return
+        print(f"Realm: {realm}")
+        print(f"  node_role:        {policy.role}")
+        print(f"  mode:             {policy.mode}")
+        print(f"  prefixes:         {policy.prefixes or '[all]'}")
+        print(f"  interval_secs:    {policy.interval_secs}")
+        if policy.cache_max_bytes is not None:
+            print(f"  cache_max_bytes:  {policy.cache_max_bytes}")
+        return
+
+    if args.action == "set":
+        key = args.key
+        value = args.value
+        if key not in {"mode", "prefixes", "interval_secs", "cache_max_bytes"}:
+            print(f"Unknown sync key: {key}")
+            print("Valid keys: mode, prefixes, interval_secs, cache_max_bytes")
+            return
+        sync_cfg = dict(data.get("sync") or {})
+        if key == "mode":
+            if value not in SYNC_MODES:
+                print(f"Unknown mode: {value} (valid: {sorted(SYNC_MODES)})")
+                return
+            sync_cfg["mode"] = value
+        elif key == "prefixes":
+            sync_cfg["prefixes"] = [p.strip() for p in value.split(",") if p.strip()]
+        elif key == "interval_secs":
+            try:
+                sync_cfg["interval_secs"] = float(value)
+            except ValueError:
+                print("interval_secs must be numeric")
+                return
+        elif key == "cache_max_bytes":
+            try:
+                v = int(value)
+            except ValueError:
+                print("cache_max_bytes must be integer (bytes)")
+                return
+            if v <= 0:
+                sync_cfg.pop("cache_max_bytes", None)
+            else:
+                sync_cfg["cache_max_bytes"] = v
+        data["sync"] = sync_cfg
+        _save_realm_config(realm, data)
+        print(f"Set sync.{key} = {sync_cfg.get(key)!r}")
+        return
+
+    if args.action == "run-once":
+        # Construct a backend without mounting FUSE and run one sync pass.
+        from ffsvolumes import StoragePool
+        from ffsfs import StorageBackend
+        try:
+            import ffspeers as peers_mod
+        except Exception:
+            peers_mod = None
+        pool_data = data.get("storage_pool")
+        if pool_data:
+            pool = StoragePool.from_dict(pool_data)
+            base_path = pool.primary.path
+        else:
+            base_path = data.get("base") or data.get("storage_base")
+            if not base_path:
+                print("realm has no storage configured")
+                return
+            pool = None
+        backend = StorageBackend(base_path, realm, pool=pool)
+        if peers_mod is not None:
+            try:
+                peers_mod.set_realm(realm)
+                peers_mod.register_local_backend(backend)
+                for kp in data.get("known_peers", []) or []:
+                    kp = str(kp).strip()
+                    if kp and kp not in peers_mod._known_peers:
+                        peers_mod._known_peers.append(kp)
+                if hasattr(peers_mod, "refresh_peer_filecache_once"):
+                    peers_mod.refresh_peer_filecache_once(force=True)
+            except Exception as e:
+                print(f"warning: peer setup failed: {e}")
+        try:
+            policy = SyncPolicy.from_config(data.get("node_role"), data.get("sync"))
+        except Exception as e:
+            print(f"invalid config: {e}")
+            return
+        from ffssync import SyncWorker
+        worker = SyncWorker(backend, peers_mod, policy, None)
+        active = worker.run_active_once()
+        evicted = worker.run_eviction_once()
+        print(f"active: {active}")
+        print(f"eviction: {evicted}")
+
+
+def cmd_ratelimit(args):
+    from ffsratelimit import RateLimits, RATE_LIMIT_KEYS
+    realm = args.realm
+    data = _load_realm_config(realm)
+    if not data:
+        print(f"No config found for realm '{realm}'. Run: ffsctl realm init {realm}")
+        return
+
+    if args.action == "show":
+        rl = RateLimits.from_config(data.get("rate_limits"))
+        print(f"Realm: {realm}")
+        for k, v in rl.to_dict().items():
+            label = "unlimited" if v == 0 else f"{v} B/s"
+            print(f"  {k}: {label}")
+        return
+
+    if args.action == "set":
+        key = args.key
+        if key not in RATE_LIMIT_KEYS:
+            print(f"Unknown rate-limit key: {key}")
+            print(f"Valid keys: {', '.join(RATE_LIMIT_KEYS)}")
+            return
+        try:
+            v = int(args.value)
+        except ValueError:
+            print("value must be an integer (bytes/sec, 0 = unlimited)")
+            return
+        if v < 0:
+            print("value must be >= 0")
+            return
+        rl_cfg = dict(data.get("rate_limits") or {})
+        rl_cfg[key] = v
+        data["rate_limits"] = rl_cfg
+        _save_realm_config(realm, data)
+        print(f"Set rate_limits.{key} = {v}")
+
 
 # --------------------- fallback direct run --------------------
 
@@ -399,6 +569,25 @@ def main():
     sr.add_argument("--mountpoint", default=None, help="mountpoint path (for init)")
     sr.add_argument("--base", default=None, help="storage base path (for init)")
     sr.set_defaults(func=cmd_realm)
+
+    sro = sub.add_parser("role", help="show or set the node storage role")
+    sro.add_argument("realm", help="realm name")
+    sro.add_argument("role", nargs="?", help="new node role (omit to show)")
+    sro.set_defaults(func=cmd_role)
+
+    sy = sub.add_parser("sync", help="manage background sync policy")
+    sy.add_argument("realm", help="realm name")
+    sy.add_argument("action", choices=["show", "set", "run-once"])
+    sy.add_argument("key", nargs="?", help="sync key (mode|prefixes|interval_secs|cache_max_bytes)")
+    sy.add_argument("value", nargs="?", help="value (for set)")
+    sy.set_defaults(func=cmd_sync)
+
+    srl = sub.add_parser("ratelimit", help="manage rate-limit configuration (0 = unlimited)")
+    srl.add_argument("realm", help="realm name")
+    srl.add_argument("action", choices=["show", "set"])
+    srl.add_argument("key", nargs="?", help="rate-limit key (disk_fg_bps|disk_bg_bps|net_fg_bps|net_bg_bps)")
+    srl.add_argument("value", nargs="?", help="bytes/sec (for set)")
+    srl.set_defaults(func=cmd_ratelimit)
 
     args, rest = ap.parse_known_args()
 

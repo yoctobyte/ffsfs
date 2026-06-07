@@ -14,22 +14,40 @@ Read these files before changing behavior:
 
 ## Current Priorities
 
-1. Extend storage policies beyond the first mirror prototype:
-   - `access_only`, `cache_limited`, `shared_storage`, `superpeer`, `nas_or_fileserver`
-   - Eviction policies for cache-limited nodes
-   - Selected-prefix synchronization
+1. Implement rate-limit enforcement at the chunked I/O sites flagged with
+   `# TODO(rate-limit)` (peer `/get-file` streaming, `iter_content` on the
+   client side, chunked disk copy). Configuration plumbing already exists.
+2. Tighten sync semantics for MVP:
+   - Delete/tombstone propagation guarantees
+   - Rename and cross-directory move behavior
+   - Conflict handling for offline concurrent writes
+   - `ffsctl` sync/status visibility for pending, failed, and stale work
+3. Extend storage policies beyond the first prototype:
    - Media/role-aware write target selection
-2. Add VM scenarios for offline disk swap and broader sync policy coverage.
-3. Peer trust/security hardening for LAN deployments.
+   - Disk rotation UX around mirror volumes
+   - Broader sync policy coverage in VM scenarios
+4. Peer trust/security hardening and secure sockets. Important for wider
+   deployment, but not the next implementation blocker for checkout-and-run
+   local/LAN MVP testing.
 
 Completed:
 - Tiered multi-backend storage pool (`ffsvolumes.py`, pool-aware `StorageBackend`)
 - Mirror-on-write for explicit `mirror` volumes and pending catch-up retry
 - `ffsctl backend` and `ffsctl realm` subcommands
 - `launch.sh` and `configure.sh` operator scripts
-- Two-peer VM scenarios (all 6 passing)
+- Two-peer VM scenarios (all passing)
 - Error propagation, CLI normalization, config file loading
 - Operator documentation
+- Node storage roles (`access_only`, `cache_limited`, `shared_storage`,
+  `superpeer`, `nas_or_fileserver`)
+- Background sync worker (`ffssync.SyncWorker`): active prefix-aware pull and
+  cache eviction with newest-version protection
+- Rate-limit configuration scaffolding (`ffsratelimit.RateLimits`) with
+  insertion-point markers in chunked I/O sites; enforcement deferred
+- `ffsctl role`, `ffsctl sync`, and `ffsctl ratelimit` subcommands
+- Sync review fixes: segment-safe prefix matching, newest-version selection
+  across peers, wired `ffsctl sync run-once`, one-shot peer-cache refresh
+- Fast two-peer VM smoke batch passes in one VM boot
 
 ## Product Direction
 
@@ -55,6 +73,13 @@ cloud drive systems. Keep these direction points in mind:
 - Different-location backup is one of the ultimate goals.
 - The persistent storage format should stay inspectable and useful without a
   running service.
+- Storage backends should mimic the logical folder structure for committed
+  updates, deletes/tombstones, and same-directory renames. Cross-directory moves
+  are the special case that needs explicit behavior and tests.
+- Packaging/installers and a web configuration UI are deferred until the core
+  behavior is feature-complete enough that UI work is not repeatedly churned.
+  Near-term MVP assumes users can check out the latest GitHub revision and run
+  the scripts/CLI directly.
 
 Do not prematurely lock in one remote-site design. Wait for concrete hardware,
 network, and operational constraints before choosing the approach.
@@ -102,6 +127,7 @@ VM checks (each boots QEMU; two-peer smoke/all reuse one VM per batch):
 ```bash
 tools/vm/run-single-vm-smoke.sh
 tools/vm/run-single-vm-pool-smoke.sh
+tools/vm/run-two-peer-scenario.sh smoke
 tools/vm/run-two-peer-scenario.sh file-fetch
-tools/vm/run-two-peer-scenario.sh all   # 8 scenarios
+tools/vm/run-two-peer-scenario.sh all   # 10 scenarios
 ```
