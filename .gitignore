@@ -42,5 +42,5 @@ env/
 !.env.example
 
 # Local-only agent entrypoint pointers. Tracked agent docs live under agents/.
-/agents.md
-/claude.md
+/AGENTS.md
+/CLAUDE.md
