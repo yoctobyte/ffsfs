@@ -844,13 +844,20 @@ def notify_commit_safe(vpath: str, final_name: str, size: int, mtime: int) -> No
         except Exception as e:
             print(f"[peer] notify_commit_safe failed to {peer}: {e}")
 
-def notify_delete(vpath: str) -> None:
+def notify_delete(vpath: str, suffix: str = "") -> None:
     _local_file_index.pop(vpath, None)
+    if suffix:
+        ts = int(time.time())
+        parsed = parse_versioned_filename(f"{vpath}.{suffix}")
+        if parsed:
+            ts = parsed.get("timestamp", ts)
+        _index_add_local_version(f"{vpath}.{suffix}", size=0, mtime=ts)
     if not _known_peers:
         return
-    #payload = {"realm": _REALM, "event": "delete", "vpath": vpath}
     payload = {"realm": _REALM, "event": "delete", "vpath": vpath,
-               "from_port": (_actual_flask_port or PEER_PORT)}    
+               "from_port": (_actual_flask_port or PEER_PORT)}
+    if suffix:
+        payload["suffix"] = suffix
     for peer in list(_known_peers):
         try:
             r = requests.post(_peer_url(peer, "/notify"), json=payload, timeout=12)
@@ -858,8 +865,8 @@ def notify_delete(vpath: str) -> None:
         except Exception as e:
             print(f"[peer] notify_delete failed to {peer}: {e}")
 
-def notify_delete_safe(vpath: str, mtime: float) -> None:
-    notify_delete(vpath)
+def notify_delete_safe(vpath: str, mtime: float, suffix: str = "") -> None:
+    notify_delete(vpath, suffix=suffix)
 
 def notify_rename_safe(old_v: str, new_v: str, mtime: float) -> None:
     # Best-effort: mirror local index entries to new key and broadcast deletes for old.
@@ -1306,9 +1313,17 @@ def notify():
             versions.append({"name": versioned_name, "size": size, "mtime": mtime})
 
     elif event == "delete":
-        _log(f"[peer] NOTIFY DELETE from {peer_id}: {vpath}")
+        _log(f"[peer] NOTIFY DELETE from {peer_id}: {vpath} suffix={suffix or '(none)'}")
         ts = int(time.time())
-        tomb = {"name": f"{vpath}.{NULL_HASH}.delete.0.{ts}", "size": 0, "mtime": ts}
+        if suffix:
+            tomb_name = f"{vpath}.{suffix}"
+            parsed = parse_versioned_filename(tomb_name)
+            if parsed:
+                ts = int(parsed.get("timestamp", ts))
+        else:
+            # backward compat: older senders don't ship a suffix
+            tomb_name = f"{vpath}.{NULL_HASH}.delete.0.{ts}"
+        tomb = {"name": tomb_name, "size": 0, "mtime": ts}
         # replace whatever we had with a clear tombstone
         peer_entry["files"][vpath] = [tomb]
 

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 import ffspeers
-from ffsutils import build_versioned_filename
+from ffsutils import NULL_HASH, build_versioned_filename, get_suffix_from_path
 
 
 @pytest.fixture
@@ -115,3 +115,44 @@ def test_list_dir_hides_deleted_file(peer_client):
     files = resp.get_json()["files"]
     assert "keep.txt" in files
     assert "gone.txt" not in files
+
+
+@pytest.mark.unit
+def test_notify_delete_with_suffix(peer_client):
+    client, _ = peer_client
+    ffspeers._peer_cache.clear()
+
+    # 1. /notify with suffix
+    payload = {
+        "realm": "test",
+        "event": "delete",
+        "vpath": "a/b/file.txt",
+        "suffix": "E3V2C3D4.delete.0.123456",
+        "from_port": "1234"
+    }
+    resp = client.post("/notify", json=payload)
+    assert resp.status_code == 200
+
+    peer_id = "127.0.0.1:1234"
+    assert peer_id in ffspeers._peer_cache
+    peer_files = ffspeers._peer_cache[peer_id]["files"]
+    assert "a/b/file.txt" in peer_files
+    tombstone = peer_files["a/b/file.txt"][0]
+    assert tombstone["name"] == "a/b/file.txt.E3V2C3D4.delete.0.123456"
+    assert tombstone["mtime"] == 123456
+
+    # 2. /notify without suffix (backward compatibility)
+    payload_no_suffix = {
+        "realm": "test",
+        "event": "delete",
+        "vpath": "a/b/file2.txt",
+        "from_port": "1234"
+    }
+    resp = client.post("/notify", json=payload_no_suffix)
+    assert resp.status_code == 200
+
+    peer_files = ffspeers._peer_cache[peer_id]["files"]
+    assert "a/b/file2.txt" in peer_files
+    tombstone = peer_files["a/b/file2.txt"][0]
+    assert f"a/b/file2.txt.{NULL_HASH}.delete.0." in tombstone["name"]
+

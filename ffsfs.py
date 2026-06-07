@@ -30,6 +30,7 @@ from ffsutils import (
     ensure_within_base,
     parse_versioned_filename,
     build_versioned_filename,
+    get_suffix_from_path,
     is_version_file,
     is_deleted_file,
 )
@@ -1143,14 +1144,15 @@ class FFSFS(Operations):
         if parsed and parsed.get("mode") == "delete":
             raise FuseOSError(errno.ENOENT)
 
-        self.backend.commit_delete(vpath)
+        tomb = self.backend.commit_delete(vpath)
         if peers and hasattr(peers, "notify_delete_safe"):
             try:
-                peers.notify_delete_safe(vpath=vpath, mtime=now_ts())
+                suffix = get_suffix_from_path(tomb) if tomb else ""
+                peers.notify_delete_safe(vpath=vpath, mtime=now_ts(), suffix=suffix)
             except Exception:
                 pass
         return 0
-     
+
 
     #keeping as reference. basic unlink
     def unlink_plain(self, path):
@@ -1160,11 +1162,12 @@ class FFSFS(Operations):
         # empty file acts as deletion marker with special mode
         with open(temp, "wb"):
             pass
-        self.backend.commit_temp(vpath, temp, "delete")
+        tomb = self.backend.commit_temp(vpath, temp, "delete")
         # notify peers explicitly if available
         if peers and hasattr(peers, "notify_delete_safe"):
             try:
-                peers.notify_delete_safe(vpath=vpath, mtime=now_ts())
+                suffix = get_suffix_from_path(tomb) if tomb else ""
+                peers.notify_delete_safe(vpath=vpath, mtime=now_ts(), suffix=suffix)
             except Exception:
                 pass
         return 0

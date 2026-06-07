@@ -76,3 +76,27 @@ def test_write_after_delete_makes_file_visible_again(fs, monkeypatch):
     data = fs.read("/file.txt", 100, 0, fh)
     fs.release("/file.txt", fh)
     assert data == b"new content"
+
+
+@pytest.mark.unit
+def test_unlink_notifies_peers_with_suffix(fs, monkeypatch):
+    called = []
+    class MockPeers:
+        def notify_delete_safe(self, vpath, mtime, suffix):
+            called.append((vpath, mtime, suffix))
+
+    mock_peers = MockPeers()
+    monkeypatch.setattr(ffsfs, "peers", mock_peers)
+
+    _create_file(fs, "/file.txt", b"payload", monkeypatch, 100)
+
+    monkeypatch.setattr(ffsfs.time, "time", lambda: 150)
+    fs.unlink("/file.txt")
+
+    assert len(called) == 1
+    vpath, mtime, suffix = called[0]
+    assert vpath == "file.txt"
+    assert mtime == 150
+    assert "delete.0.150" in suffix
+    assert "NULL_HASH" not in suffix
+
