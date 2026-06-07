@@ -34,7 +34,7 @@
       - Current peer behavior is mostly on-demand fetch plus cache/index refresh.
       - Explicit local mirror volumes now receive mirror-on-write copies, and
         missed mirror copies are retried from `.ffsfs-pending-replication.jsonl`.
-      - No role/prefix/capacity-aware sync policy or cache eviction yet.
+      - No role/prefix/media-aware sync policy or cache eviction yet.
 
   8. Windows adapter has TODOs.
       - timestamp mapping in crossfuse.py:129
@@ -70,7 +70,7 @@
       - storage layout (RESOLVED)
       - known limitations (RESOLVED)
 
-  6. After mirror/catch-up: implement role, prefix, capacity, and eviction policies.
+  6. After mirror/catch-up: implement role, prefix, media, and eviction policies.
 
   Recently resolved
 

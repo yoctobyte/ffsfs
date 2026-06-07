@@ -197,3 +197,40 @@ def test_backend_records_pending_and_catches_up_reconnected_mirror(tmp_path):
     assert os.path.exists(mirrored)
     assert open(mirrored, "rb").read() == b"catch-up"
     assert backend._pending_entries() == []
+
+
+@pytest.mark.unit
+def test_backend_routes_final_commit_by_max_file_size(tmp_path):
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY, max_file_size=4)
+    primary.init()
+    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE)
+    secondary.init()
+    pool = StoragePool(primary=primary, secondaries=[secondary])
+    backend = StorageBackend(primary.path, "test", pool=pool)
+
+    temp = backend.create_temp_for("large.bin")
+    assert temp.startswith(primary.data_path)
+    with open(temp, "wb") as f:
+        f.write(b"12345")
+    final = backend.commit_temp("large.bin", temp, "write")
+
+    assert final.startswith(secondary.data_path)
+    assert not os.path.exists(temp)
+    assert open(final, "rb").read() == b"12345"
+
+
+@pytest.mark.unit
+def test_backend_fails_when_no_volume_accepts_file_size(tmp_path):
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY, max_file_size=4)
+    primary.init()
+    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE, max_file_size=4)
+    secondary.init()
+    pool = StoragePool(primary=primary, secondaries=[secondary])
+    backend = StorageBackend(primary.path, "test", pool=pool)
+
+    temp = backend.create_temp_for("large.bin")
+    with open(temp, "wb") as f:
+        f.write(b"12345")
+
+    with pytest.raises(OSError):
+        backend.commit_temp("large.bin", temp, "write")

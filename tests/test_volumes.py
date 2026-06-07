@@ -205,6 +205,61 @@ def test_pool_write_target_primary_online(tmp_path):
 
 
 @pytest.mark.unit
+def test_pool_write_target_honors_max_file_size(tmp_path):
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY, max_file_size=4)
+    primary.init()
+    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE)
+    secondary.init()
+    pool = StoragePool(primary=primary, secondaries=[secondary])
+
+    assert pool.write_target(size=3) is primary
+    assert pool.write_target(size=5) is secondary
+
+
+@pytest.mark.unit
+def test_pool_write_target_honors_max_bytes(tmp_path):
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY, max_bytes=10)
+    primary.init()
+    existing = tmp_path / "ssd" / ".ffsfs_data" / "old.txt.A1B2C3D4.write.0.1"
+    existing.write_bytes(b"123456")
+    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE)
+    secondary.init()
+    pool = StoragePool(primary=primary, secondaries=[secondary])
+
+    assert pool.write_target(size=4) is primary
+    assert pool.write_target(size=5) is secondary
+
+
+@pytest.mark.unit
+def test_pool_write_target_honors_reserve_bytes(tmp_path, monkeypatch):
+    class StatVfs:
+        f_bavail = 10
+        f_frsize = 1
+
+    monkeypatch.setattr("ffsvolumes.os.statvfs", lambda path: StatVfs())
+
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY, reserve_bytes=6)
+    primary.init()
+    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE)
+    secondary.init()
+    pool = StoragePool(primary=primary, secondaries=[secondary])
+
+    assert pool.write_target(size=4) is primary
+    assert pool.write_target(size=5) is secondary
+
+
+@pytest.mark.unit
+def test_pool_write_target_returns_none_when_no_volume_accepts_size(tmp_path):
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY, max_file_size=4)
+    primary.init()
+    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE, max_file_size=4)
+    secondary.init()
+    pool = StoragePool(primary=primary, secondaries=[secondary])
+
+    assert pool.write_target(size=5) is None
+
+
+@pytest.mark.unit
 def test_pool_write_target_fallback_to_secondary(tmp_path):
     primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY)
     # don't init primary — it's offline

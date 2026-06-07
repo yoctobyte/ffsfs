@@ -122,7 +122,8 @@ We need a simple tool or subcommand to set up, remove, and query the status of b
    - Generates and writes `.ffsfs-volume.id` containing a unique ID.
    - Appends the backend definition to the realm configuration.
    - `--mirror` enables mirror-on-write plus pending catch-up retry for that
-     backend. Media/capacity hints can be stored for future routing policy.
+     backend. Capacity limits affect final placement; media remains a hint for
+     future routing policy.
 
 2. **Remove a Storage Space:**
    ```bash

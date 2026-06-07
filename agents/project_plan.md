@@ -79,8 +79,8 @@ Completed foundation:
 Still open before broader feature work:
 
 - Implement background sync workers and role-specific synchronization policies.
-- Extend storage policy beyond explicit mirror volumes: size thresholds,
-  capacity limits, selected prefixes, cache eviction, and disk rotation UX.
+- Extend storage policy beyond explicit mirror and capacity limits: selected
+  prefixes, media/role-aware routing, cache eviction, and disk rotation UX.
 
 Completed infrastructure:
 
@@ -359,7 +359,7 @@ Deliverable:
    - `shared_storage` (selective prefix replicas)
    - `superpeer` (broad replica target)
 2. Extend storage policy:
-   - Size/capacity/media-aware write target selection.
+   - Media/role-aware write target selection.
    - Selected-prefix replication.
    - Disk rotation UX around mirror volumes.
 3. Add VM scenarios for offline disk swap and broader sync policy coverage.
@@ -370,6 +370,7 @@ Deliverable:
   - Volume identifiers (`.ffsfs-volume.id`) and status tracking (ONLINE/OFFLINE).
   - Pool-aware `StorageBackend` with cross-backend read routing.
   - Write routing honors `StoragePool.write_target()`.
+  - Final placement honors `max_file_size`, `max_bytes`, and `reserve_bytes`.
   - Explicit `mirror` volumes receive mirror-on-write copies.
   - Offline/failed mirror copies are recorded and retried by catch-up sync.
   - `ffsctl backend` CLI subcommands (add/remove/list/register).

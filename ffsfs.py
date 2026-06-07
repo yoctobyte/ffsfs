@@ -623,8 +623,26 @@ class StorageBackend:
         )
         
         
-        final_abspath = os.path.join(dirpath, final_name)
-        os.replace(temp_abspath, final_abspath)
+        target_vol = self.pool.write_target(size=size)
+        if target_vol is None:
+            raise OSError(errno.ENOSPC, "no storage volume accepts this file")
+
+        final_abspath = self._version_path_for_volume(target_vol, vpath, final_name)
+        make_dirs(os.path.dirname(final_abspath))
+        if os.path.dirname(os.path.abspath(temp_abspath)) == os.path.dirname(os.path.abspath(final_abspath)):
+            os.replace(temp_abspath, final_abspath)
+        else:
+            tmp_final = f"{final_abspath}.committing-{os.getpid()}-{int(time.time() * 1000)}"
+            try:
+                shutil.copy2(temp_abspath, tmp_final)
+                os.replace(tmp_final, final_abspath)
+                os.remove(temp_abspath)
+            finally:
+                try:
+                    if os.path.exists(tmp_final):
+                        os.remove(tmp_final)
+                except Exception:
+                    pass
 
         # metadata + peer notify
         self.meta.append(vpath, final_name, size)

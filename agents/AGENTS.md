@@ -18,7 +18,7 @@ Read these files before changing behavior:
    - `access_only`, `cache_limited`, `shared_storage`, `superpeer`, `nas_or_fileserver`
    - Eviction policies for cache-limited nodes
    - Selected-prefix synchronization
-   - Size/capacity/media-aware write target selection
+   - Media/role-aware write target selection
 2. Add VM scenarios for offline disk swap and broader sync policy coverage.
 3. Peer trust/security hardening for LAN deployments.
 
@@ -84,8 +84,9 @@ node names are user configuration.
 - Delete/tombstone semantics need stronger peer and VM scenario coverage.
 - Storage pool catch-up is a first prototype: explicit `mirror` volumes receive
   committed files, missed copies are recorded in `.ffsfs-pending-replication.jsonl`,
-  and mounted filesystems retry periodically. Rich role/prefix/capacity policy
-  is not implemented yet.
+  and mounted filesystems retry periodically. Final placement honors
+  `max_file_size`, `max_bytes`, and `reserve_bytes`. Rich role/prefix/media
+  policy is not implemented yet.
 - FUSE mount behavior should be validated only inside VMs.
 - Peer trust/security model is prototype-grade.
 

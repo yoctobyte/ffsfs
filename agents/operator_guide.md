@@ -149,28 +149,43 @@ recorded for later catch-up.
 policy-driven routing can distinguish fast SSDs, slower HDDs, and network
 storage.
 
-`--max-bytes <n>`, `--max-file-size <n>`, and `--reserve-bytes <n>` store
-capacity hints. They do not yet enforce limits or change write routing. They
-are included so configurations can be written before the policy engine lands.
+`--max-file-size <n>` rejects that backend as the final storage target for any
+single committed file larger than `n` bytes.
+
+`--max-bytes <n>` rejects that backend as the final storage target when the
+current bytes under its `.ffsfs_data/` plus the new committed file would exceed
+`n` bytes.
+
+`--reserve-bytes <n>` rejects that backend as the final storage target when the
+filesystem free space after the commit would be below `n` bytes.
 
 #### How Writes Are Routed
 
-New writes are committed to one write target first:
+New writes start as a temporary file on the current staging target:
 
 1. If the primary backend is online, FFSFS writes to the primary.
 2. If the primary is offline, FFSFS writes to the first online secondary.
 3. If all configured volumes appear offline, FFSFS falls back to the primary
    path and lets the filesystem operation succeed or fail normally.
 
-After the committed version exists on the write target, FFSFS copies that
+When the file is committed, FFSFS knows the final size. It then chooses the
+final storage target using `max_file_size`, `max_bytes`, and `reserve_bytes`.
+If the staging target is not eligible but another online backend is eligible,
+FFSFS copies the completed file into the eligible backend and removes the temp
+from the staging backend. If no online backend accepts the file size, the commit
+fails with a disk-space style error.
+
+After the committed version exists on the final target, FFSFS copies that
 version to every online backend marked `mirror: true`, except the volume that
-already received the write.
+already received the final commit.
 
 This means:
 
 - `--mirror` controls replication, not initial write-target priority.
 - `--role archive` by itself does not mirror data. Add `--mirror` for catch-all
   backup/archive disks.
+- Capacity options control final placement and can cause a commit to fail if
+  no configured online backend can accept the file.
 - Multiple online mirrors all receive a copy of the same committed version.
 - A write is considered locally successful once the write target commit
   succeeds. Mirror copy failures are logged and recorded for retry.
@@ -266,6 +281,8 @@ Backend configuration is stored in
         "role": "archive",
         "mirror": true,
         "media": "hdd",
+        "max_file_size": 1099511627776,
+        "max_bytes": 8000000000000,
         "reserve_bytes": 10737418240
       }
     ]
@@ -343,4 +360,4 @@ FUSE filesystems can sometimes hang or get stuck in a "Transport endpoint is not
 - **No Encryption/Authentication:** The current prototype sends file payloads and metadata in plaintext over HTTP/UDP. It is meant for trusted LANs or private overlay networks (like Tailscale).
 - **Simple Conflict Resolution:** Conflicts are resolved via latest-timestamp-wins. Logical locking or interactive merge flows are not yet supported.
 - **Auto-Discovery Limits:** UDP broadcast autodiscovery is designed for single-subnet LAN networks. For multi-subnet or remote connections, you must add peers manually using `ffsctl.py peers add`.
-- **Background Sync in Progress:** Explicit local mirror volumes have mirror-on-write plus pending catch-up retry. The next feature phase is implementing broader policies such as `cache_limited`, selected-prefix sync, eviction, and capacity-aware routing.
+- **Background Sync in Progress:** Explicit local mirror volumes have mirror-on-write plus pending catch-up retry. Final placement honors configured size/capacity limits. The next feature phase is implementing broader policies such as `cache_limited`, selected-prefix sync, media/role-aware routing, and eviction.

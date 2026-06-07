@@ -48,6 +48,35 @@ class Volume:
         self.max_file_size = max_file_size
         self.reserve_bytes = reserve_bytes
 
+    def used_bytes(self) -> int:
+        total = 0
+        if not os.path.isdir(self.data_path):
+            return 0
+        for root, _dirs, files in os.walk(self.data_path):
+            for name in files:
+                try:
+                    total += os.lstat(os.path.join(root, name)).st_size
+                except OSError:
+                    pass
+        return total
+
+    def can_accept_write(self, size: int = None) -> bool:
+        if size is None:
+            return True
+        if self.max_file_size is not None and size > int(self.max_file_size):
+            return False
+        if self.max_bytes is not None and self.used_bytes() + size > int(self.max_bytes):
+            return False
+        if self.reserve_bytes is not None:
+            try:
+                st = os.statvfs(self.path)
+                available = int(st.f_bavail) * int(st.f_frsize)
+            except OSError:
+                return False
+            if available - size < int(self.reserve_bytes):
+                return False
+        return True
+
     @property
     def data_path(self) -> str:
         return os.path.join(self.path, DATA_DIR)
@@ -206,8 +235,16 @@ class StoragePool:
         self.secondaries.remove(vol)
         return vol
 
-    def write_target(self) -> Volume:
-        """Return the best volume for new writes: primary if online, else first online secondary."""
+    def write_target(self, size: int = None) -> Optional[Volume]:
+        """Return the best volume for new writes."""
+        if size is not None:
+            candidates = self.read_targets()
+            if not candidates and not self.secondaries:
+                candidates = [self.primary]
+            for vol in candidates:
+                if vol.can_accept_write(size):
+                    return vol
+            return None
         if self.primary.is_online():
             return self.primary
         online = self.online_secondaries()
