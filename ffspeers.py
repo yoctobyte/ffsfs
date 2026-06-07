@@ -25,7 +25,7 @@ from urllib.parse import quote
 #global, allowed to be changed
 _REALM = MAGIC_REALM
 
-AUTO_DISCOVER = True
+AUTO_DISCOVER = os.environ.get("FFSFS_AUTODISCOVER", "1").strip().lower() not in ("0", "false", "off")
 
 
 # Cross-realm gossip is fine, but only auto-join our own realm+fsid
@@ -409,7 +409,7 @@ def _set_actual_port(port: int) -> None:
     """
     global _actual_flask_port
     _actual_flask_port = int(port)
-    _log(f"[peer] HTTP listening on 0.0.0.0:{_actual_flask_port}")
+    _log(f"[peer] HTTP listening on {PEER_BIND_HOST}:{_actual_flask_port}")
     
     #load subscriptiond data
     _load_subscriptions()
@@ -463,6 +463,9 @@ FILECACHE_REFRESH_INTERVAL = 600      # seconds
 LOCAL_INDEX_REFRESH_INTERVAL = 3600   # seconds
 PEER_PORT = int(os.environ.get("FFSFS_PEER_PORT", "8765"))
 PEER_BIND_HOST = os.environ.get("FFSFS_PEER_HOST", "0.0.0.0")
+
+def _get_node_name() -> str:
+    return os.environ.get("FFSFS_NODE_NAME") or os.environ.get("FFSFS_HOSTNAME") or socket.gethostname()
 
 app = Flask(__name__)
 
@@ -1068,7 +1071,7 @@ def hello():
         except Exception as e:
             print(f"[peer] Failed to save peer config: {e}")
 
-    return jsonify({"status": "ok", "server_time": now, "hostname": socket.gethostname()})
+    return jsonify({"status": "ok", "server_time": now, "hostname": _get_node_name()})
 
 @app.route("/list-files", methods=["GET"])
 def list_files():
@@ -1169,7 +1172,7 @@ def status():
     # JSON per defectum; si HTML desideratur, tabellam simplicem ostendimus
     payload = {
         "peers": peers,
-        "server": socket.gethostname(),
+        "server": _get_node_name(),
         "ts": now,
         "port": _actual_flask_port,
         "realm": _REALM,   # ← additum: ostendimus regnum (realm)
@@ -1624,10 +1627,10 @@ def start_local_peer_server(port: int = PEER_PORT) -> None:
         try:
             app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
             app.config["JSON_SORT_KEYS"] = False
-            _log(f"[peer] Starting peer server on 0.0.0.0:{port} (realm={_REALM})")
+            _log(f"[peer] Starting peer server on {PEER_BIND_HOST}:{port} (realm={_REALM})")
             # Bind and save actual port (in case 0 means auto)
             from werkzeug.serving import make_server
-            httpd = make_server("0.0.0.0", port, app, threaded=True)
+            httpd = make_server(PEER_BIND_HOST, port, app, threaded=True)
             _actual = httpd.server_port
             _set_actual_port(_actual)  # your existing helper or inline assignment
             httpd.serve_forever()

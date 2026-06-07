@@ -1256,13 +1256,21 @@ class FFSFS(Operations):
 
 # Convenience runner (optional)
 def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool = True, realm: str = None):
-    #fs = FFSFS(mount_root=mountpoint, base_path=base_path, realm=realm)
     fs = FFSFS(mount_root=mountpoint, base_path=base_path, realm=realm)
     # --- Start peer HTTP server (optional if ffspeers available) ---
     try:
         if peers:
             peers.set_realm(fs.realm)
             peers.register_local_backend(fs.backend)
+
+            # Add known peers from environment if any
+            known_env = os.environ.get("FFSFS_KNOWN_PEERS")
+            if known_env:
+                for kp in known_env.split(","):
+                    kp = kp.strip()
+                    if kp and kp not in peers._known_peers:
+                        peers._known_peers.append(kp)
+
             port = int(os.environ.get("FFSFS_PEER_PORT", "8765"))
             peers.start_local_peer_server(port)
     except Exception as e:
@@ -1271,49 +1279,15 @@ def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool 
     FUSE(fs, mountpoint, foreground=foreground, nothreads=False)
 
 
-if __name__ == "_depsmain__":
-    import argparse, os
-    import ffsutils
+def load_config_file(path: str) -> dict:
+    import json
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        sys.exit(f"error: failed to load config file '{path}': {e}")
 
-    ap = argparse.ArgumentParser(description="FFSFS (versioned FUSE FS)")
-    ap.add_argument("mountpoint", help="mount directory")
-    ap.add_argument(
-        "--base",
-        default=ffsutils.DATA_DIR,
-        help="storage base directory"
-    )
 
-    ap.add_argument("--bg", action="store_true", help="run in background")
-    # NEW:
-    ap.add_argument("--realm", default=None, help="realm label; if set, data lives in <base>/<realm> and marker reflects it")
-    ap.add_argument("--port", type=int, default=None, help="peer listen port (optional; exported as FFSFS_PEER_PORT)")
-
-    args = ap.parse_args()
-
-    # Optional env override for peer layer (keeps your existing peers code working)
-    if args.port is not None:
-        os.environ["FFSFS_PEER_PORT"] = str(args.port)
-    if args.realm:
-        os.environ["FFSFS_REALM"] = args.realm        
-
-    # Compute the *effective* base dir: base or base/<realm>
-    realm_base = ffsutils.effective_base(args.base, args.realm)
-
-    # Write/update the magic marker for this realm
-    ffsutils.ensure_magic_marker(realm_base, args.realm)
-    
-    #final checks
-    _ensure_empty_mountpoint(args.mountpoint)
-    realm_base = ffsutils.effective_base(args.base, args.realm)
-    
-
-    # If your filesystem init takes base via constructor:
-    #   fs = FFSFS(base_dir=realm_base, realm=(args.realm or ffsutils.MAGIC_REALM))
-    #   FUSE(fs, args.mountpoint, foreground=args.fg, nothreads=True)
-    #
-    # If you have a helper 'mount(mountpoint, base_path=..., foreground=...)':
-    mount(args.mountpoint, base_path=realm_base, foreground=args.fg, realm=args.realm)
-    
 if __name__ == "__main__":
     import sys
     import argparse
@@ -1331,12 +1305,13 @@ if __name__ == "__main__":
     # --- Full CLI (classic mode) ---
     ap = argparse.ArgumentParser(description="FFSFS (versioned FUSE FS)")
     ap.add_argument("mountpoint", nargs="?", help="mount directory (omit if using short mode)")
-    ap.add_argument("--base", default=ffsutils.DATA_DIR, help="storage base directory")
-    ap.add_argument("--bg", action="store_true", help="run in foreground")
+    ap.add_argument("--base", default=None, help="storage base directory")
+    ap.add_argument("--bg", action="store_true", default=None, help="run in background")
     ap.add_argument("--realm", default=None,
                     help="realm label; if set, data lives in <base>/<realm> and marker reflects it")
     ap.add_argument("--port", type=int, default=None,
                     help="peer listen port (optional; exported as FFSFS_PEER_PORT)")
+    ap.add_argument("--config", help="path to configuration JSON file")
 
     try:
         args = ap.parse_args()
@@ -1347,35 +1322,56 @@ if __name__ == "__main__":
             sys.exit(0)
         raise
 
+    config_data = {}
+    if args.config:
+        config_data = load_config_file(args.config)
+
+    # Resolution precedence: CLI > Config File > Default
+    realm = args.realm if args.realm is not None else config_data.get("realm")
+    port = args.port if args.port is not None else config_data.get("port")
+    base_val = args.base if args.base is not None else (config_data.get("base") or config_data.get("storage_base") or ffsutils.DATA_DIR)
+    mountpoint = args.mountpoint if args.mountpoint is not None else config_data.get("mountpoint")
+    bg = args.bg if args.bg is not None else config_data.get("bg", False)
+
     # If user didn’t provide a mountpoint but did provide exactly one non-flag token,
     # be generous and treat it as short-mode anyway.
-    if not args.mountpoint and len(tokens) == 1:
+    if not mountpoint and len(tokens) == 1:
         _short_mode_launch(tokens[0])
         sys.exit(0)
 
-    if not args.mountpoint:
+    if not mountpoint:
         ap.print_usage()
         sys.exit("error: the following arguments are required: mountpoint")
 
+    # Set peer environment variables from config
+    if "bind_host" in config_data:
+        os.environ["FFSFS_PEER_HOST"] = str(config_data["bind_host"])
+    if "node_name" in config_data:
+        os.environ["FFSFS_NODE_NAME"] = str(config_data["node_name"])
+    if "autodiscover" in config_data:
+        os.environ["FFSFS_AUTODISCOVER"] = "1" if config_data["autodiscover"] else "0"
+    if "known_peers" in config_data:
+        os.environ["FFSFS_KNOWN_PEERS"] = ",".join(str(p) for p in config_data["known_peers"])
+
     # Optional env override for the peer layer (keeps peers module happy)
-    if args.port is not None:
-        os.environ["FFSFS_PEER_PORT"] = str(args.port)
-    if args.realm:
-        os.environ["FFSFS_REALM"] = args.realm
+    if port is not None:
+        os.environ["FFSFS_PEER_PORT"] = str(port)
+    if realm:
+        os.environ["FFSFS_REALM"] = realm
 
     # If a realm is given but no port, auto-pick a consistent free port for that realm
-    if args.realm and args.port is None and not os.environ.get("FFSFS_PEER_PORT"):
-        seed = _port_for_realm(_sanitize_realm(args.realm))
+    if realm and port is None and not os.environ.get("FFSFS_PEER_PORT"):
+        seed = _port_for_realm(_sanitize_realm(realm))
         os.environ["FFSFS_PEER_PORT"] = str(_pick_free_port(seed))
 
     # Effective base: base or base/<realm>
-    realm_base = ffsutils.effective_base(args.base, args.realm)
+    realm_base = ffsutils.effective_base(base_val, realm)
 
     # Marker for this realm (cosmetic but nice)
     try:
-        ffsutils.ensure_magic_marker(realm_base, args.realm)
+        ffsutils.ensure_magic_marker(realm_base, realm)
     except Exception:
         pass
 
     # Mount with your existing helper
-    mount(args.mountpoint, base_path=realm_base, foreground=not args.bg, realm=args.realm)
+    mount(mountpoint, base_path=realm_base, foreground=not bg, realm=realm)
