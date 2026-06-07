@@ -29,10 +29,11 @@ Important long-term properties:
   axes:
   - Availability: always-online, intermittent, or user-powered on demand.
   - Storage depth: cache-only/limited, normal shared storage, or bulk storage.
-- Support sync/storage intent ranging from access-only/cache-only laptops, through
-  limited shared storage boxes, to always-on or sometimes-on file servers,
-- NAS boxes, and high-capacity replica nodes.
-- Eventually support replica/bulk storage with multiple disks, including removable disks
+- Support sync/storage intent ranging from access-only/cache-only laptops,
+  through limited shared storage boxes, to always-on or sometimes-on file
+  servers, NAS boxes, and high-capacity replica nodes.
+- Eventually support replica/bulk storage with multiple disks, including
+  removable disks
   rotated by a user as a practical backup workflow, such as alternating external
   USB drives.
 - Support flexible deployment topologies over time, including remote locations,
@@ -99,11 +100,11 @@ The exact approach for remote sites, Windows nodes, NAS nodes, and overlay
 networking is intentionally not fixed yet. Decide those designs from concrete
 hardware and location constraints when they are known.
 
-Security, authentication, and realm boundaries are important architectural
-topics, especially for remote and multi-location deployments. For the near-term
-testing phase, keep mechanisms simple and explicit. Prefer better configuration
-tooling, clear defaults, and test fixtures over a heavy authentication design
-before the core behavior is stable.
+Security, authentication, and realm boundaries are important. MVP peer security
+should use a mandatory per-realm secret with HMAC request signing for any data
+exchange. Manual peer approval is optional per node. HTTP remains valid for
+trusted LAN performance; HTTPS is optional transport privacy and should not
+replace HMAC realm authentication. See `agents/auth_transport_design.md`.
 
 Automated testing should use isolated VM networks, not the workstation LAN,
 Tailscale, or real remote sites. Real-world deployments are valuable later, but
@@ -447,6 +448,10 @@ Deliverable:
 3. Add VM scenarios for cross-directory moves, conflict writes,
    restart-during-fetch, offline disk swap, and broader sync policy coverage.
 4. Peer trust/security hardening and secure sockets for wider deployments.
+   - Implement realm secret generation/storage.
+   - Add HMAC request signing and nonce/timestamp replay checks.
+   - Add optional manual peer approval/pending peer state.
+   - Add optional HTTPS transport with self-signed cert support.
 
 ### Completed in this cycle
 

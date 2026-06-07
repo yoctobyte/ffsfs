@@ -4,6 +4,47 @@ This document serves as the developer handover details for the next agent workin
 
 ---
 
+## 0.6. Follow-up: Authentication and Transport Design
+
+Design conclusion:
+
+- Always require a per-realm secret for peer data exchange.
+- Manual peer approval is optional per node.
+- Discovery may remain automatic, but discovered peers are only candidates
+  until they authenticate.
+- HTTP remains supported for trusted LAN performance.
+- HTTPS should be an optional transport privacy layer, not the primary trust
+  mechanism.
+- HMAC request signing with the realm secret is the MVP authentication
+  mechanism.
+- SSH trust may be useful for bootstrap, but SSH access should not
+  automatically imply FFSFS peer trust.
+
+Added `agents/auth_transport_design.md` with:
+
+- expected request headers
+- HMAC signing inputs
+- reject conditions
+- approval modes
+- HTTP/HTTPS transport guidance
+- SSH bootstrap stance
+- future extensions
+
+Easy follow-up tasks for another agent:
+
+- Add `realm_secret` generation in `ffsctl realm init`.
+- Store `realm_secret` in `realm-config.json` with restrictive file
+  permissions where possible.
+- Add a small `ffspeer_auth.py` helper for HMAC signing/verification,
+  timestamp checks, and nonce replay cache.
+- Add unit tests for HMAC canonicalization and replay rejection.
+- Add `peer_trust` config validation with values `realm_secret` and `manual`.
+- Add `peer_transport` config validation with values `http` and `https`.
+- Add docs to README/operator guide for sharing a realm secret between two
+  test nodes.
+
+---
+
 ## 0.5. Follow-up: Move/Rename Semantics
 
 Move/rename design:

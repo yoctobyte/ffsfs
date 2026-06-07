@@ -8,6 +8,8 @@ on FFSFS.
 Read these files before changing behavior:
 
 - `project_plan.md`: stabilization roadmap and current priority queue.
+- `auth_transport_design.md`: peer authentication, realm secret, approval, and
+  HTTP/HTTPS transport decisions.
 - `vm_testing_plan.md`: VM-first strategy for FUSE and peer-network tests.
 - `../README.md`: user-facing install and quick-start notes.
 - `../tech_doc.md`: storage layout, peer API, discovery, and tunables.
@@ -27,6 +29,10 @@ Read these files before changing behavior:
 3. Peer trust/security hardening and secure sockets. Important for wider
    deployment, but not the next implementation blocker for checkout-and-run
    local/LAN MVP testing.
+   - Always require per-realm secret for peer data exchange.
+   - Optional per-node manual approval.
+   - HTTP remains supported for trusted LAN performance.
+   - HTTPS is optional transport privacy; HMAC realm auth is still required.
 
 Completed:
 - Tiered multi-backend storage pool (`ffsvolumes.py`, pool-aware `StorageBackend`)
@@ -104,9 +110,11 @@ cloud drive systems. Keep these direction points in mind:
 Do not prematurely lock in one remote-site design. Wait for concrete hardware,
 network, and operational constraints before choosing the approach.
 
-Security, authentication, and realm boundaries matter, but near-term testing
-should stay simple. Focus first on configuration tooling that makes local/LAN
-and VM scenarios explicit and reproducible.
+Security, authentication, and realm boundaries matter. MVP direction is:
+automatic discovery, mandatory realm-secret request signing for data exchange,
+optional manual peer approval per node, HTTP allowed for trusted LAN
+performance, and HTTPS as optional transport privacy rather than the primary
+trust mechanism. See `auth_transport_design.md`.
 
 Automated tests should use named VMs and isolated VM networks. Do not rely on
 LAN broadcast, Tailscale, or real remote sites for default test runs. Real-world
