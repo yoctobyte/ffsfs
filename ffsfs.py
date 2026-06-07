@@ -376,7 +376,6 @@ class MetadataLog:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         if not os.path.exists(self.path):
             with open(self.path, "w", encoding="utf-8") as f:
-                print ("{realm=}")
                 f.write(f"# {HUMAN_NAME} meta log — realm={realm}\n")
 
     def append(self, vpath: str, final_name: str, size: int) -> None:

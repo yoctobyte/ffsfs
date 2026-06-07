@@ -40,6 +40,10 @@
 
   Top To-Dos
 
+  VM harness note: two-peer scenarios now run inside a single disposable VM
+  with two peer processes on different guest ports (see tools/vm/README.md).
+  A multi-VM layout is reserved for future stress/config testing.
+
   1. Add two-peer VM scenarios:
       - update-newer-version
       - path-traversal
@@ -64,6 +68,12 @@
       - known limitations
 
   6. After testing/config: implement background sync and storage policies.
+
+  Recently resolved
+
+  - Stale `print ("{realm=}")` debug line removed from MetaLog.__init__
+    (ffsfs.py). It was leaking into scenario stdout whenever a realm's
+    metadata log was created for the first time.
 
   Feature Roadmap
 

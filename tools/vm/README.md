@@ -55,25 +55,33 @@ tools/vm/run-single-vm-smoke.sh
 This compiles, runs pytest, mounts FFSFS inside the guest, writes/reads/deletes a
 file, unmounts, and prints the storage files found under `/tmp/ffsfs-storage`.
 
-## Two-VM Peer Reachability
+## Two-Peer Scenarios (Single VM)
 
 ```bash
-tools/vm/run-two-vm-test.sh
+tools/vm/run-two-peer-scenario.sh <scenario>
+tools/vm/run-two-vm-test.sh   # compatibility wrapper: runs file-fetch
 ```
 
-This is a compatibility wrapper for the default two-peer scenario:
+Both peer servers run as separate Python processes inside one disposable VM,
+on different guest ports with different data directories. This keeps the TCG
+boot cost to a single VM; a multi-VM layout is reserved for future stress
+and config tests.
 
-```bash
-tools/vm/run-two-peer-scenario.sh file-fetch
-```
+The runner boots one VM, syncs the repository, starts both peer servers
+(without FUSE), waits for `/healthz` on each guest port, and sources the
+named scenario. Inside the guest, scenarios reach the peers over loopback:
 
-The runner boots two disposable overlays, syncs the repository into both guests,
-starts peer HTTP servers without FUSE, waits for `/healthz`, and then runs the
-named scenario.
+- peer A: `http://127.0.0.1:$FFSFS_VM_PEER_A_PORT` (default `18765`)
+- peer B: `http://127.0.0.1:$FFSFS_VM_PEER_B_PORT` (default `18766`)
+
+Both peer ports are also forwarded to the host for ad-hoc debugging:
+
+- peer A: `http://127.0.0.1:$FFSFS_VM_PEER_A_HOST_PORT` (default `28765`)
+- peer B: `http://127.0.0.1:$FFSFS_VM_PEER_B_HOST_PORT` (default `28766`)
 
 Available scenarios:
 
-- `healthz`: each guest reaches the other's `/healthz` endpoint.
+- `healthz`: each peer reaches the other's `/healthz` endpoint over loopback.
 - `file-fetch`: peer A commits a versioned file and peer B fetches it through
   `/list-dir`, `/head`, and `/get-file`.
 - `delete-tombstone`: peer A creates, deletes, and recreates a file; peer B
@@ -83,16 +91,20 @@ Available scenarios:
 Useful overrides:
 
 ```bash
-FFSFS_VM_PEER_A_SSH_PORT=2222 \
-FFSFS_VM_PEER_B_SSH_PORT=2223 \
+FFSFS_VM_TWO_PEER_NAME=ffsfs-vm-two-peer \
+FFSFS_VM_TWO_PEER_SSH_PORT=2224 \
+FFSFS_VM_PEER_A_PORT=18765 \
+FFSFS_VM_PEER_B_PORT=18766 \
 FFSFS_VM_PEER_A_HOST_PORT=28765 \
 FFSFS_VM_PEER_B_HOST_PORT=28766 \
-tools/vm/run-two-vm-test.sh
+FFSFS_VM_PEER_A_DATA=/tmp/ffsfs-peer-data \
+FFSFS_VM_PEER_B_DATA=/tmp/ffsfs-peer-data-b \
+tools/vm/run-two-peer-scenario.sh delete-tombstone
 ```
 
-Future scale work should build on this structure with an N-node runner for 10+
-node tests. Keep that separate from the two-peer runner so normal VM smoke runs
-stay fast and easy to diagnose.
+Future scale work should build a separate N-node runner for 10+ node tests
+(multiple VMs, real network topology). Keep that separate from the two-peer
+runner so normal VM smoke runs stay fast and easy to diagnose.
 
 ## Logs
 

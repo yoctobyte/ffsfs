@@ -9,7 +9,7 @@ cd /home/'"$FFSFS_VM_USER"'/work/ffsfs
 PYTHONPATH=/home/'"$FFSFS_VM_USER"'/work/ffsfs python3 - <<PY
 from ffsfs import StorageBackend
 
-backend = StorageBackend("/tmp/ffsfs-peer-data", "'"$realm"'")
+backend = StorageBackend("'"$peer_a_data_base"'", "'"$realm"'")
 temp = backend.create_temp_for("shared/hello.txt")
 with open(temp, "wb") as f:
     f.write(b"hello from peer a")

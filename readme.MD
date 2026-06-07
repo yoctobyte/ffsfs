@@ -96,7 +96,11 @@ VM verification:
 ```bash
 tools/vm/run-single-vm-smoke.sh
 tools/vm/run-two-peer-scenario.sh file-fetch
+tools/vm/run-two-peer-scenario.sh delete-tombstone
 ```
+
+The two-peer runner boots a single disposable VM and starts two peer
+processes on different guest ports. Multi-VM is reserved for stress tests.
 
 Check peer status:
 

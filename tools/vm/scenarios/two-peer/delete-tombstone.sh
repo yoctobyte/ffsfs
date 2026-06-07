@@ -10,7 +10,7 @@ PYTHONPATH=/home/'"$FFSFS_VM_USER"'/work/ffsfs python3 - <<PY
 import time
 from ffsfs import StorageBackend
 
-backend = StorageBackend("/tmp/ffsfs-peer-data", "'"$realm"'")
+backend = StorageBackend("'"$peer_a_data_base"'", "'"$realm"'")
 temp = backend.create_temp_for("shared/hello.txt")
 with open(temp, "wb") as f:
     f.write(b"hello from peer a")
@@ -29,7 +29,7 @@ import json
 import urllib.parse
 import urllib.request
 
-base = "http://10.0.2.2:'"$peer_a_host_port"'"
+base = "http://127.0.0.1:'"$peer_a_port"'"
 realm = "'"$realm"'"
 
 def get_json(path, **params):
@@ -55,7 +55,7 @@ cd /home/'"$FFSFS_VM_USER"'/work/ffsfs
 PYTHONPATH=/home/'"$FFSFS_VM_USER"'/work/ffsfs python3 - <<PY
 from ffsfs import StorageBackend
 
-backend = StorageBackend("/tmp/ffsfs-peer-data", "'"$realm"'")
+backend = StorageBackend("'"$peer_a_data_base"'", "'"$realm"'")
 final = backend.commit_delete("shared/hello.txt")
 print("deleted:", final)
 PY
@@ -71,7 +71,7 @@ import json
 import urllib.parse
 import urllib.request
 
-base = "http://10.0.2.2:'"$peer_a_host_port"'"
+base = "http://127.0.0.1:'"$peer_a_port"'"
 realm = "'"$realm"'"
 
 def get_json(path, **params):
@@ -97,7 +97,7 @@ cd /home/'"$FFSFS_VM_USER"'/work/ffsfs
 PYTHONPATH=/home/'"$FFSFS_VM_USER"'/work/ffsfs python3 - <<PY
 from ffsfs import StorageBackend
 
-backend = StorageBackend("/tmp/ffsfs-peer-data", "'"$realm"'")
+backend = StorageBackend("'"$peer_a_data_base"'", "'"$realm"'")
 temp = backend.create_temp_for("shared/hello.txt")
 with open(temp, "wb") as f:
     f.write(b"hello again")
@@ -116,7 +116,7 @@ import json
 import urllib.parse
 import urllib.request
 
-base = "http://10.0.2.2:'"$peer_a_host_port"'"
+base = "http://127.0.0.1:'"$peer_a_port"'"
 realm = "'"$realm"'"
 
 def get_json(path, **params):
