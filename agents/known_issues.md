@@ -27,9 +27,10 @@
       - Some are acceptable resilience paths, but write/delete/sync/startup paths need logging or propagation.
 
   6. Peer trust/security model — partially addressed.
-      - HMAC per-realm secret authentication is implemented (ffsauth.py).
-      - TRUST_UNKNOWN_PEER = True remains the default (auto-add on /hello).
-      - Optional manual peer approval not yet implemented.
+      - HMAC per-realm secret authentication is implemented (ffspeer_auth.py).
+      - Unknown peers are not auto-added by default (`trust_unknown_peers=false`).
+      - `ffsctl peer` manages `known_peers` and `approved_peers`.
+      - Broader revocation, pending-peer review, and secure transport UX remain open.
 
   7. Rich background sync policy — base infrastructure done, rich policies open.
       - Background SyncWorker with active-pull and cache eviction is implemented.

@@ -25,6 +25,7 @@ FFSFS supports explicit configuration files in JSON format. This allows configur
     "192.168.1.51:18765"
   ],
   "peer_trust": "realm_secret",
+  "trust_unknown_peers": false,
   "peer_transport": "http",
   "node_role": "replica_storage",
   "node_availability": "on_demand",
@@ -72,22 +73,25 @@ python3 ffsctl.py status --port 18765
 ```
 
 ### Managing Peers Manually
-Peers list is stored in `.storage/peers-<realm>.conf`. You can manipulate this config file directly or use `ffsctl.py`:
+Realm peer lists are stored in `realm-config.json`. Use `configure.sh` for
+normal operation, or `ffsctl.py peer` directly when scripting lower-level
+operations.
+
 - **List current peers:**
   ```bash
-  python3 ffsctl.py peers list --conf ~/.ffsfs/.storage/peers-myrealm.conf
+  ./configure.sh list-peers myrealm
   ```
 - **Add a peer:**
   ```bash
-  python3 ffsctl.py peers add 192.168.1.52:18765 --conf ~/.ffsfs/.storage/peers-myrealm.conf
+  ./configure.sh add-peer myrealm 192.168.1.52:18765
   ```
 - **Remove a peer:**
   ```bash
-  python3 ffsctl.py peers remove 192.168.1.52:18765 --conf ~/.ffsfs/.storage/peers-myrealm.conf
+  ./configure.sh remove-peer myrealm 192.168.1.52:18765
   ```
-- **Ban a peer** (adds it to a blacklist to block future gossips/syncs):
+- **Approve a peer node name** (needed when `peer_trust=manual`):
   ```bash
-  python3 ffsctl.py peers ban 192.168.1.99:18765 --conf ~/.ffsfs/.storage/peers-myrealm.conf
+  ./configure.sh approve-peer myrealm node-b
   ```
 
 ---
@@ -155,6 +159,23 @@ Configure via `ffsctl.py realm set <realm> peer_trust <mode>`:
   secret is trusted to participate.
 - **`manual`**: Peers must both know the realm secret AND be listed in the
   node's `approved_peers` list before data exchange is allowed.
+
+Manage realm peer lists with:
+
+```bash
+./configure.sh list-peers myrealm
+./configure.sh add-peer myrealm 192.168.1.52:18765
+./configure.sh remove-peer myrealm 192.168.1.52:18765
+./configure.sh approve-peer myrealm node-b
+./configure.sh unapprove-peer myrealm node-b
+```
+
+`trust_unknown_peers` defaults to `false`, so authenticated unknown peers are
+not automatically added to `known_peers`. For loose LAN testing, opt in with:
+
+```bash
+./configure.sh trust-unknown-peers myrealm true
+```
 
 ### Transport
 
@@ -454,5 +475,5 @@ FUSE filesystems can sometimes hang or get stuck in a "Transport endpoint is not
 
 - **No Transport Encryption by Default:** Peer communication uses HTTP with HMAC request signing for authentication. File payloads and metadata are authenticated but not encrypted in transit. For confidentiality, configure `peer_transport=https` (requires manual cert setup) or use an encrypted overlay network like Tailscale.
 - **Simple Conflict Resolution:** Conflicts are resolved via latest-timestamp-wins. Logical locking or interactive merge flows are not yet supported.
-- **Auto-Discovery Limits:** UDP broadcast autodiscovery is designed for single-subnet LAN networks. For multi-subnet or remote connections, you must add peers manually using `ffsctl.py peers add`.
+- **Auto-Discovery Limits:** UDP broadcast autodiscovery is designed for single-subnet LAN networks. Unknown peers are not auto-added by default; for multi-subnet or remote connections, add peers explicitly using `ffsctl.py peer <realm> add`.
 - **Background Sync in Progress:** Explicit local mirror volumes have mirror-on-write plus pending catch-up retry. Final placement honors configured size/capacity limits. The next feature phase is implementing broader policies such as `cache_limited`, selected-prefix sync, media/role-aware routing, and eviction.

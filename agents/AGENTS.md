@@ -28,7 +28,7 @@ Read these files before changing behavior:
 3. Peer trust/security hardening and secure sockets. Important for wider
    deployment, but not the next implementation blocker for checkout-and-run
    local/LAN MVP testing.
-   - Optional per-node manual approval.
+   - Broader peer trust/security hardening and secure socket UX.
    - HTTP remains supported for trusted LAN performance.
    - HTTPS is optional transport privacy; HMAC realm auth is still required.
 
@@ -58,7 +58,9 @@ Completed:
 - Non-blocking retry with exponential backoff (30s–3600s cap), per-vpath
   failure tracking, auto-clear on success
 - `ffsctl sync status` with peer info, storage volumes, cache pressure
-- HMAC peer authentication with per-realm secret (`ffsauth.py`)
+- HMAC peer authentication with per-realm secret (`ffspeer_auth.py`)
+- Realm peer management via `ffsctl peer` for `known_peers` and
+  `approved_peers`; unknown peers are not auto-added by default
 - Conflict detection and handling: same-hash auto-resolve, different-hash
   records conflict, virtual `.CONFLICT.<hash8>` FUSE entries, user resolves
   by deleting unwanted version, persistent `.ffsfs-conflicts.json`
@@ -107,9 +109,10 @@ cloud drive systems. Keep these direction points in mind:
 - The persistent storage format should stay inspectable and useful without a
   running service.
 - Storage backends should mimic the logical folder structure for committed
-  updates and deletes/tombstones. Moves/renames are destination create plus
-  source delete. A source `moved` marker may be recorded as a hash-bearing hint,
-  but delete+create is authoritative.
+  updates and deletes/tombstones. Same-filesystem moves/renames move the latest
+  version file to the destination without byte duplication and record a source
+  `moved` marker as a hash-bearing history hint. Cross-device moves fall back
+  to copy+source-file removal.
 - FFSFS is primarily single-user/local-first, not corporate NFS/SMB-style
   concurrent sync. Conflicting offline moves/renames can require manual or
   later automatic resolution.
@@ -151,7 +154,8 @@ node names are user configuration.
   `max_file_size`, `max_bytes`, and `reserve_bytes`. Rich role/prefix/media
   policy is not implemented yet.
 - FUSE mount behavior should be validated only inside VMs.
-- Peer trust/security model is prototype-grade (TRUST_UNKNOWN_PEER = True).
+- Peer trust/security model still needs broader hardening, but unknown peers are
+  no longer auto-added by default.
 
 ## Verification Baseline
 

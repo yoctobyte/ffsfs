@@ -20,7 +20,7 @@
   comes online.
 - **Flexible deployments:** remote locations, Windows hosts, NAS devices, and overlay networks are in long-term scope; exact designs depend on concrete hardware and network constraints.
 - **Different-location backup:** off-site resilience is a core goal, not just a side effect of sync.
-- **Security later, configuration now:** authentication and realm security matter, but testing should begin with simple explicit configuration for local/LAN/VM scenarios.
+- **Realm authentication:** peer data exchange uses per-realm HMAC request signing; HTTP remains supported for trusted LAN/VM scenarios, with HTTPS as optional transport privacy.
 - **Isolated automated tests:** automated peer tests should use named VMs and isolated virtual networks before LAN, Tailscale, or real remote deployments.
 - **Pragmatic federation:** HTTP peer API for exchange/indexing; UDP “gossip” for discovery.
 - **Safe by default:** guard mountpoints, hide editor/lock junk, enforce `statfs` sanity (`f_namemax=255`).
@@ -63,10 +63,10 @@
    - Append meta log; best-effort peer notify.
 4. **Latest selection** = max `timestamp` among committed versions with same logical name (same dir).
 5. **Delete** = committed version with `mode=delete` (size may be 0); hidden from normal listings.
-6. **Move/rename** = destination `write` plus source `moved` hint and source
-   `delete` tombstone. Delete+create is authoritative; `moved` is a
-   non-authoritative hint carrying the moved content hash so tooling can locate
-   likely targets.
+6. **Move/rename** = same-filesystem move of the latest version file to the
+   destination path, plus a source `moved` marker containing the destination for
+   history/recovery tooling. Cross-device moves fall back to copy+source-file
+   removal.
 
 **Lazy commit:** controlled by `LAZY_COMMIT_MODES` & `LAZY_COMMIT_IDLE_SECS`. Background monitor auto-commits idle temps; optional orphan scan at startup.
 
@@ -98,7 +98,7 @@ Base: `http://<host>:<port>/…` (JSON unless noted). **All endpoints require `r
 - `GET /head?realm=&vpath=a/b/file.txt` → newest committed version of a logical.  
   Returns: `{"vpath":"a/b/file.txt","version":{"name":"file.txt.<...>","size":N,"timestamp":TS,"mode":"write"}}` or 404
 - `GET /get-file?realm=&vpath=<versioned path>` → raw bytes; headers include ASCII + RFC5987 filename and `Content-Disposition`.
-- `POST /notify` → `{"realm":..., "event":"commit|delete|modify", "vpath":"a/b/file.txt", "suffix":"<hash.mode.flags.ts>", "from_port":PORT}`; updates caches/fan-out.
+- `POST /notify` → `{"realm":..., "event":"commit|delete|modify|move", "vpath":"a/b/file.txt", "suffix":"<hash.mode.flags.ts>", "from_port":PORT, "dest_vpath":"a/b/new.txt"}`; updates caches/fan-out.
 - Subscriptions (experimental):  
   - `GET /subscriptions` → `{prefixes:[...]}`  
   - `POST /subscribe { "prefix": "a/b" }`  
@@ -177,24 +177,24 @@ On mount: verify **empty** mountpoint & **safe** storage base; write/refresh mar
   - Discovery seeds: `.storage/ffsgossip-seeds.json`  
   - FS/instance IDs: `.storage/storage.id`, `.storage/instance.id`
 
-### Future configuration and sync policy
+### Configuration and sync policy
 Local storage-pool mirrors support mirror-on-write plus pending catch-up retry
-for volumes configured with `mirror: true`. Broader synchronization policy still
-needs to be designed after VM scenario coverage and explicit config files are in
-place.
+for volumes configured with `mirror: true`. Background sync policy, node roles,
+and rate limits are configured through `realm-config.json` and `ffsctl`.
 
-Expected config dimensions:
+Config dimensions:
 - node role: `access_only`, `cache_limited`, `shared_storage`,
   `replica_storage`
 - node availability: `always_online`, `intermittent`, `on_demand`
 - node storage profile: `cache_only`, `limited`, `bulk_storage`
-- sync policy: disabled, selected prefixes, whole realm where feasible,
-  opportunistic when peers are online, scheduled windows for sometimes-online
-  boxes
+- sync policy: disabled/lazy/active mode, selected prefixes, interval, and cache
+  bounds; broader opportunistic/scheduled/redundancy-target policies are future
+  work
 - storage limits for cache-oriented nodes
 - redundancy targets, once peer inventory and health are reliable enough to
   reason about copy counts
 - explicit peer/discovery settings so tests do not depend on LAN behavior
+- rate limits for foreground/background disk and network I/O
 
 Expected behaviors:
 - access/cache-only nodes fetch on demand and may evict cached remote data

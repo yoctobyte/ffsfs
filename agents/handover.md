@@ -482,7 +482,9 @@ We have finished the FUSE write durability improvements, configuration normaliza
 
 ### Task C: Security Hardening (Later MVP/Wider Deployment)
 
-- Peer trust model is prototype-grade (`TRUST_UNKNOWN_PEER = True`).
+- Peer trust model is still prototype-grade, but unknown peers are not
+  auto-added by default; `ffsctl peer` manages `known_peers` and
+  `approved_peers`.
 - Authentication, realm boundaries, and secure sockets should be wired before
   remote/multi-location deployments.
 

@@ -9,10 +9,9 @@ Features:
 - Or, if run with only a mountpoint, directly mount ffsfs (fallback)
 
 Usage examples:
-  python3 ffsctl.py peers list
-  python3 ffsctl.py peers add 192.168.1.12:8765
-  python3 ffsctl.py peers remove 192.168.1.12:8765
-  python3 ffsctl.py peers ban 192.168.1.99
+  python3 ffsctl.py peer myrealm list
+  python3 ffsctl.py peer myrealm add 192.168.1.12:8765
+  python3 ffsctl.py peer myrealm approve node-b
   python3 ffsctl.py status
   python3 ffsctl.py start /mnt/ffs --base ~/ffsstorage
   python3 ffsctl.py stop
@@ -20,7 +19,7 @@ Usage examples:
   python3 ffsctl.py /mnt/ffs --base ~/ffsstorage   # fallback direct run
 """
 
-import os, sys, argparse, subprocess, time, requests, json
+import os, sys, argparse, subprocess, time, requests, json, socket
 
 from ffsvolumes import (
     Volume, StoragePool, load_pool_config, save_pool_config,
@@ -236,11 +235,15 @@ _REALM_CONFIG_KEYS = {
     "mountpoint", "base", "storage_base", "port", "bind_host",
     "node_name", "autodiscover", "known_peers", "realm",
     "node_role", "node_availability", "node_storage_profile",
-    "peer_trust", "peer_transport", "realm_secret",
+    "peer_trust", "peer_transport", "realm_secret", "approved_peers",
+    "trust_unknown_peers",
 }
 
 _PEER_TRUST_VALUES = {"realm_secret", "manual"}
 _PEER_TRANSPORT_VALUES = {"http", "https"}
+
+def _parse_bool(value: str) -> bool:
+    return str(value).lower() in ("1", "true", "yes", "on")
 
 def _load_realm_config(realm: str) -> dict:
     cfg_path = _realm_config_path(realm)
@@ -322,8 +325,8 @@ def cmd_realm(args):
                 print(f"    primary: {primary.get('path', '?')} ({primary.get('role', '?')})")
                 for b in value.get("backends", []):
                     print(f"    backend: {b.get('path', '?')} ({b.get('role', '?')})")
-            elif key == "known_peers":
-                print(f"  known_peers:")
+            elif key in ("known_peers", "approved_peers"):
+                print(f"  {key}:")
                 for p in value:
                     print(f"    - {p}")
             elif key == "realm_secret":
@@ -341,8 +344,8 @@ def cmd_realm(args):
             print(f"Unknown config key: {key}")
             print(f"Valid keys: {', '.join(sorted(_REALM_CONFIG_KEYS))}")
             return
-        if key == "autodiscover":
-            value = value.lower() in ("1", "true", "yes", "on")
+        if key in ("autodiscover", "trust_unknown_peers"):
+            value = _parse_bool(value)
         elif key == "port":
             try:
                 value = int(value)
@@ -405,6 +408,84 @@ def cmd_realm(args):
                 print(f"  {entry}")
         if not found:
             print("No realms configured yet.")
+
+
+# --------------------- realm peer commands -------------------------
+
+def _peer_config_key(kind: str) -> str:
+    if kind == "known":
+        return "known_peers"
+    if kind == "approved":
+        return "approved_peers"
+    raise ValueError(f"unknown peer list kind: {kind}")
+
+
+def _dedupe_sorted_peers(values) -> list:
+    out = []
+    seen = set()
+    for value in values or []:
+        peer = str(value).strip()
+        if peer and peer not in seen:
+            seen.add(peer)
+            out.append(peer)
+    return out
+
+
+def cmd_peer(args):
+    realm = args.realm
+    data = _load_realm_config(realm)
+    if not data:
+        cfg_path = _realm_config_path(realm)
+        print(f"No config found for realm '{realm}' ({cfg_path})")
+        print("Run: ffsctl.py realm init <realm> [--mountpoint <path>] [--base <path>]")
+        return
+
+    if args.action == "list":
+        known = _dedupe_sorted_peers(data.get("known_peers"))
+        approved = _dedupe_sorted_peers(data.get("approved_peers"))
+        print("known_peers:")
+        if known:
+            for peer in known:
+                mark = " approved" if peer in approved else ""
+                print(f"  - {peer}{mark}")
+        else:
+            print("  (none)")
+        print("approved_peers:")
+        if approved:
+            for peer in approved:
+                print(f"  - {peer}")
+        else:
+            print("  (none)")
+        print(f"trust_unknown_peers: {bool(data.get('trust_unknown_peers', False))}")
+        return
+
+    if not args.peer:
+        print(f"peer is required for action '{args.action}'")
+        return
+
+    key = "approved_peers" if args.action in ("approve", "unapprove") else _peer_config_key(args.kind)
+    peers = _dedupe_sorted_peers(data.get(key))
+
+    if args.action in ("add", "approve"):
+        if args.peer not in peers:
+            peers.append(args.peer)
+            data[key] = peers
+            _save_realm_config(realm, data)
+            print(f"Added {args.peer} to {key}")
+        else:
+            print(f"{args.peer} already present in {key}")
+    elif args.action in ("remove", "unapprove"):
+        if args.peer in peers:
+            peers.remove(args.peer)
+            if peers:
+                data[key] = peers
+            else:
+                data.pop(key, None)
+            _save_realm_config(realm, data)
+            print(f"Removed {args.peer} from {key}")
+        else:
+            print(f"{args.peer} not found in {key}")
+
 
 # --------------------- role / sync / ratelimit commands ---------------
 
@@ -620,7 +701,24 @@ def cmd_sync(args):
         live_status = None
         if port:
             try:
-                r = requests.get(f"http://127.0.0.1:{port}/sync-status", timeout=3)
+                headers = {}
+                secret = data.get("realm_secret")
+                if secret:
+                    from ffspeer_auth import sign_request
+                    node_name = (
+                        data.get("node_name")
+                        or os.environ.get("FFSFS_NODE_NAME")
+                        or os.environ.get("FFSFS_HOSTNAME")
+                        or socket.gethostname()
+                    )
+                    headers = sign_request(
+                        secret, "GET", "/sync-status", {}, b"", realm, node_name
+                    )
+                r = requests.get(
+                    f"http://127.0.0.1:{port}/sync-status",
+                    headers=headers,
+                    timeout=3,
+                )
                 if r.status_code == 200:
                     live_status = r.json()
             except Exception:
@@ -756,6 +854,20 @@ def main():
     sr.add_argument("--secret", default=None, help="existing realm secret hex (for joining a realm)")
     sr.add_argument("--passphrase", default=None, help="derive realm secret from a passphrase")
     sr.set_defaults(func=cmd_realm)
+
+    speer = sub.add_parser("peer", help="manage realm peer configuration")
+    speer.add_argument("realm", help="realm name")
+    speer.add_argument("action", choices=["list", "add", "remove", "approve", "unapprove"])
+    speer.add_argument("peer", nargs="?", help="peer address or node name")
+    speer.add_argument(
+        "--approved",
+        dest="kind",
+        action="store_const",
+        const="approved",
+        default="known",
+        help="with add/remove, operate on approved_peers instead of known_peers",
+    )
+    speer.set_defaults(func=cmd_peer)
 
     sro = sub.add_parser("role", help="show or set the node storage role")
     sro.add_argument("realm", help="realm name")

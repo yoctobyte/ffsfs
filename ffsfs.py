@@ -1715,6 +1715,8 @@ def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool 
 
             # Configure auth if realm_secret is available
             cfg = realm_config or {}
+            if hasattr(peers, "set_trust_unknown_peers"):
+                peers.set_trust_unknown_peers(bool(cfg.get("trust_unknown_peers", False)))
             secret = cfg.get("realm_secret")
             if secret and hasattr(peers, "set_auth_config"):
                 peers.set_auth_config(

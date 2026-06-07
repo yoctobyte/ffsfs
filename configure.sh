@@ -19,7 +19,10 @@
 #   set-port <realm> <port>
 #   add-peer <realm> <host:port>
 #   remove-peer <realm> <host:port>
-#   list-peers
+#   approve-peer <realm> <node-name>
+#   unapprove-peer <realm> <node-name>
+#   list-peers <realm>
+#   trust-unknown-peers <realm> <true|false>
 #   add-backend <realm> <path> [--role <role>] [--id <label>] [--mirror]
 #   remove-backend <realm> <id_or_label_or_path>
 #   list-backends <realm>
@@ -48,7 +51,10 @@ usage() {
     echo "  set-port <realm> <port>             Set peer port"
     echo "  add-peer <realm> <host:port>        Add known peer"
     echo "  remove-peer <realm> <host:port>     Remove known peer"
-    echo "  list-peers                          List known peers"
+    echo "  approve-peer <realm> <node-name>    Approve node for peer_trust=manual"
+    echo "  unapprove-peer <realm> <node-name>  Remove node approval"
+    echo "  list-peers <realm>                  List known and approved peers"
+    echo "  trust-unknown-peers <realm> <bool>  Auto-add authenticated unknown peers"
     echo "  add-backend <realm> <path>          Add storage backend"
     echo "      [--role <archive|cache>] [--id <label>] [--mirror]"
     echo "      [--media <ssd|hdd|network>] [--max-bytes <n>]"
@@ -57,7 +63,8 @@ usage() {
     echo "  list-backends <realm>               List storage backends"
     echo ""
     echo "Config keys: mountpoint, base, port, bind_host, node_name,"
-    echo "             autodiscover, known_peers"
+    echo "             autodiscover, known_peers, approved_peers,"
+    echo "             trust_unknown_peers"
     exit 0
 }
 
@@ -139,78 +146,41 @@ cmd_add_peer() {
     local realm="${1:-}" peer="${2:-}"
     require_arg "$realm" "realm name required"
     require_arg "$peer" "peer address required (host:port)"
-    # Store in realm config as known_peers array
-    local cfg="$CONFIG_BASE/$realm/realm-config.json"
-    if [ ! -f "$cfg" ]; then
-        die "realm '$realm' not configured. Run: $0 init $realm"
-    fi
-    python3 -c "
-import json
-with open('$cfg') as f:
-    d = json.load(f)
-peers = d.get('known_peers', [])
-peer = '$peer'
-if peer not in peers:
-    peers.append(peer)
-    d['known_peers'] = peers
-    with open('$cfg', 'w') as f:
-        json.dump(d, f, indent=2)
-        f.write('\n')
-    print(f'Added peer: {peer}')
-else:
-    print(f'Peer already present: {peer}')
-"
+    python3 "$FFSCTL" peer "$realm" add "$peer"
 }
 
 cmd_remove_peer() {
     local realm="${1:-}" peer="${2:-}"
     require_arg "$realm" "realm name required"
     require_arg "$peer" "peer address required (host:port)"
-    local cfg="$CONFIG_BASE/$realm/realm-config.json"
-    if [ ! -f "$cfg" ]; then
-        die "realm '$realm' not configured."
-    fi
-    python3 -c "
-import json
-with open('$cfg') as f:
-    d = json.load(f)
-peers = d.get('known_peers', [])
-peer = '$peer'
-if peer in peers:
-    peers.remove(peer)
-    d['known_peers'] = peers
-    with open('$cfg', 'w') as f:
-        json.dump(d, f, indent=2)
-        f.write('\n')
-    print(f'Removed peer: {peer}')
-else:
-    print(f'Peer not found: {peer}')
-"
+    python3 "$FFSCTL" peer "$realm" remove "$peer"
 }
 
 cmd_list_peers() {
-    echo "Known peers (peers.conf):"
-    python3 "$FFSCTL" peers list
-    echo ""
-    echo "Known peers (realm configs):"
-    if [ -d "$CONFIG_BASE" ]; then
-        for d in "$CONFIG_BASE"/*/; do
-            realm="$(basename "$d")"
-            cfg="$d/realm-config.json"
-            if [ -f "$cfg" ]; then
-                python3 -c "
-import json
-with open('$cfg') as f:
-    d = json.load(f)
-peers = d.get('known_peers', [])
-if peers:
-    print(f'  [{realm}]')
-    for p in peers:
-        print(f'    {p}')
-"
-            fi
-        done
-    fi
+    local realm="${1:-}"
+    require_arg "$realm" "realm name required"
+    python3 "$FFSCTL" peer "$realm" list
+}
+
+cmd_approve_peer() {
+    local realm="${1:-}" peer="${2:-}"
+    require_arg "$realm" "realm name required"
+    require_arg "$peer" "peer node name required"
+    python3 "$FFSCTL" peer "$realm" approve "$peer"
+}
+
+cmd_unapprove_peer() {
+    local realm="${1:-}" peer="${2:-}"
+    require_arg "$realm" "realm name required"
+    require_arg "$peer" "peer node name required"
+    python3 "$FFSCTL" peer "$realm" unapprove "$peer"
+}
+
+cmd_trust_unknown_peers() {
+    local realm="${1:-}" value="${2:-}"
+    require_arg "$realm" "realm name required"
+    require_arg "$value" "true or false required"
+    python3 "$FFSCTL" realm set "$realm" trust_unknown_peers "$value"
 }
 
 cmd_add_backend() {
@@ -251,9 +221,8 @@ interactive_menu() {
         echo "  4) Set mountpoint"
         echo "  5) Set storage base"
         echo "  6) Set node name"
-        echo "  7) Add a known peer"
-        echo "  8) Remove a known peer"
-        echo "  9) Manage storage backends"
+        echo "  7) Manage peers"
+        echo "  8) Manage storage backends"
         echo "  0) Exit"
         echo ""
         read -rp "Choice [0-9]: " choice
@@ -288,16 +257,49 @@ interactive_menu() {
                 cmd_set_node_name "$realm" "$name"
                 ;;
             7)
-                read -rp "Realm name: " realm
-                read -rp "Peer address (host:port): " peer
-                cmd_add_peer "$realm" "$peer"
+                echo ""
+                echo "Peer management:"
+                echo "  a) List peers"
+                echo "  b) Add known peer"
+                echo "  c) Remove known peer"
+                echo "  d) Approve node name"
+                echo "  e) Unapprove node name"
+                echo "  f) Set trust_unknown_peers"
+                read -rp "Choice [a-f]: " pchoice
+                case "$pchoice" in
+                    a)
+                        read -rp "Realm name: " realm
+                        cmd_list_peers "$realm"
+                        ;;
+                    b)
+                        read -rp "Realm name: " realm
+                        read -rp "Peer address (host:port): " peer
+                        cmd_add_peer "$realm" "$peer"
+                        ;;
+                    c)
+                        read -rp "Realm name: " realm
+                        read -rp "Peer address (host:port): " peer
+                        cmd_remove_peer "$realm" "$peer"
+                        ;;
+                    d)
+                        read -rp "Realm name: " realm
+                        read -rp "Peer node name: " peer
+                        cmd_approve_peer "$realm" "$peer"
+                        ;;
+                    e)
+                        read -rp "Realm name: " realm
+                        read -rp "Peer node name: " peer
+                        cmd_unapprove_peer "$realm" "$peer"
+                        ;;
+                    f)
+                        read -rp "Realm name: " realm
+                        read -rp "trust_unknown_peers [true/false]: " value
+                        cmd_trust_unknown_peers "$realm" "$value"
+                        ;;
+                    *) echo "Invalid choice" ;;
+                esac
                 ;;
             8)
-                read -rp "Realm name: " realm
-                read -rp "Peer address (host:port): " peer
-                cmd_remove_peer "$realm" "$peer"
-                ;;
-            9)
                 echo ""
                 echo "Backend management:"
                 echo "  a) List backends"
@@ -352,7 +354,10 @@ case "${1:-}" in
     set-port)       shift; cmd_set_port "$@" ;;
     add-peer)       shift; cmd_add_peer "$@" ;;
     remove-peer)    shift; cmd_remove_peer "$@" ;;
-    list-peers)     shift; cmd_list_peers ;;
+    approve-peer)   shift; cmd_approve_peer "$@" ;;
+    unapprove-peer) shift; cmd_unapprove_peer "$@" ;;
+    list-peers)     shift; cmd_list_peers "$@" ;;
+    trust-unknown-peers) shift; cmd_trust_unknown_peers "$@" ;;
     add-backend)    shift; cmd_add_backend "$@" ;;
     remove-backend) shift; cmd_remove_backend "$@" ;;
     list-backends)  shift; cmd_list_backends "$@" ;;

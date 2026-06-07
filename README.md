@@ -186,9 +186,16 @@ python3 ffsctl.py status --port 8765
 Manage peers:
 
 ```bash
-python3 ffsctl.py peers list
-python3 ffsctl.py peers add 192.168.1.12:8765
-python3 ffsctl.py peers remove 192.168.1.12:8765
+./configure.sh list-peers myrealm
+./configure.sh add-peer myrealm 192.168.1.12:8765
+./configure.sh remove-peer myrealm 192.168.1.12:8765
+./configure.sh approve-peer myrealm node-b
+```
+
+Unknown peers are not auto-added by default. For loose LAN testing only:
+
+```bash
+./configure.sh trust-unknown-peers myrealm true
 ```
 
 Peer networking is still prototype-grade and intended for trusted LAN or

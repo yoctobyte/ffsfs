@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import time
 
 import pytest
 
@@ -14,18 +15,27 @@ def peer_client(tmp_path):
     old_backend = ffspeers._local_backend
     old_realm = ffspeers._REALM
     old_index = ffspeers._local_file_index
+    old_known = ffspeers._known_peers
+    old_trust_unknown = ffspeers.TRUST_UNKNOWN_PEER
+    old_verifier = ffspeers._request_verifier
     data_path = tmp_path / "data"
     data_path.mkdir()
 
     ffspeers._local_backend = SimpleNamespace(data_path=str(data_path))
     ffspeers._REALM = "test"
     ffspeers._local_file_index = {}
+    ffspeers._known_peers = []
+    ffspeers.TRUST_UNKNOWN_PEER = False
+    ffspeers._request_verifier = None
     try:
         yield ffspeers.app.test_client(), data_path
     finally:
         ffspeers._local_backend = old_backend
         ffspeers._REALM = old_realm
         ffspeers._local_file_index = old_index
+        ffspeers._known_peers = old_known
+        ffspeers.TRUST_UNKNOWN_PEER = old_trust_unknown
+        ffspeers._request_verifier = old_verifier
 
 
 @pytest.mark.unit
@@ -34,6 +44,47 @@ def test_healthz(peer_client):
     resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.get_json()["realm"] == "test"
+
+
+@pytest.mark.unit
+def test_hello_does_not_auto_add_unknown_peer_by_default(peer_client):
+    client, _ = peer_client
+    resp = client.get("/hello", query_string={
+        "realm": "test",
+        "ts": str(time.time()),
+        "port": "1234",
+    })
+    assert resp.status_code == 200
+    assert "127.0.0.1:1234" not in ffspeers._known_peers
+
+
+@pytest.mark.unit
+def test_hello_auto_adds_unknown_peer_when_enabled(peer_client, monkeypatch):
+    client, _ = peer_client
+    monkeypatch.setattr(ffspeers, "save_config", lambda *args, **kwargs: None)
+    ffspeers.set_trust_unknown_peers(True)
+    resp = client.get("/hello", query_string={
+        "realm": "test",
+        "ts": str(time.time()),
+        "port": "1234",
+    })
+    assert resp.status_code == 200
+    assert "127.0.0.1:1234" in ffspeers._known_peers
+
+
+@pytest.mark.unit
+def test_gossip_seeds_do_not_auto_add_unknown_peer_by_default(peer_client, monkeypatch):
+    monkeypatch.setattr(ffspeers, "_save_config_debounced", lambda: None)
+    ffspeers._on_seeds([("test", "10.0.0.2:8765", ffspeers._FSID, 1.0, 1)], ("10.0.0.2", 9999))
+    assert "10.0.0.2:8765" not in ffspeers._known_peers
+
+
+@pytest.mark.unit
+def test_gossip_seeds_auto_add_unknown_peer_when_enabled(peer_client, monkeypatch):
+    monkeypatch.setattr(ffspeers, "_save_config_debounced", lambda: None)
+    ffspeers.set_trust_unknown_peers(True)
+    ffspeers._on_seeds([("test", "10.0.0.2:8765", ffspeers._FSID, 1.0, 1)], ("10.0.0.2", 9999))
+    assert "10.0.0.2:8765" in ffspeers._known_peers
 
 
 @pytest.mark.unit

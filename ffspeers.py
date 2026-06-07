@@ -493,7 +493,7 @@ TIME_TOLERANCE = 5                    # seconds for hello clock skew
 LIVENESS_INTERVAL = 30                # seconds
 CONFIG_FILE = ".storage/peers.conf"
 VERBOSE = True
-TRUST_UNKNOWN_PEER = True
+TRUST_UNKNOWN_PEER = False
 FILECACHE_REFRESH_INTERVAL = 600      # seconds
 LOCAL_INDEX_REFRESH_INTERVAL = 3600   # seconds
 PEER_PORT = int(os.environ.get("FFSFS_PEER_PORT", "8765"))
@@ -639,6 +639,8 @@ def _get_shareable_seeds() -> List[tuple]:
 
 def _on_seeds(seeds: List[tuple], src_addr):
     """Auto-add only seeds that match our realm (and fsid if strict). Cross-realm stays discoverable, not joined."""
+    if not TRUST_UNKNOWN_PEER:
+        return
     added = False
     with _peers_lock:
         for realm, peer, fsid, score, seen in seeds:
@@ -738,6 +740,12 @@ def set_auth_config(realm_secret: Optional[str] = None,
         _log(f"[peer] Auth enabled (peer_trust={peer_trust})")
     else:
         _request_verifier = None
+
+
+def set_trust_unknown_peers(enabled: bool) -> None:
+    """Control whether authenticated unknown peers are auto-added to known peers."""
+    global TRUST_UNKNOWN_PEER
+    TRUST_UNKNOWN_PEER = bool(enabled)
 
 
 def _signed_headers(method: str, path: str, query_params: dict = None,

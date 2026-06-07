@@ -134,8 +134,8 @@ def sanitize_path(base_dir: str, vpath: str) -> str:
 # Notes:
 # - We keep *all* versioned files next to their logical file in the same directory.
 # - A deletion is represented by a committed version with mode == "delete" (size may be 0).
-# - A move hint is represented with mode == "moved"; it is deletion-like for
-#   visibility, but delete+create remains authoritative.
+# - A move hint is represented with mode == "moved"; it is hidden from normal
+#   visibility and records rename history/recovery metadata.
 
 #_HASH_RE = r"(?P<content_hash>[0-9a-f]{64}|%s)" % re.escape(NULL_HASH)
 # Allow legacy 64-hex or Crockford Base32 (8..52 chars). Keep NULL_HASH for completeness.
