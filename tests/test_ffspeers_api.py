@@ -88,6 +88,31 @@ def test_gossip_seeds_auto_add_unknown_peer_when_enabled(peer_client, monkeypatc
 
 
 @pytest.mark.unit
+def test_ping_all_uses_default_port_for_host_only_peer(peer_client, monkeypatch):
+    calls = []
+    old_port = ffspeers.PEER_PORT
+    ffspeers.PEER_PORT = 23456
+    ffspeers._known_peers = ["host-b.local"]
+
+    class FakeResponse:
+        ok = True
+
+    def fake_get(url, path, params=None, **kwargs):
+        calls.append((url, path, params, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(ffspeers, "_authed_get", fake_get)
+
+    try:
+        ffspeers.ping_all()
+    finally:
+        ffspeers.PEER_PORT = old_port
+
+    assert calls[0][0] == "http://host-b.local:23456/hello"
+    assert ffspeers._last_seen["host-b.local"] > 0
+
+
+@pytest.mark.unit
 def test_list_dir_and_head(peer_client):
     client, data_path = peer_client
     subdir = data_path / "a"

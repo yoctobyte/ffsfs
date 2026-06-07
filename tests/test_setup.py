@@ -19,6 +19,7 @@ def test_create_realm_config_marks_primary_and_inactive(tmp_path, monkeypatch):
     )
 
     assert data["realm"] == "rA"
+    assert data["port"] == ffssetup.default_port_for_realm("rA")
     assert data["setup_state"]["activated"] is False
     assert os.path.exists(tmp_path / "store" / VOLUME_ID_FILE)
 

@@ -21,8 +21,8 @@ FFSFS supports explicit configuration files in JSON format. This allows configur
   "bind_host": "0.0.0.0",
   "autodiscover": true,
   "known_peers": [
-    "192.168.1.50:18765",
-    "192.168.1.51:18765"
+    "host-b.local",
+    "<host-c-lan-ip>"
   ],
   "peer_trust": "realm_secret",
   "trust_unknown_peers": false,
@@ -49,6 +49,15 @@ When starting the FFSFS daemon, parameters are resolved in the following priorit
 ## 2) Operator Workflow
 
 ### Launching FFSFS
+
+Recommended setup and launch flow:
+
+```bash
+./setup.sh
+./setup.sh --realm myrealm --check
+./setup.sh --realm myrealm --activate
+./launch.sh myrealm
+```
 
 **Using a Configuration File:**
 ```bash
@@ -104,17 +113,42 @@ Realm peer lists are stored in `realm-config.json`. Use `configure.sh` for
 normal operation, or `ffsctl.py peer` directly when scripting lower-level
 operations.
 
+For multiple hosts on the same LAN, run `./setup.sh` on each host with the
+same realm name and realm passphrase/key. Setup writes a deterministic peer
+port into each realm config. Add each host's LAN address or hostname to the
+other hosts. Use just `<hostname-or-ip>` for the normal same-realm default
+port; use `<hostname-or-ip>:<port>` only when that peer was configured with a
+non-default port:
+
+```bash
+./configure.sh add-peer myrealm host-b.local
+./configure.sh add-peer myrealm <host-c-lan-ip>
+```
+
+Then activate and launch on each host:
+
+```bash
+./setup.sh --realm myrealm --activate
+./launch.sh myrealm
+```
+
+Verify peer/sync state with:
+
+```bash
+python3 ffsctl.py sync myrealm status
+```
+
 - **List current peers:**
   ```bash
   ./configure.sh list-peers myrealm
   ```
 - **Add a peer:**
   ```bash
-  ./configure.sh add-peer myrealm 192.168.1.52:18765
+  ./configure.sh add-peer myrealm <hostname-or-ip>
   ```
 - **Remove a peer:**
   ```bash
-  ./configure.sh remove-peer myrealm 192.168.1.52:18765
+  ./configure.sh remove-peer myrealm <hostname-or-ip>
   ```
 - **Approve a peer node name** (needed when `peer_trust=manual`):
   ```bash
@@ -191,8 +225,8 @@ Manage realm peer lists with:
 
 ```bash
 ./configure.sh list-peers myrealm
-./configure.sh add-peer myrealm 192.168.1.52:18765
-./configure.sh remove-peer myrealm 192.168.1.52:18765
+./configure.sh add-peer myrealm <hostname-or-ip>
+./configure.sh remove-peer myrealm <hostname-or-ip>
 ./configure.sh approve-peer myrealm node-b
 ./configure.sh unapprove-peer myrealm node-b
 ```
@@ -444,6 +478,16 @@ wrong mounted disk path.
 
 To prevent mounting experimental FUSE systems directly on your developer workstation, FFSFS uses a QEMU-based VM test harness.
 
+### 0. Run Local Baseline
+
+Run this first after a checkout or code change. It is safe for the workstation
+and does not mount FUSE:
+
+```bash
+python3 -m py_compile *.py
+pytest
+```
+
 ### 1. Build the Base VM Image
 This downloads a cloud-init-enabled Ubuntu image and provisions it with FUSE, Python, and testing libraries:
 ```bash
@@ -454,6 +498,7 @@ tools/vm/build-base-image.sh
 This verifies basic FUSE filesystem mounting, writing, reading, deleting, and unmounting:
 ```bash
 tools/vm/run-single-vm-smoke.sh
+tools/vm/run-single-vm-pool-smoke.sh
 ```
 
 ### 3. Run Two-Peer Network Scenarios

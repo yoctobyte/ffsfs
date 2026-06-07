@@ -51,9 +51,16 @@ PY
 
 ## Quick Start
 
-There are two supported ways to run FFSFS.
+The recommended user path is:
 
-### Option 1: Direct Python Command
+```bash
+./setup.sh
+./launch.sh myrealm
+```
+
+Use scratch data first. FFSFS is still prototype-quality.
+
+### Direct Python Command
 
 Short realm form:
 
@@ -77,7 +84,7 @@ python3 ffsfs.py --base /tmp/ffsfs-storage --realm myrealm /tmp/ffsfs-mount
 The mountpoint must be an empty directory. Keep the storage directory outside
 the mountpoint.
 
-### Option 2: Setup Then Launch
+### Setup Then Launch
 
 This is the recommended operator flow for repeatable realms:
 
@@ -107,6 +114,9 @@ The setup app asks for node online expectations, storage/backend policy,
 optional bandwidth limits, and seed peers. It can also list mounted devices and
 import Tailscale interface addresses as ordinary seed hosts when the
 `tailscale` CLI is available.
+
+`setup.sh` saves after each step but marks a realm inactive until activation.
+`launch.sh` refuses inactive setup configs unless `--allow-inactive` is passed.
 
 The config file lives at:
 
@@ -181,18 +191,38 @@ configuration examples and the JSON schema.
 
 ## Peers
 
-Check peer status:
+For two or more hosts on the same LAN:
+
+1. Run `./setup.sh` on each host.
+2. Use the same realm name and the same realm passphrase/key on every host.
+3. Add each other host as a seed peer. Use just `<hostname-or-ip>` for the
+   normal same-realm default port. Use `<hostname-or-ip>:<port>` only when that
+   peer was configured with a non-default port:
+
+   ```bash
+   ./configure.sh add-peer myrealm host-b.local
+   ./configure.sh add-peer myrealm <host-c-lan-ip>
+   ```
+
+5. Activate and launch each host:
+
+   ```bash
+   ./setup.sh --realm myrealm --activate
+   ./launch.sh myrealm
+   ```
+
+Check sync/peer status:
 
 ```bash
-python3 ffsctl.py status --port 8765
+python3 ffsctl.py sync myrealm status
 ```
 
 Manage peers:
 
 ```bash
 ./configure.sh list-peers myrealm
-./configure.sh add-peer myrealm 192.168.1.12:8765
-./configure.sh remove-peer myrealm 192.168.1.12:8765
+./configure.sh add-peer myrealm <hostname-or-ip>
+./configure.sh remove-peer myrealm <hostname-or-ip>
 ./configure.sh approve-peer myrealm node-b
 ```
 
@@ -238,14 +268,16 @@ fusermount3 -u -z <mountpoint>
 
 ## Verification
 
-Local unit tests do not mount FUSE on the workstation:
+Run the local baseline before trusting a checkout or after changing code. These
+tests do not mount FUSE on the workstation:
 
 ```bash
 python3 -m py_compile *.py
 pytest
 ```
 
-VM verification uses disposable QEMU guests:
+Run VM verification before trusting FUSE behavior, peer networking, or release
+candidate changes. VM tests use disposable QEMU guests:
 
 ```bash
 tools/vm/run-single-vm-smoke.sh
@@ -256,6 +288,9 @@ tools/vm/run-two-peer-scenario.sh all
 
 The two-peer runner boots one disposable VM and starts two peer processes on
 different guest ports. Multi-VM tests are reserved for future stress testing.
+
+Normal local development should not mount test FUSE filesystems directly on the
+workstation.
 
 ## More Detail
 

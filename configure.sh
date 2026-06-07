@@ -17,8 +17,8 @@
 #   set-base <realm> <path>
 #   set-node-name <realm> <name>
 #   set-port <realm> <port>
-#   add-peer <realm> <host:port>
-#   remove-peer <realm> <host:port>
+#   add-peer <realm> <host-or-host:port>
+#   remove-peer <realm> <host-or-host:port>
 #   approve-peer <realm> <node-name>
 #   unapprove-peer <realm> <node-name>
 #   list-peers <realm>
@@ -49,8 +49,8 @@ usage() {
     echo "  set-base <realm> <path>             Set storage base"
     echo "  set-node-name <realm> <name>        Set node name"
     echo "  set-port <realm> <port>             Set peer port"
-    echo "  add-peer <realm> <host:port>        Add known peer"
-    echo "  remove-peer <realm> <host:port>     Remove known peer"
+    echo "  add-peer <realm> <host-or-host:port> Add known peer"
+    echo "  remove-peer <realm> <host-or-host:port> Remove known peer"
     echo "  approve-peer <realm> <node-name>    Approve node for peer_trust=manual"
     echo "  unapprove-peer <realm> <node-name>  Remove node approval"
     echo "  list-peers <realm>                  List known and approved peers"
@@ -145,14 +145,14 @@ cmd_set_port() {
 cmd_add_peer() {
     local realm="${1:-}" peer="${2:-}"
     require_arg "$realm" "realm name required"
-    require_arg "$peer" "peer address required (host:port)"
+    require_arg "$peer" "peer address required (host, or host:port for a non-default port)"
     python3 "$FFSCTL" peer "$realm" add "$peer"
 }
 
 cmd_remove_peer() {
     local realm="${1:-}" peer="${2:-}"
     require_arg "$realm" "realm name required"
-    require_arg "$peer" "peer address required (host:port)"
+    require_arg "$peer" "peer address required (host, or host:port for a non-default port)"
     python3 "$FFSCTL" peer "$realm" remove "$peer"
 }
 
@@ -273,12 +273,12 @@ interactive_menu() {
                         ;;
                     b)
                         read -rp "Realm name: " realm
-                        read -rp "Peer address (host:port): " peer
+                        read -rp "Peer address (host, or host:port for non-default port): " peer
                         cmd_add_peer "$realm" "$peer"
                         ;;
                     c)
                         read -rp "Realm name: " realm
-                        read -rp "Peer address (host:port): " peer
+                        read -rp "Peer address (host, or host:port for non-default port): " peer
                         cmd_remove_peer "$realm" "$peer"
                         ;;
                     d)

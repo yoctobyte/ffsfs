@@ -97,6 +97,12 @@ def config_base() -> str:
     return os.path.expanduser("~/.ffsfs/.storage")
 
 
+def default_port_for_realm(realm: str, floor: int = 10000, span: int = 40000) -> int:
+    digest = hashlib.sha256(realm.encode("utf-8")).digest()
+    value = int.from_bytes(digest[:4], "big")
+    return floor + (value % span)
+
+
 def _cfg_path(realm: str) -> str:
     return _realm_config_path(realm)
 
@@ -160,6 +166,7 @@ def setup_defaults(realm: str, data: Optional[dict] = None) -> dict:
     data.setdefault("host_alias", data.get("node_name") or socket.gethostname())
     data.setdefault("peer_trust", "realm_secret")
     data.setdefault("peer_transport", "http")
+    data.setdefault("port", default_port_for_realm(realm))
     data.setdefault("trust_unknown_peers", False)
     data.setdefault("autodiscover", True)
     data.setdefault("node_role", DEFAULT_NODE_ROLE)
@@ -589,7 +596,7 @@ def wizard_create_or_edit(realm: str) -> None:
 
     print()
     while _yes_no("Add a seed/known peer?", False):
-        peer = _prompt("Peer host:port")
+        peer = _prompt("Peer host, or host:port for a non-default port")
         if peer:
             add_peer(realm, peer, approved=False)
 
@@ -632,6 +639,7 @@ def print_realm_summary(realm: str) -> None:
     print(f"  active: {bool(state.get('activated'))}")
     print(f"  node: {data.get('node_name', '?')} alias={data.get('host_alias', '?')}")
     print(f"  mountpoint: {data.get('mountpoint', '?')}")
+    print(f"  peer port: {data.get('port', default_port_for_realm(realm))}")
     print(f"  peer_trust: {data.get('peer_trust', 'realm_secret')}")
     print(f"  trust_unknown_peers: {bool(data.get('trust_unknown_peers', False))}")
     print(f"  known_peers: {len(data.get('known_peers') or [])}")
@@ -770,19 +778,19 @@ def prompt_tailscale_seeds(realm: str) -> None:
 
 def prompt_peer_action(realm: str) -> None:
     print("Peer management")
-    print("  1) Add known peer host:port")
-    print("  2) Remove known peer host:port")
+    print("  1) Add known peer host")
+    print("  2) Remove known peer host")
     print("  3) Approve peer node name")
     print("  4) Unapprove peer node name")
     print("  5) Toggle trust_unknown_peers")
     print("  6) Add Tailscale seed hosts")
     choice = _prompt("Choice", "1")
     if choice == "1":
-        peer = _prompt("Peer host:port")
+        peer = _prompt("Peer host, or host:port for a non-default port")
         if peer:
             add_peer(realm, peer, approved=False)
     elif choice == "2":
-        peer = _prompt("Peer host:port")
+        peer = _prompt("Peer host, or host:port for a non-default port")
         if peer:
             remove_peer(realm, peer, approved=False)
     elif choice == "3":

@@ -901,8 +901,7 @@ def ping_all():
     for peer in peers:
         host, port = _split_host_port(peer)
         if port is None:
-            _log(f"[peer] Skipping ping (no port): {peer}")
-            continue
+            port = PEER_PORT
         try:
             url = f"http://{host}:{port}/hello"
             params = {"realm": _REALM, "ts": time.time(), "port": _actual_flask_port or PEER_PORT}

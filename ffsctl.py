@@ -10,7 +10,7 @@ Features:
 
 Usage examples:
   python3 ffsctl.py peer myrealm list
-  python3 ffsctl.py peer myrealm add 192.168.1.12:8765
+  python3 ffsctl.py peer myrealm add host-b.local
   python3 ffsctl.py peer myrealm approve node-b
   python3 ffsctl.py status
   python3 ffsctl.py start /mnt/ffs --base ~/ffsstorage
@@ -858,7 +858,7 @@ def main():
     speer = sub.add_parser("peer", help="manage realm peer configuration")
     speer.add_argument("realm", help="realm name")
     speer.add_argument("action", choices=["list", "add", "remove", "approve", "unapprove"])
-    speer.add_argument("peer", nargs="?", help="peer address or node name")
+    speer.add_argument("peer", nargs="?", help="peer host, host:port, or node name")
     speer.add_argument(
         "--approved",
         dest="kind",
