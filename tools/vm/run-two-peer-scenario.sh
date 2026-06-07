@@ -4,6 +4,41 @@ set -euo pipefail
 source "$(dirname "$0")/two-peer-common.sh"
 
 scenario="${1:-file-fetch}"
+if [ "$scenario" = "all" ]; then
+    scenarios=$(find "$VM_DIR/scenarios/two-peer" -maxdepth 1 -type f -name '*.sh' -exec basename {} .sh \;)
+    failed=()
+    passed=()
+    for s in $scenarios; do
+        echo "========================================="
+        echo "Running scenario: $s"
+        echo "========================================="
+        if ! timeout 180 "$0" "$s"; then
+            echo "Scenario FAILED: $s"
+            latest_log=$(ls -td "${FFSFS_VM_LOG_DIR:-$REPO_ROOT/.vm/logs}"/two-peer-* 2>/dev/null | head -n 1 || true)
+            failed+=("$s (logs: $latest_log)")
+        else
+            passed+=("$s")
+        fi
+    done
+    echo ""
+    echo "========================================="
+    echo "VM Scenario Run Summary"
+    echo "========================================="
+    echo "Passed: ${#passed[@]}"
+    for p in "${passed[@]}"; do
+        echo "  - $p"
+    done
+    echo "Failed: ${#failed[@]}"
+    for f in "${failed[@]}"; do
+        echo "  - $f"
+    done
+    echo "========================================="
+    if [ "${#failed[@]}" -ne 0 ]; then
+        exit 1
+    fi
+    exit 0
+fi
+
 if [[ "$scenario" == */* ]]; then
     scenario_path="$scenario"
 else
@@ -27,3 +62,4 @@ source "$scenario_path"
 
 echo "two-peer scenario passed: $scenario"
 echo "logs: $log_dir"
+

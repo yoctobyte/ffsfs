@@ -195,3 +195,32 @@ PY
     two_peer_run_a "$cross_check_a" | tee "$log_dir/$name_a.cross-check.log"
     two_peer_run_b "$cross_check_b" | tee "$log_dir/$name_b.cross-check.log"
 }
+
+two_peer_link() {
+    echo "linking peers: peer-a <-> peer-b"
+    local link_a_to_b='
+set -euo pipefail
+python3 - <<PY
+import urllib.request
+import time
+ts = int(time.time())
+url = "http://127.0.0.1:'"$peer_b_port"'/hello?realm='"$realm"'&ts=" + str(ts) + "&port='"$peer_a_port"'"
+with urllib.request.urlopen(url, timeout=10) as resp:
+    print("linked A->B:", resp.read().decode())
+PY
+'
+    local link_b_to_a='
+set -euo pipefail
+python3 - <<PY
+import urllib.request
+import time
+ts = int(time.time())
+url = "http://127.0.0.1:'"$peer_a_port"'/hello?realm='"$realm"'&ts=" + str(ts) + "&port='"$peer_b_port"'"
+with urllib.request.urlopen(url, timeout=10) as resp:
+    print("linked B->A:", resp.read().decode())
+PY
+'
+    two_peer_run_a "$link_a_to_b" | tee "$log_dir/$name_a.link.log"
+    two_peer_run_b "$link_b_to_a" | tee "$log_dir/$name_b.link.log"
+}
+
