@@ -4,6 +4,42 @@ This document serves as the developer handover details for the next agent workin
 
 ---
 
+## 0.9. Follow-up: Sync Status Tooling
+
+Added `ffsctl sync <realm> status` for operator visibility into sync state.
+
+### Output sections
+
+1. **Sync policy** — node_role, mode (lazy/active), interval, prefixes, cache
+   bound.
+2. **Peers** — per-peer: tracked file count, last-seen time, cache refresh
+   age. Connects to configured peers and refreshes the file cache before
+   reporting.
+3. **Failed paths** — vpaths with active backoff: attempt count, last error,
+   seconds until next retry.
+4. **Storage volumes** (when storage pool is configured) — per-volume: role,
+   online/offline status, bytes used, cache pressure percentage vs
+   `cache_max_bytes`.
+
+### Usage
+
+```
+ffsctl sync myrealm status
+```
+
+### Implementation
+
+- Added `"status"` to the `sync` subcommand's action choices in `ffsctl.py`.
+- The handler wires up `ffspeers` for cache refresh, then constructs a
+  `SyncWorker` to access `status()` for failed paths.
+- No background process or mount is required — status runs standalone.
+
+### Test coverage (177 tests pass)
+
+- `test_sync_status_shows_policy_and_peers`
+
+---
+
 ## 0.8. Follow-up: Tombstone Propagation in Sync
 
 Previously, the sync worker only pulled newer non-delete versions. Remote

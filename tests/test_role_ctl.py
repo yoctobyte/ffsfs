@@ -161,6 +161,40 @@ def test_sync_run_once_sets_up_peer_module(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_sync_status_shows_policy_and_peers(tmp_path, monkeypatch, capsys):
+    _init_realm("rA", tmp_path, monkeypatch)
+    cmd_role(Namespace(realm="rA", role="shared_storage"))
+
+    data = _load_realm_config("rA")
+    data["known_peers"] = ["10.0.0.1:8765"]
+    with open(_realm_config_path("rA"), "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    old_known = ffspeers._known_peers
+    ffspeers._known_peers = []
+
+    def fake_set_realm(realm):
+        pass
+
+    def fake_refresh(force=False):
+        return {"refreshed": 0, "files": 0}
+
+    monkeypatch.setattr(ffspeers, "set_realm", fake_set_realm)
+    monkeypatch.setattr(ffspeers, "refresh_peer_filecache_once", fake_refresh)
+    try:
+        cmd_sync(Namespace(realm="rA", action="status", key=None, value=None))
+    finally:
+        ffspeers._known_peers = old_known
+
+    out = capsys.readouterr().out
+    assert "shared_storage" in out
+    assert "active" in out
+    assert "10.0.0.1:8765" in out
+    assert "Failed paths:" in out
+    assert "(none)" in out
+
+
+@pytest.mark.unit
 def test_ratelimit_show_default_unlimited(tmp_path, monkeypatch, capsys):
     _init_realm("rA", tmp_path, monkeypatch)
     cmd_ratelimit(Namespace(realm="rA", action="show", key=None, value=None))

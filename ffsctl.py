@@ -549,6 +549,112 @@ def cmd_sync(args):
         if status.get("failed_paths"):
             print(f"failed_paths: {status['failed_paths']}")
 
+    if args.action == "status":
+        import time as _time
+        from ffsvolumes import StoragePool, ROLE_CACHE
+        from ffsfs import StorageBackend
+        try:
+            import ffspeers as peers_mod
+        except Exception:
+            peers_mod = None
+
+        try:
+            policy = SyncPolicy.from_config(data.get("node_role"), data.get("sync"))
+        except Exception as e:
+            print(f"invalid config: {e}")
+            return
+
+        print(f"Realm: {realm}")
+        print(f"  node_role: {policy.role}")
+        print(f"  sync_mode: {policy.mode}")
+        print(f"  interval: {policy.interval_secs}s")
+        if policy.prefixes:
+            print(f"  prefixes: {', '.join(policy.prefixes)}")
+        else:
+            print(f"  prefixes: (whole realm)")
+        if policy.cache_max_bytes:
+            print(f"  cache_max: {policy.cache_max_bytes} bytes")
+
+        print()
+        print("Peers:")
+        if peers_mod is not None:
+            try:
+                peers_mod.set_realm(realm)
+                for kp in data.get("known_peers", []) or []:
+                    kp = str(kp).strip()
+                    if kp and kp not in peers_mod._known_peers:
+                        peers_mod._known_peers.append(kp)
+                if hasattr(peers_mod, "refresh_peer_filecache_once"):
+                    peers_mod.refresh_peer_filecache_once(force=True)
+            except Exception as e:
+                print(f"  (peer setup failed: {e})")
+
+            now = _time.time()
+            cache = getattr(peers_mod, "_peer_cache", {}) or {}
+            last_seen = getattr(peers_mod, "_last_seen", {}) or {}
+            known = getattr(peers_mod, "_known_peers", []) or []
+
+            if not known:
+                print("  (none configured)")
+            for peer in known:
+                files_dict = (cache.get(peer) or {}).get("files", {})
+                n_vpaths = len(files_dict)
+                last = last_seen.get(peer)
+                if last:
+                    ago = int(now - last)
+                    last_str = f"{ago}s ago"
+                else:
+                    last_str = "never"
+                cache_ts = (cache.get(peer) or {}).get("last_sync", 0)
+                if cache_ts:
+                    cache_ago = int(now - cache_ts)
+                    cache_str = f"{cache_ago}s ago"
+                else:
+                    cache_str = "never"
+                print(f"  {peer:<22} files={n_vpaths:<5} last_seen={last_str:<10} cache_refresh={cache_str}")
+        else:
+            print("  (peer module unavailable)")
+
+        print()
+        print("Failed paths:")
+        pool_data = data.get("storage_pool")
+        if pool_data:
+            pool = StoragePool.from_dict(pool_data)
+            base_path = pool.primary.path
+        else:
+            base_path = data.get("base") or data.get("storage_base")
+            pool = None
+        if base_path:
+            from ffsratelimit import RateLimits
+            rate_limits = RateLimits.from_config(data.get("rate_limits"))
+            backend = StorageBackend(base_path, realm, pool=pool,
+                                     rate_limits=rate_limits)
+            from ffssync import SyncWorker
+            worker = SyncWorker(backend, peers_mod, policy, rate_limits)
+            st = worker.status()
+            failed = st.get("failed_paths", {})
+            if not failed:
+                print("  (none)")
+            for vpath, info in failed.items():
+                retry_in = max(0, int(info.get("next_retry", 0) - _time.time()))
+                print(f"  {vpath}: attempts={info['attempts']} "
+                      f"error={info['last_error']!r} retry_in={retry_in}s")
+
+            if pool:
+                print()
+                print("Storage volumes:")
+                for vol in pool.all_volumes:
+                    online = vol.is_online()
+                    used = vol.used_bytes() if online else 0
+                    role_str = vol.role
+                    status_str = "online" if online else "OFFLINE"
+                    print(f"  {vol.path}: role={role_str} status={status_str} used={used} bytes")
+                    if vol.role == ROLE_CACHE and policy.cache_max_bytes:
+                        pct = int(100 * used / policy.cache_max_bytes) if policy.cache_max_bytes else 0
+                        print(f"    cache pressure: {pct}% ({used}/{policy.cache_max_bytes})")
+        else:
+            print("  (no storage configured)")
+
 
 def cmd_ratelimit(args):
     from ffsratelimit import RateLimits, RATE_LIMIT_KEYS
@@ -655,7 +761,7 @@ def main():
 
     sy = sub.add_parser("sync", help="manage background sync policy")
     sy.add_argument("realm", help="realm name")
-    sy.add_argument("action", choices=["show", "set", "run-once"])
+    sy.add_argument("action", choices=["show", "set", "run-once", "status"])
     sy.add_argument("key", nargs="?", help="sync key (mode|prefixes|interval_secs|cache_max_bytes)")
     sy.add_argument("value", nargs="?", help="value (for set)")
     sy.set_defaults(func=cmd_sync)
