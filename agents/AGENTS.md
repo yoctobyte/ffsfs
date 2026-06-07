@@ -14,26 +14,24 @@ Read these files before changing behavior:
 
 ## Current Priorities
 
-1. Add two-peer VM scenarios:
-   - update-newer-version
-   - delete-tombstone
-   - path-traversal
-   - peer-restart
-2. Tighten peer delete/tombstone semantics in `/list-dir`, `/head`, caches, and
-   notify handling.
-3. Add `tools/vm/run-two-peer-scenario.sh all`, scenario timeouts, and concise
-   failure summaries pointing at exact log files.
-4. Normalize CLI and configuration behavior:
-   - remove dead `_depsmain__` block
-   - fix `--bg` behavior/help consistency
-   - support explicit config files for realm, node name, storage, mountpoint,
-     ports, peers, and autodiscovery
-5. Reduce silent failures in commit, delete, fsync, peer notify, and startup
-   paths where callers need reliable errors or logs.
-6. Expand documentation around operator workflow, VM testing, storage format,
-   stuck mount recovery, and known limitations.
-7. After testing and config are solid, start background synchronization and
-   storage-policy work.
+1. Implement background catch-up sync worker:
+   - Monitor drive mounts for reconnected HDDs
+   - Replicate committed files from primary to reconnected backends
+   - Support disk rotation (swap drives, sync missing writes)
+2. Implement background sync workers and storage roles:
+   - `access_only`, `cache_limited`, `shared_storage`, `superpeer`, `nas_or_fileserver`
+   - Eviction policies for cache-limited nodes
+   - Selected-prefix synchronization
+3. Add VM scenarios for offline disk swap and sync catch-up.
+4. Peer trust/security hardening for LAN deployments.
+
+Completed:
+- Tiered multi-backend storage pool (`ffsvolumes.py`, pool-aware `StorageBackend`)
+- `ffsctl backend` and `ffsctl realm` subcommands
+- `launch.sh` and `configure.sh` operator scripts
+- Two-peer VM scenarios (all 6 passing)
+- Error propagation, CLI normalization, config file loading
+- Operator documentation
 
 ## Product Direction
 
@@ -86,22 +84,24 @@ node names are user configuration.
 ## Known Risks
 
 - Delete/tombstone semantics need stronger peer and VM scenario coverage.
-- Background sync is not implemented yet; current behavior is mostly
-  on-demand fetch plus cache/index refresh.
+- Background catch-up sync worker is not yet implemented; current behavior is
+  on-demand fetch plus cache/index refresh. Pool infrastructure exists but
+  does not yet replicate across backends automatically.
 - FUSE mount behavior should be validated only inside VMs.
 - Peer trust/security model is prototype-grade.
-- Configuration is still too implicit for reproducible real deployments.
 
 ## Verification Baseline
 
 ```bash
 python3 -m py_compile *.py
-pytest
+pytest                          # 74 unit tests, <1s
 ```
 
-VM checks:
+VM checks (each boots a QEMU VM, ~2-5 min each; full suite ~30 min):
 
 ```bash
 tools/vm/run-single-vm-smoke.sh
+tools/vm/run-single-vm-pool-smoke.sh
 tools/vm/run-two-peer-scenario.sh file-fetch
+tools/vm/run-two-peer-scenario.sh all   # 8 scenarios
 ```

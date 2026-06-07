@@ -1,0 +1,226 @@
+# ffsvolumes.py — Multi-backend storage pool for FFSFS
+#
+# A single realm can span multiple physical storage locations (volumes).
+# The primary volume holds metadata and the hot cache. Secondary volumes
+# store committed payloads. Volumes can go offline (unplugged HDD) and
+# the pool routes around them gracefully.
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from typing import List, Optional, Dict
+
+from ffsutils import DATA_DIR
+
+VOLUME_ID_FILE = ".ffsfs-volume.id"
+
+STATUS_ONLINE = "ONLINE"
+STATUS_OFFLINE = "OFFLINE"
+
+ROLE_PRIMARY = "primary"
+ROLE_ARCHIVE = "archive"
+ROLE_CACHE = "cache"
+
+
+class Volume:
+    """A single storage backend location."""
+
+    def __init__(self, path: str, vol_id: str = None, label: str = None,
+                 role: str = ROLE_ARCHIVE, created: float = None):
+        self.path = os.path.abspath(path)
+        self.vol_id = vol_id or str(uuid.uuid4())
+        self.label = label or os.path.basename(self.path)
+        self.role = role
+        self.created = created or time.time()
+
+    @property
+    def data_path(self) -> str:
+        return os.path.join(self.path, DATA_DIR)
+
+    @property
+    def id_file_path(self) -> str:
+        return os.path.join(self.path, VOLUME_ID_FILE)
+
+    def is_online(self) -> bool:
+        try:
+            if not os.path.isdir(self.path):
+                return False
+            if not os.path.exists(self.id_file_path):
+                return False
+            with open(self.id_file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("id") == self.vol_id
+        except Exception:
+            return False
+
+    def status(self) -> str:
+        return STATUS_ONLINE if self.is_online() else STATUS_OFFLINE
+
+    def init(self) -> None:
+        """Write the volume ID file and create the data directory."""
+        os.makedirs(self.path, exist_ok=True)
+        os.makedirs(self.data_path, exist_ok=True)
+        payload = {
+            "id": self.vol_id,
+            "label": self.label,
+            "role": self.role,
+            "created": self.created,
+        }
+        with open(self.id_file_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.vol_id,
+            "path": self.path,
+            "label": self.label,
+            "role": self.role,
+            "created": self.created,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Volume:
+        return cls(
+            path=data["path"],
+            vol_id=data["id"],
+            label=data.get("label", ""),
+            role=data.get("role", ROLE_ARCHIVE),
+            created=data.get("created", 0),
+        )
+
+    @classmethod
+    def from_path(cls, path: str) -> Optional[Volume]:
+        """Load a volume from an existing path by reading its ID file."""
+        id_path = os.path.join(path, VOLUME_ID_FILE)
+        try:
+            with open(id_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return cls(
+                path=path,
+                vol_id=data["id"],
+                label=data.get("label", ""),
+                role=data.get("role", ROLE_ARCHIVE),
+                created=data.get("created", 0),
+            )
+        except Exception:
+            return None
+
+    def __repr__(self) -> str:
+        return f"Volume({self.label!r}, {self.path!r}, {self.status()})"
+
+
+class StoragePool:
+    """Manages multiple volumes for a single realm."""
+
+    def __init__(self, primary: Volume, secondaries: List[Volume] = None):
+        self.primary = primary
+        self.secondaries = secondaries or []
+
+    @property
+    def all_volumes(self) -> List[Volume]:
+        return [self.primary] + self.secondaries
+
+    def online_volumes(self) -> List[Volume]:
+        return [v for v in self.all_volumes if v.is_online()]
+
+    def online_secondaries(self) -> List[Volume]:
+        return [v for v in self.secondaries if v.is_online()]
+
+    def find_by_id(self, vol_id: str) -> Optional[Volume]:
+        for v in self.all_volumes:
+            if v.vol_id == vol_id:
+                return v
+        return None
+
+    def find_by_path(self, path: str) -> Optional[Volume]:
+        abs_path = os.path.abspath(path)
+        for v in self.all_volumes:
+            if v.path == abs_path:
+                return v
+        return None
+
+    def add_secondary(self, volume: Volume) -> None:
+        if self.find_by_id(volume.vol_id):
+            raise ValueError(f"Volume {volume.vol_id} already in pool")
+        if self.find_by_path(volume.path):
+            raise ValueError(f"Path {volume.path} already in pool")
+        self.secondaries.append(volume)
+
+    def remove(self, vol_id: str) -> Optional[Volume]:
+        vol = self.find_by_id(vol_id)
+        if not vol:
+            return None
+        if vol is self.primary:
+            raise ValueError("Cannot remove primary volume from pool")
+        self.secondaries.remove(vol)
+        return vol
+
+    def write_target(self) -> Volume:
+        """Return the best volume for new writes: primary if online, else first online secondary."""
+        if self.primary.is_online():
+            return self.primary
+        online = self.online_secondaries()
+        if online:
+            return online[0]
+        return self.primary
+
+    def read_targets(self) -> List[Volume]:
+        """Return all online volumes, primary first."""
+        result = []
+        if self.primary.is_online():
+            result.append(self.primary)
+        result.extend(self.online_secondaries())
+        return result
+
+    def to_dict(self) -> dict:
+        return {
+            "primary": self.primary.to_dict(),
+            "backends": [v.to_dict() for v in self.secondaries],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> StoragePool:
+        primary = Volume.from_dict(data["primary"])
+        secondaries = [Volume.from_dict(b) for b in data.get("backends", [])]
+        return cls(primary=primary, secondaries=secondaries)
+
+    @classmethod
+    def single(cls, base_path: str) -> StoragePool:
+        """Create a pool with a single volume acting as both primary and data store."""
+        vol = Volume(path=base_path, role=ROLE_PRIMARY)
+        return cls(primary=vol)
+
+
+def load_pool_config(config_path: str) -> Optional[StoragePool]:
+    """Load a StoragePool from a realm config JSON file."""
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        pool_data = data.get("storage_pool")
+        if not pool_data:
+            return None
+        return StoragePool.from_dict(pool_data)
+    except Exception:
+        return None
+
+
+def save_pool_config(config_path: str, pool: StoragePool, realm: str = None) -> None:
+    """Save the StoragePool into a realm config JSON file (preserving other keys)."""
+    data = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+    if realm:
+        data["realm"] = realm
+    data["storage_pool"] = pool.to_dict()
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")

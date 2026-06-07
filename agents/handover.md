@@ -30,31 +30,41 @@ We have finished the FUSE write durability improvements, configuration normaliza
 4. **Operator Guide:**
    - Wrote [agents/operator_guide.md](file:///home/rene/ffsfs/agents/operator_guide.md), detailing configurations, CLI tools, directory structure, schemas, VM testing, recovery from stuck mounts, and known limits.
 
+5. **Multi-Backend Storage Pool & Configuration Tooling:**
+   - Created [ffsvolumes.py](file:///home/rene/ffsfs/ffsvolumes.py) with `Volume` and `StoragePool` classes: volume ID files (`.ffsfs-volume.id`), ONLINE/OFFLINE status tracking, write-target routing, cross-backend read scanning.
+   - Modified `StorageBackend` in [ffsfs.py](file:///home/rene/ffsfs/ffsfs.py) to accept an optional `StoragePool`; `pick_latest()` scans all online backends for the newest version.
+   - Extended config schema with `storage_pool` key in `--config` JSON, parsed and wired through `mount()` in [ffsfs.py](file:///home/rene/ffsfs/ffsfs.py).
+   - Added `ffsctl backend` subcommands (add/remove/list/register) and `ffsctl realm` subcommands (init/show/set/list) in [ffsctl.py](file:///home/rene/ffsfs/ffsctl.py).
+   - Created `launch.sh` (config-aware launcher that halts when unconfigured) and `configure.sh` (interactive configuration wrapper).
+   - Added 38 new unit tests across `test_volumes.py`, `test_pool_backend.py`, `test_backend_ctl.py`, and `test_config.py` (74 total, all passing).
+
 ---
 
 ## 2. Current State of the Codebase
 
 - **Branch:** `main` (clean and up-to-date with `origin/main`).
-- **Unit Tests:** 36 tests pass on the workstation in less than 1.0 second (`pytest`).
-- **VM Integration Tests:** 6 scenarios pass successfully in disposable VMs (`tools/vm/run-two-peer-scenario.sh all`).
+- **Unit Tests:** 74 tests pass on the workstation in less than 1.0 second (`pytest`).
+- **VM Integration Tests:** 8 scenarios total (6 original + 2 new: `pool-read-write`, `offline-volume`). All individually verified passing. A separate single-VM pool smoke test (`run-single-vm-pool-smoke.sh`) also covers multi-backend pool, `configure.sh`, and `launch.sh` end-to-end.
+- **VM test runtime:** The full two-peer scenario suite (`run-two-peer-scenario.sh all`) boots a fresh QEMU VM per scenario. Each run takes 2–5 minutes depending on KVM availability. Budget ~30 minutes for the full suite.
 
 ---
 
 ## 3. Next Steps (What to Work on Next)
 
-We are now ready for Phase 6 of the project: **Multi-Backend Tiered Storage Pool** and **Background Synchronization**.
-
-### Task A: Tiered Storage Backends (Refer to [agents/multi_backend_design.md](file:///home/rene/ffsfs/agents/multi_backend_design.md))
-- **Volume Tracking:** Write a volume ID file `.ffsfs-volume.id` on each configured backend path.
-- **Offline Tolerance:** Modify `StorageBackend` to verify `.ffsfs-volume.id` on read/write. If missing or unreadable, mark that backend as `OFFLINE`.
-- **Staging / Write-Anywhere:** When a backend is `OFFLINE`, write commits to the primary SSD backend.
-- **Catch-Up Sync:** Implement a background worker that replicates committed files from SSD to the offline backend once it becomes `ONLINE` again.
-- **CLI Commands:** Add subcommands under `ffsctl.py` to add, remove, and list backend paths and volumes.
+### Task A: Background Catch-Up Sync Worker (Remaining from Multi-Backend)
+The pool infrastructure is in place (`ffsvolumes.py`, `ffsctl backend`, pool-aware `StorageBackend`). What remains:
+- **Catch-Up Sync:** Implement a background worker that monitors drive mounts. When a previously offline HDD reconnects, scan the metadata log and replicate any files committed in the interim.
+- **Disk Rotation:** When swapping HDD1 for HDD2, detect the new drive, identify missing writes, and sync them.
+- **Write-Anywhere Fallback:** When the target HDD is offline during commit, write to the primary SSD and record intent for later replication.
 
 ### Task B: Background Sync & Storage Roles
 - Define storage role profiles (`access_only`, `cache_limited`, `shared_storage`, `superpeer`).
 - Eviction policies for cache-limited nodes without deleting local writes.
-- Selected-prefix synchronizations.
+- Selected-prefix synchronization.
+
+### Task C: Security Hardening (To-Do)
+- Peer trust model is prototype-grade (`TRUST_UNKNOWN_PEER = True`).
+- LAN-intended usage, but authentication and realm boundaries should be wired in before remote/multi-location deployments.
 
 ---
 

@@ -78,8 +78,18 @@ Completed foundation:
 
 Still open before feature work:
 
-- Implement tiered multi-backend storage pool (as described in agents/multi_backend_design.md).
+- Implement background catch-up sync worker (replicate committed files from
+  primary SSD to reconnected HDDs; rotate backup drives).
 - Implement background sync workers and role-specific synchronization policies.
+
+Completed infrastructure:
+
+- Tiered multi-backend storage pool foundation (`ffsvolumes.py`).
+- Volume identifiers (`.ffsfs-volume.id`) and ONLINE/OFFLINE tracking.
+- Pool-aware `StorageBackend` with cross-backend read routing.
+- `ffsctl backend` subcommands (add/remove/list/register).
+- `ffsctl realm` subcommands (init/show/set/list) for realm config management.
+- `launch.sh` and `configure.sh` operator scripts.
 
 ## Phase 1: Test Foundation
 
@@ -341,16 +351,27 @@ Deliverable:
 
 ## Current Priority Queue
 
-1. Implement Tiered Multi-Backend Storage Pool (as detailed in agents/multi_backend_design.md):
-   - Volume identifiers (`.ffsfs-volume.id`) and status tracking (ONLINE/OFFLINE).
-   - Write-anywhere SSD staging with HDD sync workers.
-   - Fault-tolerance for unplugged/offline drives.
+1. Implement Background Catch-Up Sync Worker:
+   - Monitor drive mounts for reconnected HDDs.
+   - Scan metadata log and replicate committed files to reconnected backends.
+   - Support disk rotation (swap HDD1 for HDD2, sync missing writes).
 2. Implement Background Sync Workers and Storage Roles:
    - `access_only` (cache-only on demand)
    - `cache_limited` (bounded local cache with eviction)
    - `shared_storage` (selective prefix replicas)
    - `superpeer` (broad replica target)
 3. Add VM scenarios for offline disk swap and sync catch-up.
+
+### Completed in this cycle
+
+- Tiered Multi-Backend Storage Pool infrastructure:
+  - Volume identifiers (`.ffsfs-volume.id`) and status tracking (ONLINE/OFFLINE).
+  - Pool-aware `StorageBackend` with cross-backend read routing.
+  - `ffsctl backend` CLI subcommands (add/remove/list/register).
+- Realm configuration tooling:
+  - `ffsctl realm` subcommands (init/show/set/list).
+  - `launch.sh` (config-aware launcher, halts when unconfigured).
+  - `configure.sh` (interactive config wrapper).
 
 ## Done Criteria for Stabilization
 

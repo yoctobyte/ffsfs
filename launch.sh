@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# launch.sh — Launch FFSFS with realm configuration
+#
+# Usage:
+#   ./launch.sh [realm] [--bg]
+#
+# Reads realm config from ~/.ffsfs/.storage/<realm>/realm-config.json.
+# Halts with a clear error if the realm is not configured.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+FFSFS="$SCRIPT_DIR/ffsfs.py"
+FFSCTL="$SCRIPT_DIR/ffsctl.py"
+CONFIG_BASE="$HOME/.ffsfs/.storage"
+
+usage() {
+    echo "Usage: $0 <realm> [--bg]"
+    echo ""
+    echo "Launch FFSFS using the realm's stored configuration."
+    echo "The realm must be configured first (use configure.sh)."
+    echo ""
+    echo "Options:"
+    echo "  --bg    Run in background mode"
+    echo ""
+    echo "Examples:"
+    echo "  $0 my-realm"
+    echo "  $0 my-realm --bg"
+    exit 1
+}
+
+die() {
+    echo "error: $1" >&2
+    exit 1
+}
+
+REALM=""
+BG_FLAG=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --bg)   BG_FLAG="--bg" ;;
+        --help|-h) usage ;;
+        -*)     die "unknown option: $arg" ;;
+        *)
+            if [ -z "$REALM" ]; then
+                REALM="$arg"
+            else
+                die "unexpected argument: $arg"
+            fi
+            ;;
+    esac
+done
+
+# If no realm given, try to find the only configured one
+if [ -z "$REALM" ]; then
+    if [ ! -d "$CONFIG_BASE" ]; then
+        die "no realms configured. Run ./configure.sh to set up a realm."
+    fi
+    realms=()
+    for d in "$CONFIG_BASE"/*/; do
+        name="$(basename "$d")"
+        if [ -f "$d/realm-config.json" ]; then
+            realms+=("$name")
+        fi
+    done
+    if [ ${#realms[@]} -eq 0 ]; then
+        die "no realms configured. Run ./configure.sh to set up a realm."
+    elif [ ${#realms[@]} -eq 1 ]; then
+        REALM="${realms[0]}"
+        echo "Using realm: $REALM"
+    else
+        echo "Multiple realms configured:"
+        for r in "${realms[@]}"; do
+            echo "  $r"
+        done
+        die "specify which realm to launch: $0 <realm>"
+    fi
+fi
+
+CONFIG_FILE="$CONFIG_BASE/$REALM/realm-config.json"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    die "realm '$REALM' is not configured ($CONFIG_FILE not found)."
+    echo ""
+    echo "Run: ./configure.sh init $REALM --mountpoint <path> --base <path>"
+fi
+
+# Validate required fields
+validate_field() {
+    local key="$1"
+    local label="$2"
+    local val
+    val="$(python3 -c "
+import json, sys
+with open('$CONFIG_FILE') as f:
+    d = json.load(f)
+v = d.get('$key')
+print(v if v else '')
+" 2>/dev/null)"
+    if [ -z "$val" ]; then
+        die "$label not configured for realm '$REALM'. Run: ./configure.sh"
+    fi
+    echo "$val"
+}
+
+MOUNTPOINT="$(validate_field "mountpoint" "mountpoint")"
+
+# Storage: either storage_pool or base must be set
+HAS_POOL="$(python3 -c "
+import json
+with open('$CONFIG_FILE') as f:
+    d = json.load(f)
+print('yes' if d.get('storage_pool') else '')
+" 2>/dev/null)"
+
+HAS_BASE="$(python3 -c "
+import json
+with open('$CONFIG_FILE') as f:
+    d = json.load(f)
+v = d.get('base') or d.get('storage_base')
+print('yes' if v else '')
+" 2>/dev/null)"
+
+if [ -z "$HAS_POOL" ] && [ -z "$HAS_BASE" ]; then
+    die "no storage configured for realm '$REALM'. Run: ./configure.sh"
+fi
+
+# Ensure mountpoint directory exists
+if [ ! -d "$MOUNTPOINT" ]; then
+    echo "Creating mountpoint directory: $MOUNTPOINT"
+    mkdir -p "$MOUNTPOINT"
+fi
+
+echo "Launching FFSFS..."
+echo "  realm:      $REALM"
+echo "  config:     $CONFIG_FILE"
+echo "  mountpoint: $MOUNTPOINT"
+if [ -n "$BG_FLAG" ]; then
+    echo "  mode:       background"
+else
+    echo "  mode:       foreground"
+fi
+echo ""
+
+exec python3 "$FFSFS" "$MOUNTPOINT" --config "$CONFIG_FILE" $BG_FLAG

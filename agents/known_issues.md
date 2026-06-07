@@ -33,6 +33,8 @@
   7. Background sync is not implemented.
       - Current behavior is mostly on-demand fetch plus cache/index refresh.
       - No storage roles or sync policies yet.
+      - Pool infrastructure (ffsvolumes.py, ffsctl backend, cross-backend reads) is done.
+      - Catch-up sync worker (SSD→HDD on drive reconnect) is the next piece.
 
   8. Windows adapter has TODOs.
       - timestamp mapping in crossfuse.py:129
@@ -71,6 +73,12 @@
   6. After testing/config: implement background sync and storage policies.
 
   Recently resolved
+
+  - Multi-backend storage pool infrastructure: `ffsvolumes.py` (Volume,
+    StoragePool with ONLINE/OFFLINE tracking), pool-aware `StorageBackend`
+    with cross-backend read routing, `ffsctl backend` subcommands,
+    `ffsctl realm` subcommands, `launch.sh` and `configure.sh` operator
+    scripts. 38 new unit tests (74 total).
 
   - Stale `print ("{realm=}")` debug line removed from MetaLog.__init__
     (ffsfs.py). It was leaking into scenario stdout whenever a realm's

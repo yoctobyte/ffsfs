@@ -35,6 +35,8 @@ from ffsutils import (
     is_deleted_file,
 )
 
+from ffsvolumes import StoragePool, Volume, load_pool_config
+
 try:
     import ffspeers as peers
 except Exception:
@@ -392,12 +394,26 @@ class StorageBackend:
     """
     Thin wrapper around the on-disk layout. Preserves vdir structure:
     <base>/<DATA_DIR>/<vdir...>/<versioned files>
+
+    Optionally backed by a StoragePool with multiple volumes: writes go
+    to the primary, reads scan all online backends for the newest version.
     """
-    def __init__(self, base_path: str, realm: str):
-        self.base = os.path.abspath(base_path)
+    def __init__(self, base_path: str, realm: str, pool: StoragePool = None):
+        if pool:
+            self.pool = pool
+            self.base = os.path.abspath(pool.primary.path)
+        else:
+            self.pool = StoragePool.single(base_path)
+            self.base = os.path.abspath(base_path)
         self.data_path = data_root(self.base)
         self.meta = MetadataLog(self.base, realm)
         make_dirs(self.data_path)
+        # pre-compute data roots for all secondary volumes (for read scanning)
+        self._all_data_roots = [self.data_path]
+        for vol in self.pool.online_secondaries():
+            r = data_root(vol.path)
+            if r not in self._all_data_roots:
+                self._all_data_roots.append(r)
 
     # temp lifecycle -------------------------------------------------------
 
@@ -466,8 +482,28 @@ class StorageBackend:
     # queries --------------------------------------------------------------
 
     def pick_latest(self, vpath: str) -> Optional[str]:
-        d = real_dir_for_vpath(self.base, vpath)
-        return latest_version_path(d, os.path.basename(vpath))
+        best: Tuple[int, int, str] = (-1, -1, "")
+        logical_name = os.path.basename(vpath)
+        vpath_norm = normalize_vpath(vpath)
+        for root in self._all_data_roots:
+            dirpath = os.path.abspath(os.path.join(root, os.path.dirname(vpath_norm)))
+            try:
+                from ffsutils import ensure_within_base
+                ensure_within_base(root, dirpath)
+            except Exception:
+                continue
+            result = latest_version_path(dirpath, logical_name)
+            if result:
+                parsed = parse_versioned_filename(os.path.basename(result))
+                if parsed:
+                    ts = int(parsed["timestamp"])
+                    try:
+                        mtime_ns = os.lstat(result).st_mtime_ns
+                    except Exception:
+                        mtime_ns = 0
+                    if (ts, mtime_ns, result) > best:
+                        best = (ts, mtime_ns, result)
+        return best[2] or None
 
 
 # ------------------------------ FUSE FS ----------------------------------
@@ -480,10 +516,10 @@ class FFSFS(Operations):
     """
     
     
-    def __init__(self, mount_root: str, base_path: str = DEFAULT_DATA_ROOT, realm: str = None):
+    def __init__(self, mount_root: str, base_path: str = DEFAULT_DATA_ROOT, realm: str = None, pool: StoragePool = None):
         self.mount_root = os.path.abspath(mount_root)
         self.base = os.path.abspath(base_path)
-        self.backend = StorageBackend(self.base, realm)
+        self.backend = StorageBackend(self.base, realm, pool=pool)
         self._lock = threading.RLock()
         self.realm = realm or MAGIC_REALM
 
@@ -1255,8 +1291,8 @@ class FFSFS(Operations):
 
 
 # Convenience runner (optional)
-def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool = True, realm: str = None):
-    fs = FFSFS(mount_root=mountpoint, base_path=base_path, realm=realm)
+def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool = True, realm: str = None, pool: StoragePool = None):
+    fs = FFSFS(mount_root=mountpoint, base_path=base_path, realm=realm, pool=pool)
     # --- Start peer HTTP server (optional if ffspeers available) ---
     try:
         if peers:
@@ -1343,6 +1379,12 @@ if __name__ == "__main__":
         ap.print_usage()
         sys.exit("error: the following arguments are required: mountpoint")
 
+    # Build storage pool from config if present
+    pool = None
+    pool_data = config_data.get("storage_pool")
+    if pool_data:
+        pool = StoragePool.from_dict(pool_data)
+
     # Set peer environment variables from config
     if "bind_host" in config_data:
         os.environ["FFSFS_PEER_HOST"] = str(config_data["bind_host"])
@@ -1374,4 +1416,4 @@ if __name__ == "__main__":
         pass
 
     # Mount with your existing helper
-    mount(mountpoint, base_path=realm_base, foreground=not bg, realm=realm)
+    mount(mountpoint, base_path=realm_base, foreground=not bg, realm=realm, pool=pool)
