@@ -90,6 +90,6 @@
 
   Feature Roadmap
 
-  - Config-backed node roles: access_only, cache_limited, shared_storage, superpeer, nas_or_fileserver. User notes: Mutual options ('always online') ('large space plenty bandwidth') ('small space') ('plenty space limited bandwidth (ex. tailscale)') etc.
+  - Config-backed node roles: access_only, cache_limited, shared_storage, replica_storage. Separate config axes: node_availability (always_online/intermittent/on_demand) and node_storage_profile (cache_only/limited/bulk_storage).
   - Sync policies: disabled, selected prefixes, whole realm, opportunistic, scheduled, redundancy target.
   - Future scale testing: separate N-node/10+ node runner, not mixed into two-peer smoke tests.

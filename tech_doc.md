@@ -11,8 +11,13 @@
 - **Realm-oriented:** multiple independent realms are expected, not an edge case.
 - **Partial-cache nodes:** peers may store only locally accessed or intentionally cached data; full replication is optional.
 - **Policy-driven background sync:** nodes should be able to sync selected data in the background according to role, storage limits, peer availability, and redundancy goals.
-- **Superpeer-ready:** larger nodes may keep fuller copies, possibly across multiple disks or user-rotated removable backup media.
-- **Role-aware storage:** laptops may be access/cache-only, small boxes may keep selected shared storage, and NAS/file-server/superpeer nodes may keep broader copies.
+- **Capability-aware peers:** availability and storage depth are separate. A
+  Pi may be always online but storage-limited; a workstation or disk box may
+  have huge storage but be powered on only when needed.
+- **Role-aware storage:** laptops may be access/cache-only, small boxes may keep selected shared storage, and NAS/file-server/bulk-storage nodes may keep broader copies.
+- **At-home redundancy:** redundancy may be opportunistic. Peers can remember
+  wanted or temporarily unavailable files and catch up when the relevant peer
+  comes online.
 - **Flexible deployments:** remote locations, Windows hosts, NAS devices, and overlay networks are in long-term scope; exact designs depend on concrete hardware and network constraints.
 - **Different-location backup:** off-site resilience is a core goal, not just a side effect of sync.
 - **Security later, configuration now:** authentication and realm security matter, but testing should begin with simple explicit configuration for local/LAN/VM scenarios.
@@ -175,8 +180,10 @@ needs to be designed after VM scenario coverage and explicit config files are in
 place.
 
 Expected config dimensions:
-- node role: `access_only`, `cache_limited`, `shared_storage`, `superpeer`,
-  `nas_or_fileserver`
+- node role: `access_only`, `cache_limited`, `shared_storage`,
+  `replica_storage`
+- node availability: `always_online`, `intermittent`, `on_demand`
+- node storage profile: `cache_only`, `limited`, `bulk_storage`
 - sync policy: disabled, selected prefixes, whole realm where feasible,
   opportunistic when peers are online, scheduled windows for sometimes-online
   boxes
@@ -189,8 +196,12 @@ Expected behaviors:
 - access/cache-only nodes fetch on demand and may evict cached remote data
   without deleting local committed writes
 - shared-storage nodes keep configured prefixes available
-- superpeer/NAS nodes proactively pull configured data and catch up after
-  offline periods
+- `replica_storage` means "actively keep broad or configured replicas"; it does
+  not imply always-online or high-capacity by itself
+- always-online limited-storage anchors can provide liveness/cache/index value
+  without holding the whole realm
+- on-demand bulk-storage nodes can hold critical or redundant data and catch up
+  when the user powers them on
 - sometimes-online boxes sync opportunistically when reachable rather than
   being assumed always available
 

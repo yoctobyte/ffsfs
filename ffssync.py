@@ -25,8 +25,7 @@ from ffsvolumes import (
     NODE_ROLE_ACCESS_ONLY,
     NODE_ROLE_CACHE_LIMITED,
     NODE_ROLE_SHARED,
-    NODE_ROLE_SUPERPEER,
-    NODE_ROLE_NAS,
+    NODE_ROLE_REPLICA,
     ROLE_CACHE,
 )
 from ffsutils import parse_versioned_filename
@@ -41,8 +40,7 @@ _ROLE_DEFAULTS = {
     NODE_ROLE_ACCESS_ONLY:   {"mode": SYNC_MODE_LAZY,   "interval_secs": 0.0,   "prefixes": [], "cache_max_bytes": None},
     NODE_ROLE_CACHE_LIMITED: {"mode": SYNC_MODE_LAZY,   "interval_secs": 60.0,  "prefixes": [], "cache_max_bytes": None},
     NODE_ROLE_SHARED:        {"mode": SYNC_MODE_ACTIVE, "interval_secs": 120.0, "prefixes": [], "cache_max_bytes": None},
-    NODE_ROLE_SUPERPEER:     {"mode": SYNC_MODE_ACTIVE, "interval_secs": 60.0,  "prefixes": [], "cache_max_bytes": None},
-    NODE_ROLE_NAS:           {"mode": SYNC_MODE_ACTIVE, "interval_secs": 60.0,  "prefixes": [], "cache_max_bytes": None},
+    NODE_ROLE_REPLICA:       {"mode": SYNC_MODE_ACTIVE, "interval_secs": 60.0,  "prefixes": [], "cache_max_bytes": None},
 }
 
 

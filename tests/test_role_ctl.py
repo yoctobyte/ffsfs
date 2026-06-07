@@ -26,14 +26,16 @@ def test_role_show_default(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "node_role:" in out
     assert "cache_limited" in out
+    assert "node_availability:" in out
+    assert "node_storage_profile:" in out
 
 
 @pytest.mark.unit
 def test_role_set_persists(tmp_path, monkeypatch):
     _init_realm("rA", tmp_path, monkeypatch)
-    cmd_role(Namespace(realm="rA", role="superpeer"))
+    cmd_role(Namespace(realm="rA", role="replica_storage"))
     data = _load_realm_config("rA")
-    assert data["node_role"] == "superpeer"
+    assert data["node_role"] == "replica_storage"
 
 
 @pytest.mark.unit
@@ -44,6 +46,38 @@ def test_role_set_rejects_unknown(tmp_path, monkeypatch, capsys):
     assert "Unknown node_role" in out
     data = _load_realm_config("rA")
     assert "node_role" not in data
+
+
+@pytest.mark.unit
+def test_realm_set_validates_node_availability(tmp_path, monkeypatch, capsys):
+    _init_realm("rA", tmp_path, monkeypatch)
+    cmd_realm(Namespace(action="set", realm="rA", key="node_availability",
+                        value="always_online", mountpoint=None, base=None))
+    data = _load_realm_config("rA")
+    assert data["node_availability"] == "always_online"
+
+    cmd_realm(Namespace(action="set", realm="rA", key="node_availability",
+                        value="always-ish", mountpoint=None, base=None))
+    out = capsys.readouterr().out
+    assert "Unknown node_availability" in out
+    data = _load_realm_config("rA")
+    assert data["node_availability"] == "always_online"
+
+
+@pytest.mark.unit
+def test_realm_set_validates_node_storage_profile(tmp_path, monkeypatch, capsys):
+    _init_realm("rA", tmp_path, monkeypatch)
+    cmd_realm(Namespace(action="set", realm="rA", key="node_storage_profile",
+                        value="bulk_storage", mountpoint=None, base=None))
+    data = _load_realm_config("rA")
+    assert data["node_storage_profile"] == "bulk_storage"
+
+    cmd_realm(Namespace(action="set", realm="rA", key="node_storage_profile",
+                        value="huge", mountpoint=None, base=None))
+    out = capsys.readouterr().out
+    assert "Unknown node_storage_profile" in out
+    data = _load_realm_config("rA")
+    assert data["node_storage_profile"] == "bulk_storage"
 
 
 @pytest.mark.unit

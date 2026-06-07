@@ -235,7 +235,7 @@ def cmd_backend(args):
 _REALM_CONFIG_KEYS = {
     "mountpoint", "base", "storage_base", "port", "bind_host",
     "node_name", "autodiscover", "known_peers", "realm",
-    "node_role",
+    "node_role", "node_availability", "node_storage_profile",
 }
 
 def _load_realm_config(realm: str) -> dict:
@@ -330,6 +330,18 @@ def cmd_realm(args):
                 print(f"Unknown node_role: {value}")
                 print(f"Valid roles: {', '.join(sorted(NODE_ROLES))}")
                 return
+        elif key == "node_availability":
+            from ffsvolumes import NODE_AVAILABILITIES
+            if value not in NODE_AVAILABILITIES:
+                print(f"Unknown node_availability: {value}")
+                print(f"Valid values: {', '.join(sorted(NODE_AVAILABILITIES))}")
+                return
+        elif key == "node_storage_profile":
+            from ffsvolumes import NODE_STORAGE_PROFILES
+            if value not in NODE_STORAGE_PROFILES:
+                print(f"Unknown node_storage_profile: {value}")
+                print(f"Valid values: {', '.join(sorted(NODE_STORAGE_PROFILES))}")
+                return
         data[key] = value
         _save_realm_config(realm, data)
         print(f"Set {key} = {value}")
@@ -351,7 +363,11 @@ def cmd_realm(args):
 # --------------------- role / sync / ratelimit commands ---------------
 
 def cmd_role(args):
-    from ffsvolumes import NODE_ROLES, DEFAULT_NODE_ROLE
+    from ffsvolumes import (
+        NODE_ROLES, DEFAULT_NODE_ROLE,
+        DEFAULT_NODE_AVAILABILITY, DEFAULT_NODE_STORAGE_PROFILE,
+        NODE_AVAILABILITIES, NODE_STORAGE_PROFILES,
+    )
     realm = args.realm
     data = _load_realm_config(realm)
     if not data:
@@ -359,8 +375,14 @@ def cmd_role(args):
         return
     if args.role is None:
         current = data.get("node_role", DEFAULT_NODE_ROLE)
+        availability = data.get("node_availability", DEFAULT_NODE_AVAILABILITY)
+        storage = data.get("node_storage_profile", DEFAULT_NODE_STORAGE_PROFILE)
         print(f"node_role: {current}")
+        print(f"node_availability: {availability}")
+        print(f"node_storage_profile: {storage}")
         print(f"valid: {', '.join(sorted(NODE_ROLES))}")
+        print(f"valid availability: {', '.join(sorted(NODE_AVAILABILITIES))}")
+        print(f"valid storage: {', '.join(sorted(NODE_STORAGE_PROFILES))}")
         return
     if args.role not in NODE_ROLES:
         print(f"Unknown node_role: {args.role}")

@@ -5,8 +5,7 @@ from ffsvolumes import (
     NODE_ROLE_ACCESS_ONLY,
     NODE_ROLE_CACHE_LIMITED,
     NODE_ROLE_SHARED,
-    NODE_ROLE_SUPERPEER,
-    NODE_ROLE_NAS,
+    NODE_ROLE_REPLICA,
 )
 
 
@@ -19,8 +18,8 @@ def test_default_role_is_lazy_for_access_only():
 
 
 @pytest.mark.unit
-def test_default_role_is_active_for_superpeer():
-    p = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+def test_default_role_is_active_for_replica_storage():
+    p = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     assert p.mode == SYNC_MODE_ACTIVE
     assert p.whole_realm is True
 
@@ -28,12 +27,6 @@ def test_default_role_is_active_for_superpeer():
 @pytest.mark.unit
 def test_default_role_is_active_for_shared():
     p = SyncPolicy.for_role(NODE_ROLE_SHARED)
-    assert p.mode == SYNC_MODE_ACTIVE
-
-
-@pytest.mark.unit
-def test_default_role_is_active_for_nas():
-    p = SyncPolicy.for_role(NODE_ROLE_NAS)
     assert p.mode == SYNC_MODE_ACTIVE
 
 
@@ -71,7 +64,7 @@ def test_from_config_invalid_mode_raises():
 
 @pytest.mark.unit
 def test_wants_with_no_prefixes_matches_all():
-    p = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    p = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     assert p.wants("/a/b") is True
     assert p.wants("anything") is True
 

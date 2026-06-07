@@ -36,8 +36,8 @@ Completed:
 - Two-peer VM scenarios (all passing)
 - Error propagation, CLI normalization, config file loading
 - Operator documentation
-- Node storage roles (`access_only`, `cache_limited`, `shared_storage`,
-  `superpeer`, `nas_or_fileserver`)
+- Node sync roles (`access_only`, `cache_limited`, `shared_storage`,
+  `replica_storage`) plus separate availability/storage profile axes
 - Background sync worker (`ffssync.SyncWorker`): active prefix-aware pull and
   cache eviction with newest-version protection
 - Rate-limit enforcement (`ffsratelimit.RateLimits`) with token-bucket
@@ -68,12 +68,22 @@ cloud drive systems. Keep these direction points in mind:
   errors. A failed large file, locked file, peer outage, network hiccup, or
   stale cache should not block syncing unrelated files. Retry later with
   backoff and show persistent failures clearly to users/operators.
-- Superpeers may hold larger or complete copies.
-- Superpeer storage may span multiple disks, including user-rotated removable
-  backup disks.
+- Do not use `superpeer` as a config role. Separate peer availability from
+  storage depth:
+  - `node_availability=always_online`: a Pi/NAS/server that is usually present
+    and useful as a coordination or small-cache anchor, even with limited disk.
+  - `node_availability=on_demand`: a workstation or disk box that the user can
+    power on when needed.
+  - `node_storage_profile=bulk_storage`: a node or backend with large capacity,
+    possibly offline most of the time.
+- Large/offline storage is acceptable in at-home redundancy. Peers may mark
+  files as temporarily unavailable or wanted and catch up when the storage node
+  returns.
+- Replica/bulk storage may span multiple disks, including user-rotated
+  removable backup disks.
 - Node roles should cover access-only/cache-only laptops, limited shared
   storage boxes, sometimes-online high-capacity boxes, NAS/file servers, and
-  superpeers.
+  replica/bulk-storage nodes.
 - Flexible deployments are in scope long term: remote sites, Windows hosts,
   NAS devices such as Synology, and private overlay networks such as Tailscale.
 - Different-location backup is one of the ultimate goals.

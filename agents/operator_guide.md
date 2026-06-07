@@ -23,8 +23,13 @@ FFSFS supports explicit configuration files in JSON format. This allows configur
     "192.168.1.50:18765",
     "192.168.1.51:18765"
   ],
-  "storage_role": "superpeer",
-  "sync_policy": "all"
+  "node_role": "replica_storage",
+  "node_availability": "on_demand",
+  "node_storage_profile": "bulk_storage",
+  "sync": {
+    "mode": "active",
+    "prefixes": []
+  }
 }
 ```
 

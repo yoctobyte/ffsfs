@@ -4,6 +4,53 @@ This document serves as the developer handover details for the next agent workin
 
 ---
 
+## 0.4. Follow-up: Superpeer Definition
+
+`superpeer` was ambiguous because it mixed two independent properties:
+
+- Availability: how often the node is reachable.
+- Storage depth: how much data it can hold.
+
+New config vocabulary:
+
+- `node_availability`:
+  - `always_online`: Pi/NAS/server-style node that is usually reachable, even
+    if it has limited storage.
+  - `intermittent`: ordinary node that comes and goes.
+  - `on_demand`: user-powered workstation/disk box brought online when needed.
+- `node_storage_profile`:
+  - `cache_only`: only short-lived/on-demand cache.
+  - `limited`: bounded local storage.
+  - `bulk_storage`: large-capacity storage, possibly offline most of the time.
+
+Important product intent:
+
+- At-home redundancy is allowed to be opportunistic and messy.
+- Power-saving matters; large workstations or disk boxes should not need to run
+  24/7.
+- Always-online limited peers and on-demand bulk peers are both useful, but for
+  different reasons.
+- Peers should eventually remember wanted or temporarily unavailable files and
+  sync them when the relevant peer/storage comes online.
+- `superpeer` should not be used as a config role. Pre-stable development does
+  not require backward compatibility for ambiguous role names.
+- Use `node_role=replica_storage` for broad/configured replica intent, then
+  describe actual behavior with `node_availability` and
+  `node_storage_profile`.
+
+Implementation in this follow-up:
+
+- Removed `superpeer` and `nas_or_fileserver` from the active node-role
+  taxonomy.
+- Added `node_role=replica_storage`, plus `node_availability` and
+  `node_storage_profile` constants in
+  `ffsvolumes.py`.
+- `ffsctl realm set` validates both keys.
+- `ffsctl role <realm>` shows role, availability, and storage profile.
+- Updated roadmap and technical docs with the availability/storage split.
+
+---
+
 ## 0.3. Follow-up: Pull Sync + Non-blocking Failures
 
 Sync policy clarification:
@@ -111,8 +158,9 @@ This cycle introduced node-level storage roles, a background sync worker, and
 the configuration plumbing for future rate limiting.
 
 - **Node roles** (`ffsvolumes.py`): `access_only`, `cache_limited`,
-  `shared_storage`, `superpeer`, `nas_or_fileserver`. Volume-level role
-  (`primary`/`archive`/`cache`) is unchanged.
+  `shared_storage`, `replica_storage`. Availability and storage depth are
+  separate config axes. Volume-level role (`primary`/`archive`/`cache`) is
+  unchanged.
 - **Sync policy and worker** (`ffssync.py`):
   - `SyncPolicy.from_config(node_role, sync)` resolves per-realm config and
     role defaults (mode, prefixes, interval, cache_max_bytes).

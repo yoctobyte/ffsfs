@@ -7,7 +7,7 @@ from ffsfs import StorageBackend
 from ffsvolumes import (
     Volume, StoragePool,
     ROLE_PRIMARY, ROLE_CACHE,
-    NODE_ROLE_SUPERPEER, NODE_ROLE_SHARED, NODE_ROLE_ACCESS_ONLY,
+    NODE_ROLE_REPLICA, NODE_ROLE_SHARED, NODE_ROLE_ACCESS_ONLY,
     NODE_ROLE_CACHE_LIMITED,
 )
 from ffssync import SyncPolicy, SyncWorker, SYNC_MODE_LAZY
@@ -76,7 +76,7 @@ def test_active_pull_fetches_missing_versions(tmp_path, monkeypatch):
     peers = FakePeers(peer_cache={
         "peerA": {"files": {"doc.txt": [{"name": fake_versioned, "size": 5, "mtime": 500}]}},
     })
-    policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     worker = SyncWorker(backend, peers, policy, None)
     result = worker.run_active_once()
     assert result["considered"] == 1
@@ -96,7 +96,7 @@ def test_active_pull_skips_when_local_is_newer(tmp_path, monkeypatch):
     peers = FakePeers(peer_cache={
         "peerA": {"files": {"doc.txt": [{"name": fake_versioned, "size": 5, "mtime": 500}]}},
     })
-    policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     worker = SyncWorker(backend, peers, policy, None)
     result = worker.run_active_once()
     assert result["considered"] == 1
@@ -112,7 +112,7 @@ def test_active_pull_considers_best_version_across_peers(tmp_path, monkeypatch):
         "peerA": {"files": {"doc.txt": [{"name": "doc.txt.AAAAAAAA.write.0.100"}]}},
         "peerB": {"files": {"doc.txt": [{"name": "doc.txt.BBBBBBBB.write.0.200"}]}},
     })
-    policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     worker = SyncWorker(backend, peers, policy, None)
     result = worker.run_active_once()
     assert result == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0}
@@ -144,7 +144,7 @@ def test_active_pull_skips_delete_versions(tmp_path, monkeypatch):
             "gone.txt": [{"name": "gone.txt.AAAAAAAA.delete.0.700"}],
         }},
     })
-    policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     worker = SyncWorker(backend, peers, policy, None)
     result = worker.run_active_once()
     assert peers.fetch_calls == []
@@ -160,7 +160,7 @@ def test_active_pull_failed_path_does_not_block_other_files(tmp_path, monkeypatc
             "ok.txt": [{"name": "ok.txt.BBBBBBBB.write.0.500"}],
         }},
     }, fail_vpaths={"big.bin"})
-    policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     worker = SyncWorker(backend, peers, policy, None)
 
     result = worker.run_active_once()
@@ -181,7 +181,7 @@ def test_active_pull_backoff_skips_only_failed_path(tmp_path, monkeypatch):
             "ok.txt": [{"name": "ok.txt.BBBBBBBB.write.0.500"}],
         }},
     }, fail_vpaths={"big.bin"})
-    policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     worker = SyncWorker(backend, peers, policy, None)
 
     first = worker.run_active_once()
@@ -201,7 +201,7 @@ def test_active_pull_success_clears_previous_failure(tmp_path, monkeypatch):
             "big.bin": [{"name": "big.bin.AAAAAAAA.write.0.500"}],
         }},
     }, fail_vpaths={"big.bin"})
-    policy = SyncPolicy.for_role(NODE_ROLE_SUPERPEER)
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     worker = SyncWorker(backend, peers, policy, None)
 
     first = worker.run_active_once()

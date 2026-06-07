@@ -24,11 +24,15 @@ Important long-term properties:
 - Default synchronization is pull-based. Peer notifications are hints that new
   versions may exist; they do not force the receiver to sync and do not push
   file bytes into another peer.
-- Support fuller "superpeer" nodes that keep larger or more complete copies.
-- Support storage roles ranging from access-only/cache-only laptops, through
+- Support fuller redundancy nodes, but do not use `superpeer` as a config role
+  because it mixes always-online and huge-storage meanings. These are separate
+  axes:
+  - Availability: always-online, intermittent, or user-powered on demand.
+  - Storage depth: cache-only/limited, normal shared storage, or bulk storage.
+- Support sync/storage intent ranging from access-only/cache-only laptops, through
   limited shared storage boxes, to always-on or sometimes-on file servers,
-  NAS boxes, and high-capacity redundancy/superpeer nodes.
-- Eventually support superpeers with multiple disks, including removable disks
+- NAS boxes, and high-capacity replica nodes.
+- Eventually support replica/bulk storage with multiple disks, including removable disks
   rotated by a user as a practical backup workflow, such as alternating external
   USB drives.
 - Support flexible deployment topologies over time, including remote locations,
@@ -77,6 +81,12 @@ Excluding authentication and secure sockets, the remaining MVP gap is:
 - Rate limiting:
   - Enforce the existing `RateLimits` config in foreground/background disk and
     network I/O paths.
+- At-home redundancy model:
+  - It is acceptable for redundancy to be messy and opportunistic.
+  - Power-saving matters; workstations and large disk boxes should not need to
+    be online 24/7.
+  - Peers should be able to remember wanted or temporarily unavailable files
+    and catch up when the relevant peer/storage comes online.
 
 Packaging and UI remain important product work, but they are intentionally
 deferred until the checkout-and-run MVP is feature-complete.
@@ -139,8 +149,9 @@ Completed infrastructure:
 - `ffsctl role`, `ffsctl sync`, and `ffsctl ratelimit` subcommands.
 - Background sync worker (`ffssync.SyncWorker`) with active prefix-aware pull
   and cache-volume eviction.
-- Node storage role taxonomy: `access_only`, `cache_limited`,
-  `shared_storage`, `superpeer`, `nas_or_fileserver`.
+- Node sync role taxonomy: `access_only`, `cache_limited`,
+  `shared_storage`, `replica_storage`, with separate availability/storage
+  profile axes.
 - Rate-limit enforcement (`ffsratelimit.RateLimits`) with token-bucket
   foreground/background disk/network limits, chunked peer fetch/serve, and
   chunked disk copy.
@@ -336,13 +347,21 @@ Tasks:
   - known peers
   - autodiscovery on/off
   - storage role
+  - node availability (`always_online`, `intermittent`, `on_demand`)
+  - node storage profile (`cache_only`, `limited`, `bulk_storage`)
   - background sync policy
-- Define initial storage roles:
+- Define initial sync roles:
   - `access_only`: browse/fetch on demand, cache local reads only.
   - `cache_limited`: keep a bounded local cache with eviction policy.
   - `shared_storage`: keep selected prefixes available for others.
-  - `superpeer`: keep broad or complete copies where storage allows.
-  - `nas_or_fileserver`: server-oriented profile, possibly headless.
+  - `replica_storage`: actively keep broad or configured replicas for
+    redundancy.
+- Define peer capability axes:
+  - Always-online limited-storage anchor, such as a Pi already running 24/7.
+  - On-demand bulk-storage node, such as a workstation or big disk box the user
+    powers on when needed.
+  - Remote/intermittent backup peer, such as a work-site node once remote sync
+    is mature.
 - Define background sync policies:
   - disabled
   - selected prefixes
@@ -427,9 +446,10 @@ Deliverable:
 
 ### Completed in this cycle
 
-- Node storage roles in realm config:
-  - `access_only`, `cache_limited`, `shared_storage`, `superpeer`,
-    `nas_or_fileserver` (constants in `ffsvolumes.py`).
+- Node sync roles in realm config:
+  - `access_only`, `cache_limited`, `shared_storage`, `replica_storage`
+    (constants in `ffsvolumes.py`).
+  - `node_availability` and `node_storage_profile` are separate config axes.
 - Background sync worker (`ffssync.py`):
   - `SyncPolicy` resolves role + per-realm overrides
     (`mode`, `prefixes`, `interval_secs`, `cache_max_bytes`).
