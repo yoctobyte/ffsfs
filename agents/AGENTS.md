@@ -20,7 +20,12 @@ Read these files before changing behavior:
    - Media/role-aware write target selection
    - Disk rotation UX around mirror volumes
    - Broader sync policy coverage in VM scenarios
-2. Peer trust/security hardening and secure sockets. Important for wider
+2. Web configuration UI (`/configure` route):
+   - Read-mostly dashboard: realm config, peers, sync status, conflicts, volumes.
+   - Copyable CLI commands for mutations (no form-based config editing yet).
+   - Localhost unrestricted; remote access behind session password / basic-auth.
+   - Single-file embedded HTML, no JS framework.
+3. Peer trust/security hardening and secure sockets. Important for wider
    deployment, but not the next implementation blocker for checkout-and-run
    local/LAN MVP testing.
    - Optional per-node manual approval.

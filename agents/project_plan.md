@@ -96,6 +96,37 @@ Excluding authentication and secure sockets, the remaining MVP gap is:
 Packaging and UI remain important product work, but they are intentionally
 deferred until the checkout-and-run MVP is feature-complete.
 
+Web configuration UI direction (next UI milestone):
+
+- Extend the existing Flask peer server with a `/configure` page.
+- Read-mostly dashboard: show realm config, peer list, sync status, conflicts,
+  storage volumes, and cache pressure.
+- Display copyable CLI commands for config mutations rather than implementing
+  a full form-based editor. Server restart after config changes is acceptable.
+- Access control: localhost is unrestricted; remote access requires a simple
+  session password (separate from the realm secret) or HTTP basic-auth.
+- Keep it a single-file embedded UI (no JS framework, no build step). Use the
+  same minimal inline HTML+CSS pattern as the existing `/status` page.
+
+NAS deployment strategy (Synology, QNAP, etc.):
+
+- Running FFSFS directly on a NAS appliance is not a near-term goal. DSM/QTS
+  environments have limited Python, no FUSE, Docker constraints, and firmware
+  updates break custom packages.
+- Preferred architecture: a dedicated always-on Linux host (Pi, mini-PC, or
+  24/7 server) mounts the NAS share via NFS or SMB, then registers the mount
+  as an FFSFS storage backend volume with role `bulk_storage` or `mirror`.
+- The NAS is treated as dumb networked storage. No FFSFS software runs on it.
+- If the NAS share becomes unavailable (network hiccup, NAS reboot), the
+  volume goes OFFLINE automatically. Pending replication catches up when it
+  returns. This is already supported by the pool/volume infrastructure.
+- A diskless 24/7 server that uses the NAS exclusively for storage is a valid
+  deployment: it runs FFSFS as a peer node with `always_online` availability
+  and the NAS-backed volume as its primary or sole storage.
+- Future: if direct NAS execution becomes desirable (e.g., via Docker on
+  Synology), it would run without FUSE (HTTP peer mode only, serving files
+  from the NAS filesystem directly). This is a separate design decision.
+
 The exact approach for remote sites, Windows nodes, NAS nodes, and overlay
 networking is intentionally not fixed yet. Decide those designs from concrete
 hardware and location constraints when they are known.
