@@ -44,16 +44,17 @@
   with two peer processes on different guest ports (see tools/vm/README.md).
   A multi-VM layout is reserved for future stress/config testing.
 
-  1. Add two-peer VM scenarios:
-      - update-newer-version
-      - path-traversal
-      - peer-restart
-      (delete-tombstone scenario is done)
+  1. Add two-peer VM scenarios: (ALL RESOLVED)
+      - update-newer-version (RESOLVED)
+      - path-traversal (RESOLVED)
+      - peer-restart (RESOLVED)
+      - delete-tombstone (RESOLVED)
 
-  2. Add VM scenario runner improvements:
-      - run-two-peer-scenario.sh all
-      - scenario timeouts
-      - failure summary with exact log paths
+  2. Add VM scenario runner improvements: (ALL RESOLVED)
+      - run-two-peer-scenario.sh all (RESOLVED)
+      - scenario timeouts (RESOLVED)
+      - failure summary with exact log paths (RESOLVED)
+
 
   3. Normalize config and CLI:
       - config files/profiles
