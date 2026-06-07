@@ -9,7 +9,7 @@ Read these files before changing behavior:
 
 - `project_plan.md`: stabilization roadmap and current priority queue.
 - `vm_testing_plan.md`: VM-first strategy for FUSE and peer-network tests.
-- `../readme.MD`: user-facing install and quick-start notes.
+- `../README.md`: user-facing install and quick-start notes.
 - `../tech_doc.md`: storage layout, peer API, discovery, and tunables.
 
 ## Current Priorities
