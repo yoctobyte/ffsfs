@@ -4,6 +4,36 @@ This document serves as the developer handover details for the next agent workin
 
 ---
 
+## 0.2. Follow-up: Rate-limit Enforcement
+
+Rate-limit config is no longer scaffolding-only.
+
+- **Token bucket** (`ffsratelimit.py`):
+  - `RateLimiter.consume()` now blocks when `bytes_per_sec > 0`.
+  - `0` remains unlimited.
+  - Tests use injected clock/sleeper hooks so the suite stays fast.
+- **Filesystem disk limits** (`ffsfs.py`):
+  - `StorageBackend` accepts `RateLimits`.
+  - Foreground disk limits are consumed during FUSE read/write and commit-time
+    temp hashing/cross-volume commit copy.
+  - Background disk limits are consumed during mirror/pending-replication
+    copies.
+- **Peer network limits** (`ffspeers.py`):
+  - `/get-file` uses a streamed `Response` and consumes foreground disk and
+    network limits per chunk.
+  - `get_newer_or_missing(..., fetch=True)` uses `requests.iter_content()`
+    and consumes background network and disk limits per chunk.
+  - `set_rate_limits()` lets the mounted filesystem and CLI sync path wire the
+    configured limits into the peer module.
+- **CLI wiring** (`ffsctl.py`):
+  - `ffsctl sync <realm> run-once` now builds `RateLimits` from config and
+    passes them to the backend, peer module, and sync worker.
+- **Verification**:
+  - `python3 -m py_compile *.py` passed.
+  - `pytest` passed: **140 tests**.
+
+---
+
 ## 0.1. Follow-up: Sync Review Fixes + MVP Scope
 
 After reviewing the sync implementation, this follow-up fixed the highest-risk
@@ -38,7 +68,7 @@ behavioral gaps and clarified the MVP target.
     reset command.
 - **Verification**:
   - `python3 -m py_compile *.py` passed.
-  - `pytest` passed: **137 tests**.
+  - `pytest` passed: **137 tests** at that checkpoint.
   - `tools/vm/run-two-peer-scenario.sh smoke` passed on 2026-06-07:
     `healthz`, `file-fetch`, `delete-tombstone`, `path-traversal`.
 
@@ -60,13 +90,10 @@ the configuration plumbing for future rate limiting.
     that protects the newest version and refuses to evict copies that do not
     provably exist on a peer or another local volume.
   - Worker is started by `FFSFS.__init__` and stopped during `_shutdown`.
-- **Rate-limit scaffolding** (`ffsratelimit.py`):
+- **Rate-limit plumbing** (`ffsratelimit.py`):
   - `RateLimiter`/`RateLimits` parse config (`disk_fg_bps`, `disk_bg_bps`,
-    `net_fg_bps`, `net_bg_bps`; 0 = unlimited). `consume()` is currently a
-    no-op — Phase 2 will turn it into a token-bucket and switch the call sites
-    flagged with `# TODO(rate-limit)` (in `StorageBackend.commit_temp`,
-    `_copy_version_to_volume`, `ffspeers.get_newer_or_missing`,
-    `ffspeers.get_file`) to chunked loops.
+    `net_fg_bps`, `net_bg_bps`; 0 = unlimited). Follow-up 0.2 implemented
+    token-bucket enforcement and chunked I/O at the relevant disk/peer paths.
 - **CLI** (`ffsctl.py`): new `role`, `sync`, and `ratelimit` subcommands.
   `ffsctl realm set node_role <r>` validates against `NODE_ROLES`.
   `ffsctl sync <realm> run-once` is useful for VM scenarios — it builds a
@@ -87,9 +114,6 @@ the configuration plumbing for future rate limiting.
 
 ### What is intentionally not done
 
-- Real rate-limit enforcement (peer `/get-file` is still a single
-  `f.read()` + `make_response(data)`; client side is still
-  `f.write(r.content)`). The next cycle should switch to chunked streaming.
 - Per-volume sync override (the `volume.sync` field is reserved but not
   honored).
 - Disk rotation UX changes — existing pending-replication catch-up still
@@ -136,7 +160,7 @@ We have finished the FUSE write durability improvements, configuration normaliza
 ## 2. Current State of the Codebase
 
 - **Branch:** `main`.
-- **Unit Tests:** 137 tests pass on the workstation in less than 2 seconds
+- **Unit Tests:** 140 tests pass on the workstation in less than 2 seconds
   (`pytest`).
 - **VM Integration Tests:** Two-peer VM scenario harness supports `smoke` and
   `all` batches in one VM boot. The latest verified smoke batch passed 4
@@ -152,13 +176,7 @@ We have finished the FUSE write durability improvements, configuration normaliza
 
 ## 3. Next Steps (What to Work on Next)
 
-### Task A: Rate-limit Enforcement
-
-The config and CLI plumbing exists, but `RateLimiter.consume()` is still a
-no-op. Implement token-bucket behavior and wire it into chunked disk/network
-I/O at the `# TODO(rate-limit)` sites.
-
-### Task B: Sync Semantics and Status
+### Task A: Sync Semantics and Status
 
 - Delete/tombstone propagation guarantees and VM coverage.
 - Rename and move behavior, especially cross-directory moves.
@@ -166,13 +184,13 @@ I/O at the `# TODO(rate-limit)` sites.
 - `ffsctl` status for pending/failed/stale sync, peer-cache state, and cache
   pressure.
 
-### Task C: Storage Policy Completion
+### Task B: Storage Policy Completion
 
 - Media/role-aware write target selection.
 - Disk rotation UX around mirror volumes.
 - Broader sync policy VM scenarios.
 
-### Task D: Security Hardening (Later MVP/Wider Deployment)
+### Task C: Security Hardening (Later MVP/Wider Deployment)
 
 - Peer trust model is prototype-grade (`TRUST_UNKNOWN_PEER = True`).
 - Authentication, realm boundaries, and secure sockets should be wired before

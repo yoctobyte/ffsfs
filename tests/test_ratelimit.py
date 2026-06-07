@@ -16,12 +16,43 @@ def test_consume_is_noop_when_unlimited():
     rl.consume(10**9)  # would otherwise block forever
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, delay):
+        self.sleeps.append(delay)
+        self.now += delay
+
+
 @pytest.mark.unit
-def test_consume_is_noop_even_when_limited_for_now():
-    rl = RateLimiter(1024)
+def test_limited_consume_uses_initial_bucket_without_sleep():
+    fake = FakeClock()
+    rl = RateLimiter(1024, clock=fake.clock, sleeper=fake.sleep)
     assert not rl.unlimited
-    # Stub still returns immediately; future implementation will block.
-    rl.consume(1024 * 1024)
+    rl.consume(1024)
+    assert fake.sleeps == []
+
+
+@pytest.mark.unit
+def test_limited_consume_waits_for_tokens():
+    fake = FakeClock()
+    rl = RateLimiter(10, clock=fake.clock, sleeper=fake.sleep)
+    rl.consume(10)
+    rl.consume(5)
+    assert fake.sleeps == [pytest.approx(0.5)]
+
+
+@pytest.mark.unit
+def test_limited_consume_handles_chunks_larger_than_bucket():
+    fake = FakeClock()
+    rl = RateLimiter(10, clock=fake.clock, sleeper=fake.sleep)
+    rl.consume(25)
+    assert fake.sleeps == [pytest.approx(1.0), pytest.approx(0.5)]
 
 
 @pytest.mark.unit

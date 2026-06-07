@@ -11,8 +11,6 @@
 #
 # Future:
 #   - Per-volume sync override (TODO marker below).
-#   - Real rate-limit enforcement at the call sites flagged with
-#     `# TODO(rate-limit)` in StorageBackend / ffspeers.
 
 from __future__ import annotations
 
@@ -177,7 +175,6 @@ class SyncWorker:
         if peers is None:
             return {"fetched": 0, "considered": 0}
         cache = getattr(peers, "_peer_cache", {}) or {}
-        # TODO(rate-limit): wrap fetches below in self.rate_limits.net_bg.consume(size)
         fetched = 0
         remote_best = {}
         for peer_id, peer_data in list(cache.items()):
@@ -198,7 +195,9 @@ class SyncWorker:
             if local_ts is not None and local_ts >= newest_ts:
                 continue
             try:
-                result = peers.get_newer_or_missing(vpath, local_ts or 0, fetch=True)
+                result = peers.get_newer_or_missing(
+                    vpath, local_ts or 0, fetch=True,
+                    rate_limits=self.rate_limits)
                 if result and result is not True:
                     fetched += 1
             except Exception as e:

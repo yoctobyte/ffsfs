@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Dict, List, Any, Optional
 
 import requests
-from flask import Flask, jsonify, request, make_response
+from flask import Flask, Response, jsonify, request, make_response, stream_with_context
 
 from ffsutils import (
     MAGIC_REALM,                 # keep realm in sync with main app
@@ -17,6 +17,7 @@ from ffsutils import (
     NULL_HASH,
     normalize_vpath,
 )
+from ffsratelimit import RateLimits
 
 import unicodedata
 from urllib.parse import quote
@@ -506,6 +507,7 @@ _known_peers: List[str] = []
 _last_seen: Dict[str, float] = {}           # "ip[:port]" -> last ping ts
 _start_ts = time.time()
 _local_backend: Any = None                  # must expose .data_path
+_rate_limits = RateLimits.unlimited()
 
 # File info cache:
 # _peer_cache[peer_id] = { "files": { vpath: [ {name, size, mtime}, ... ] }, "last_sync": ts }
@@ -942,7 +944,13 @@ def notify_modify(vpath: str, path: str) -> None:
         except Exception as e:
             print(f"[peer] notify_modify failed to {peer}: {e}")
 
-def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False) -> Optional[str]:
+def set_rate_limits(rate_limits: Optional[RateLimits]) -> None:
+    global _rate_limits
+    _rate_limits = rate_limits or RateLimits.unlimited()
+
+
+def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False,
+                         rate_limits: Optional[RateLimits] = None) -> Optional[str]:
     if not _known_peers:
         _log("[peer] No known peers")
         return False
@@ -989,7 +997,8 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False) 
         #url = _peer_url(peer, f"/get-file?realm={_REALM}&vpath={best_name}")
         #r = requests.get(url, timeout=90)
         url = _peer_url(best_peer, "/get-file")
-        r = requests.get(url, params={"realm": _REALM, "vpath": best_name}, timeout=90)
+        r = requests.get(url, params={"realm": _REALM, "vpath": best_name},
+                         timeout=90, stream=True)
         r.raise_for_status()
 
         local_root = _primary_data_root()
@@ -997,10 +1006,14 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False) 
             raise RuntimeError("no backend bound")
         local_path = os.path.join(local_root, best_name)
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        limits = rate_limits or _rate_limits
         with open(local_path, "wb") as f:
-            # TODO(rate-limit): switch to r.iter_content(chunk_size=1<<20)
-            # and call rate_limits.net_bg.consume(len(chunk)) per chunk.
-            f.write(r.content)
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                limits.net_bg.consume(len(chunk))
+                limits.disk_bg.consume(len(chunk))
+                f.write(chunk)
         _log(f"[peer] Pulled {best_name} from {best_peer} → {local_path}")
         return local_path
     except Exception as e:
@@ -1147,13 +1160,17 @@ def get_file():
 
     try:
         filesize = os.path.getsize(real_path)
-        with open(real_path, "rb") as f:
-            # TODO(rate-limit): replace single read() with a chunked
-            # streaming response and call rate_limits.net_fg.consume(len(chunk)).
-            data = f.read()
+
+        def generate():
+            with open(real_path, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    _rate_limits.disk_fg.consume(len(chunk))
+                    _rate_limits.net_fg.consume(len(chunk))
+                    yield chunk
 
         basename = os.path.basename(vpath)
-        resp = make_response(data)
+        resp = Response(stream_with_context(generate()),
+                        mimetype="application/octet-stream")
         resp.headers["Content-Type"] = "application/octet-stream"
         resp.headers["Content-Length"] = str(filesize)
 

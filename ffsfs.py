@@ -404,17 +404,25 @@ class StorageBackend:
     Optionally backed by a StoragePool with multiple volumes: writes go
     to the primary, reads scan all online backends for the newest version.
     """
-    def __init__(self, base_path: str, realm: str, pool: StoragePool = None):
+    def __init__(self, base_path: str, realm: str, pool: StoragePool = None,
+                 rate_limits: RateLimits = None):
         if pool:
             self.pool = pool
             self.base = os.path.abspath(pool.primary.path)
         else:
             self.pool = StoragePool.single(base_path)
             self.base = os.path.abspath(base_path)
+        self.rate_limits = rate_limits or RateLimits.unlimited()
         self.data_path = data_root(self.base)
         self.meta = MetadataLog(self.base, realm)
         make_dirs(self.data_path)
         self._all_data_roots = self.data_roots()
+
+    def _copy_file_chunked(self, source_path: str, dest_path: str, limiter) -> None:
+        with open(source_path, "rb") as src, open(dest_path, "wb") as dst:
+            for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                limiter.consume(len(chunk))
+                dst.write(chunk)
 
     def data_roots(self) -> List[str]:
         """Return current online data roots, primary first."""
@@ -461,10 +469,8 @@ class StorageBackend:
         make_dirs(os.path.dirname(dest))
         tmp = f"{dest}.replicating-{os.getpid()}-{int(time.time() * 1000)}"
         try:
-            # TODO(rate-limit): replace shutil.copy2 with a chunked copy
-            # that calls self._rate_limits.disk_bg.consume(len(chunk)) per
-            # chunk (and net_bg.consume when the source is a peer).
-            shutil.copy2(source_path, tmp)
+            self._copy_file_chunked(source_path, tmp, self.rate_limits.disk_bg)
+            shutil.copystat(source_path, tmp, follow_symlinks=True)
             os.replace(tmp, dest)
         finally:
             try:
@@ -614,7 +620,7 @@ class StorageBackend:
         size = 0
         with open(temp_abspath, "rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                # TODO(rate-limit): self._rate_limits.disk_fg.consume(len(chunk))
+                self.rate_limits.disk_fg.consume(len(chunk))
                 h.update(chunk); size += len(chunk)
 
         # Crockford-32 (truncated)
@@ -640,7 +646,8 @@ class StorageBackend:
         else:
             tmp_final = f"{final_abspath}.committing-{os.getpid()}-{int(time.time() * 1000)}"
             try:
-                shutil.copy2(temp_abspath, tmp_final)
+                self._copy_file_chunked(temp_abspath, tmp_final, self.rate_limits.disk_fg)
+                shutil.copystat(temp_abspath, tmp_final, follow_symlinks=True)
                 os.replace(tmp_final, final_abspath)
                 os.remove(temp_abspath)
             finally:
@@ -711,7 +718,9 @@ class FFSFS(Operations):
                  sync_policy: SyncPolicy = None, rate_limits: RateLimits = None):
         self.mount_root = os.path.abspath(mount_root)
         self.base = os.path.abspath(base_path)
-        self.backend = StorageBackend(self.base, realm, pool=pool)
+        self.rate_limits = rate_limits or RateLimits.unlimited()
+        self.backend = StorageBackend(self.base, realm, pool=pool,
+                                      rate_limits=self.rate_limits)
         self._lock = threading.RLock()
         self.realm = realm or MAGIC_REALM
 
@@ -727,7 +736,6 @@ class FFSFS(Operations):
         self._sync_mon.start()
 
         # sync policy + rate limits
-        self.rate_limits = rate_limits or RateLimits.unlimited()
         self.sync_policy = sync_policy or SyncPolicy.for_role("cache_limited")
         self.sync_worker = SyncWorker(self.backend, peers, self.sync_policy, self.rate_limits)
         self.sync_worker.start()
@@ -1224,7 +1232,8 @@ class FFSFS(Operations):
             # Try remote if missing *or* a newer version exists remotely
             if peers and hasattr(peers, "get_newer_or_missing"):
                 try:
-                    fetched = peers.get_newer_or_missing(vpath, local_ts, fetch=True)
+                    fetched = peers.get_newer_or_missing(
+                        vpath, local_ts, fetch=True, rate_limits=self.rate_limits)
                     # get_newer_or_missing returns a path if it fetched, else False/None
                     if isinstance(fetched, str) and os.path.exists(fetched):
                         final = fetched
@@ -1264,6 +1273,7 @@ class FFSFS(Operations):
         if not f:
             raise FuseOSError(errno.EBADF)
         f.seek(offset)
+        self.rate_limits.disk_fg.consume(size)
         return f.read(size)
 
     def write(self, path, data, offset, fh):
@@ -1272,6 +1282,7 @@ class FFSFS(Operations):
         if not f or meta.get("mode") not in ("write", "append", "copy"):
             raise FuseOSError(errno.EBADF)
         f.seek(offset)
+        self.rate_limits.disk_fg.consume(len(data))
         n = f.write(data)
         meta["last_write_ts"] = now_ts()
         return n
@@ -1529,6 +1540,8 @@ def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool 
         if peers:
             peers.set_realm(fs.realm)
             peers.register_local_backend(fs.backend)
+            if hasattr(peers, "set_rate_limits"):
+                peers.set_rate_limits(fs.rate_limits)
 
             # Add known peers from environment if any
             known_env = os.environ.get("FFSFS_KNOWN_PEERS")

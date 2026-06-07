@@ -14,19 +14,16 @@ Read these files before changing behavior:
 
 ## Current Priorities
 
-1. Implement rate-limit enforcement at the chunked I/O sites flagged with
-   `# TODO(rate-limit)` (peer `/get-file` streaming, `iter_content` on the
-   client side, chunked disk copy). Configuration plumbing already exists.
-2. Tighten sync semantics for MVP:
+1. Tighten sync semantics for MVP:
    - Delete/tombstone propagation guarantees
    - Rename and cross-directory move behavior
    - Conflict handling for offline concurrent writes
    - `ffsctl` sync/status visibility for pending, failed, and stale work
-3. Extend storage policies beyond the first prototype:
+2. Extend storage policies beyond the first prototype:
    - Media/role-aware write target selection
    - Disk rotation UX around mirror volumes
    - Broader sync policy coverage in VM scenarios
-4. Peer trust/security hardening and secure sockets. Important for wider
+3. Peer trust/security hardening and secure sockets. Important for wider
    deployment, but not the next implementation blocker for checkout-and-run
    local/LAN MVP testing.
 
@@ -42,8 +39,9 @@ Completed:
   `superpeer`, `nas_or_fileserver`)
 - Background sync worker (`ffssync.SyncWorker`): active prefix-aware pull and
   cache eviction with newest-version protection
-- Rate-limit configuration scaffolding (`ffsratelimit.RateLimits`) with
-  insertion-point markers in chunked I/O sites; enforcement deferred
+- Rate-limit enforcement (`ffsratelimit.RateLimits`) with token-bucket
+  foreground/background disk/network limits, chunked peer fetch/serve, and
+  chunked disk copy
 - `ffsctl role`, `ffsctl sync`, and `ffsctl ratelimit` subcommands
 - Sync review fixes: segment-safe prefix matching, newest-version selection
   across peers, wired `ffsctl sync run-once`, one-shot peer-cache refresh

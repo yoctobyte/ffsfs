@@ -40,7 +40,7 @@ class FakePeers:
         self._peer_cache = peer_cache or {}
         self.fetch_calls = []
 
-    def get_newer_or_missing(self, vpath, local_ts, fetch=False):
+    def get_newer_or_missing(self, vpath, local_ts, fetch=False, rate_limits=None):
         self.fetch_calls.append((vpath, local_ts, fetch))
         return f"/fake/path/{vpath}" if fetch else True
 

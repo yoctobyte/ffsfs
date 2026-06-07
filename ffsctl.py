@@ -448,11 +448,16 @@ def cmd_sync(args):
                 print("realm has no storage configured")
                 return
             pool = None
-        backend = StorageBackend(base_path, realm, pool=pool)
+        from ffsratelimit import RateLimits
+        rate_limits = RateLimits.from_config(data.get("rate_limits"))
+        backend = StorageBackend(base_path, realm, pool=pool,
+                                 rate_limits=rate_limits)
         if peers_mod is not None:
             try:
                 peers_mod.set_realm(realm)
                 peers_mod.register_local_backend(backend)
+                if hasattr(peers_mod, "set_rate_limits"):
+                    peers_mod.set_rate_limits(rate_limits)
                 for kp in data.get("known_peers", []) or []:
                     kp = str(kp).strip()
                     if kp and kp not in peers_mod._known_peers:
@@ -467,7 +472,7 @@ def cmd_sync(args):
             print(f"invalid config: {e}")
             return
         from ffssync import SyncWorker
-        worker = SyncWorker(backend, peers_mod, policy, None)
+        worker = SyncWorker(backend, peers_mod, policy, rate_limits)
         active = worker.run_active_once()
         evicted = worker.run_eviction_once()
         print(f"active: {active}")

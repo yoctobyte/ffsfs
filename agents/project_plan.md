@@ -114,8 +114,6 @@ Completed foundation:
 
 Still open before broader feature work:
 
-- Implement rate-limit enforcement at the chunked I/O sites currently marked
-  with `# TODO(rate-limit)`.
 - Tighten sync semantics: delete/tombstone propagation guarantees,
   rename/move behavior, conflict handling, stale peer cache recovery, and
   sync/status visibility.
@@ -136,8 +134,9 @@ Completed infrastructure:
   and cache-volume eviction.
 - Node storage role taxonomy: `access_only`, `cache_limited`,
   `shared_storage`, `superpeer`, `nas_or_fileserver`.
-- Rate-limit configuration scaffolding (`ffsratelimit.RateLimits`); enforcement
-  pending.
+- Rate-limit enforcement (`ffsratelimit.RateLimits`) with token-bucket
+  foreground/background disk/network limits, chunked peer fetch/serve, and
+  chunked disk copy.
 - Sync review fixes: segment-safe prefix matching, newest-version selection
   across peers, one-shot peer-cache refresh, and wired
   `ffsctl sync <realm> run-once`.
@@ -405,21 +404,17 @@ Deliverable:
 
 ## Current Priority Queue
 
-1. Implement rate-limit enforcement at the chunked I/O sites flagged with
-   `# TODO(rate-limit)`. Switch peer `/get-file` to a streamed response and
-   peer fetch to `iter_content`, so disk and network bandwidth caps actually
-   apply.
-2. Tighten sync semantics and visibility:
+1. Tighten sync semantics and visibility:
    - Delete/tombstone propagation guarantees.
    - Rename and cross-directory move behavior.
    - Conflict handling for offline concurrent writes.
    - `ffsctl` status for pending/failed/stale sync and peer-cache state.
-3. Extend storage policy:
+2. Extend storage policy:
    - Media/role-aware write target selection.
    - Disk rotation UX around mirror volumes.
-4. Add VM scenarios for cross-directory moves, conflict writes,
+3. Add VM scenarios for cross-directory moves, conflict writes,
    restart-during-fetch, offline disk swap, and broader sync policy coverage.
-5. Peer trust/security hardening and secure sockets for wider deployments.
+4. Peer trust/security hardening and secure sockets for wider deployments.
 
 ### Completed in this cycle
 
@@ -433,17 +428,17 @@ Deliverable:
     `peers.get_newer_or_missing`) and a cache eviction loop that protects the
     newest version and refuses to delete copies that do not provably exist on
     a peer or other local volume.
-- Rate-limit configuration scaffolding (`ffsratelimit.py`):
+- Rate-limit enforcement (`ffsratelimit.py`):
   - `RateLimiter`/`RateLimits` with `from_config` / `to_dict`.
-  - Insertion-point comments at the chunked I/O sites
-    (`StorageBackend.commit_temp`, `_copy_version_to_volume`,
-    `ffspeers.get_newer_or_missing`, `ffspeers.get_file`).
-  - `consume()` is a no-op pending Phase 2 enforcement.
+  - Token-bucket blocking in `RateLimiter.consume()`.
+  - Foreground/background disk and network buckets are consumed by FUSE
+    read/write, commit hashing/copying, mirror copy, peer fetch
+    (`iter_content`), and peer `/get-file` streaming.
 - New `ffsctl` subcommands: `role`, `sync` (show/set/run-once),
   `ratelimit` (show/set), plus `node_role` validation in `ffsctl realm set`.
 - Unit tests:
   - `tests/test_sync_policy.py`, `tests/test_sync_worker.py`,
-    `tests/test_ratelimit.py`, `tests/test_role_ctl.py` (137 tests, <2s).
+    `tests/test_ratelimit.py`, `tests/test_role_ctl.py` (140 tests, <2s).
 - Review follow-up fixes:
   - Prefix matching is segment-safe (`/share` no longer matches `/shared`).
   - Active sync and peer fetch select the newest known remote version across

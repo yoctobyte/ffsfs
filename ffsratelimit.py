@@ -1,34 +1,67 @@
-# ffsratelimit.py — Rate-limiter scaffolding for FFSFS.
-#
-# Phase 1 (this cycle): config + stub class only. consume() is a no-op.
-# Phase 2: implement token-bucket blocking inside consume() and switch the
-# I/O sites flagged with `# TODO(rate-limit)` to chunked loops that call it.
+# ffsratelimit.py — Rate-limiter helpers for FFSFS.
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Optional
 
 RATE_LIMIT_KEYS = ("disk_fg_bps", "disk_bg_bps", "net_fg_bps", "net_bg_bps")
 
 
 class RateLimiter:
-    """Single token-bucket placeholder. 0 bytes/sec means unlimited."""
+    """Single token-bucket limiter. 0 bytes/sec means unlimited."""
 
-    def __init__(self, bytes_per_sec: int = 0):
+    def __init__(self, bytes_per_sec: int = 0, *, clock=None, sleeper=None):
         try:
             self.bytes_per_sec = max(0, int(bytes_per_sec))
         except (TypeError, ValueError):
             self.bytes_per_sec = 0
+        self._clock = clock or time.monotonic
+        self._sleeper = sleeper or time.sleep
+        self._capacity = float(self.bytes_per_sec)
+        self._tokens = self._capacity
+        self._last = self._clock()
+        self._lock = threading.Lock()
 
     @property
     def unlimited(self) -> bool:
         return self.bytes_per_sec == 0
 
     def consume(self, n_bytes: int) -> None:
-        # TODO(rate-limit): when bytes_per_sec > 0, block until n_bytes tokens
-        # are available. Until then this is intentionally a no-op so callers
-        # can be wired in without behavior change.
-        return
+        if self.unlimited:
+            return
+        try:
+            remaining = max(0, int(n_bytes))
+        except (TypeError, ValueError):
+            return
+        if remaining == 0:
+            return
+
+        rate = float(self.bytes_per_sec)
+        capacity = max(1.0, self._capacity)
+        while remaining > 0:
+            with self._lock:
+                now = self._clock()
+                elapsed = max(0.0, now - self._last)
+                if elapsed:
+                    self._tokens = min(capacity, self._tokens + elapsed * rate)
+                    self._last = now
+
+                if self._tokens >= remaining:
+                    self._tokens -= remaining
+                    return
+
+                if self._tokens > 0:
+                    used = int(self._tokens)
+                    if used > 0:
+                        remaining -= used
+                        self._tokens -= used
+
+                needed = min(float(remaining), capacity) - self._tokens
+                wait = max(needed / rate, 0.0)
+            if wait > 0:
+                self._sleeper(wait)
 
     def __repr__(self) -> str:
         if self.unlimited:
