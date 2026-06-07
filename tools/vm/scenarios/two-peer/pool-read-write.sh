@@ -28,7 +28,7 @@ vol1 = Volume(primary_path, role="primary", label="ssd-primary")
 if not os.path.exists(os.path.join(primary_path, ".ffsfs-volume.id")):
     vol1.init()
 
-vol2 = Volume(secondary_path, role="archive", label="hdd-archive")
+vol2 = Volume(secondary_path, role="archive", label="hdd-archive", mirror=True)
 vol2.init()
 
 pool = StoragePool(primary=vol1, secondaries=[vol2])
@@ -40,12 +40,20 @@ with open(temp, "wb") as f:
     f.write(b"data written to pool")
 final = backend.commit_temp("shared/pool-file.txt", temp, "write")
 print(f"pool write 1: {final}")
+mirrored = os.path.join(secondary_path, ".ffsfs_data", "shared", os.path.basename(final))
+assert os.path.exists(mirrored), f"mirror missing: {mirrored}"
+assert open(mirrored, "rb").read() == b"data written to pool"
+print(f"pool mirror 1: {mirrored}")
 
 temp2 = backend.create_temp_for("shared/another.txt")
 with open(temp2, "wb") as f:
     f.write(b"second pool file")
 final2 = backend.commit_temp("shared/another.txt", temp2, "write")
 print(f"pool write 2: {final2}")
+mirrored2 = os.path.join(secondary_path, ".ffsfs_data", "shared", os.path.basename(final2))
+assert os.path.exists(mirrored2), f"mirror missing: {mirrored2}"
+assert open(mirrored2, "rb").read() == b"second pool file"
+print(f"pool mirror 2: {mirrored2}")
 
 # Verify pool reads scan all backends
 latest = backend.pick_latest("shared/pool-file.txt")

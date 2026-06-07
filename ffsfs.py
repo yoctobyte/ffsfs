@@ -14,7 +14,9 @@ import stat
 import atexit
 import threading
 import sys
-from typing import Dict, Optional, Tuple
+import json
+import shutil
+from typing import Dict, List, Optional, Tuple
 from crossfuse import FUSE, Operations, FuseOSError
 
 # ---- Local modules (you’ll provide these; guarded imports for peers) ----
@@ -109,6 +111,7 @@ def _win_choose_letter(realm: str) -> str:
 
 # Mount root contains a marker file and a data directory. Data directory mirrors vdir tree.
 DEFAULT_DATA_ROOT = ".ffsfs_store"
+PENDING_REPLICATION_LOG = ".ffsfs-pending-replication.jsonl"
 
 # Lazy commit controls: which open modes are allowed to *delay* committing the temp.
 # open_for_mode() returns: 'read' | 'write' | 'append' | 'copy'
@@ -119,6 +122,7 @@ LAZY_COMMIT_IDLE_SECS = 10.0
 
 # Background thread intervals (seconds)
 OPEN_MAP_MONITOR_PERIOD = 2.0
+POOL_SYNC_INTERVAL_SECS = 30.0
 ORPHAN_SCAN_AT_START = True  # enumerate orphan temps on startup but do *not* auto-commit
 
 # For read/write handles
@@ -408,17 +412,179 @@ class StorageBackend:
         self.data_path = data_root(self.base)
         self.meta = MetadataLog(self.base, realm)
         make_dirs(self.data_path)
-        # pre-compute data roots for all secondary volumes (for read scanning)
-        self._all_data_roots = [self.data_path]
-        for vol in self.pool.online_secondaries():
-            r = data_root(vol.path)
-            if r not in self._all_data_roots:
-                self._all_data_roots.append(r)
+        self._all_data_roots = self.data_roots()
+
+    def data_roots(self) -> List[str]:
+        """Return current online data roots, primary first."""
+        roots = []
+        for vol in self.pool.read_targets():
+            root = data_root(vol.path)
+            if root not in roots:
+                roots.append(root)
+        if not roots:
+            roots.append(self.data_path)
+        self._all_data_roots = roots
+        return roots
+
+    def _write_base(self) -> str:
+        return self.pool.write_target().path
+
+    @property
+    def pending_replication_path(self) -> str:
+        return os.path.join(self.base, PENDING_REPLICATION_LOG)
+
+    def _volume_for_path(self, abspath: str) -> Optional[Volume]:
+        path = os.path.abspath(abspath)
+        for vol in self.pool.all_volumes:
+            try:
+                if os.path.commonpath([vol.path, path]) == vol.path:
+                    return vol
+            except ValueError:
+                continue
+        return None
+
+    def _version_path_for_volume(self, volume: Volume, vpath: str, final_name: str) -> str:
+        root = data_root(volume.path)
+        vpath_norm = normalize_vpath(vpath)
+        dirpath = os.path.abspath(os.path.join(root, os.path.dirname(vpath_norm)))
+        ensure_within_base(root, dirpath)
+        return os.path.join(dirpath, final_name)
+
+    def _copy_version_to_volume(self, source_path: str, volume: Volume, vpath: str, final_name: str) -> str:
+        dest = self._version_path_for_volume(volume, vpath, final_name)
+        if os.path.abspath(source_path) == os.path.abspath(dest):
+            return dest
+        if os.path.exists(dest) and os.path.getsize(dest) == os.path.getsize(source_path):
+            return dest
+        make_dirs(os.path.dirname(dest))
+        tmp = f"{dest}.replicating-{os.getpid()}-{int(time.time() * 1000)}"
+        try:
+            shutil.copy2(source_path, tmp)
+            os.replace(tmp, dest)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+        return dest
+
+    def _find_version_source(self, vpath: str, final_name: str, exclude_vol_id: str = None) -> Optional[str]:
+        for vol in self.pool.all_volumes:
+            if exclude_vol_id and vol.vol_id == exclude_vol_id:
+                continue
+            if not vol.is_online():
+                continue
+            candidate = self._version_path_for_volume(vol, vpath, final_name)
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    def _pending_entries(self) -> List[dict]:
+        entries = []
+        try:
+            with open(self.pending_replication_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except Exception:
+                        pass
+        except FileNotFoundError:
+            pass
+        return entries
+
+    def _write_pending_entries(self, entries: List[dict]) -> None:
+        make_dirs(os.path.dirname(self.pending_replication_path))
+        tmp = f"{self.pending_replication_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for entry in entries:
+                f.write(json.dumps(entry, sort_keys=True) + "\n")
+        os.replace(tmp, self.pending_replication_path)
+
+    def _append_pending_replication(self, vpath: str, final_name: str, size: int, target_ids: List[str]) -> None:
+        if not target_ids:
+            return
+        entry = {
+            "ts": int(time.time()),
+            "vpath": normalize_vpath(vpath),
+            "final_name": final_name,
+            "size": int(size),
+            "targets": sorted(set(target_ids)),
+        }
+        try:
+            make_dirs(os.path.dirname(self.pending_replication_path))
+            with open(self.pending_replication_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, sort_keys=True) + "\n")
+        except Exception as e:
+            print(f"[ffsfs] failed recording pending replication: {e}")
+
+    def _replicate_commit(self, source_path: str, vpath: str, final_name: str, size: int) -> None:
+        source_vol = self._volume_for_path(source_path)
+        pending = []
+        for vol in self.pool.configured_mirrors():
+            if source_vol and vol.vol_id == source_vol.vol_id:
+                continue
+            if not vol.is_online():
+                pending.append(vol.vol_id)
+                continue
+            try:
+                self._copy_version_to_volume(source_path, vol, vpath, final_name)
+            except Exception as e:
+                print(f"[ffsfs] mirror replication failed for {vol.label}: {e}")
+                pending.append(vol.vol_id)
+        self._append_pending_replication(vpath, final_name, size, pending)
+
+    def sync_pending_replication(self) -> dict:
+        entries = self._pending_entries()
+        if not entries:
+            return {"copied": 0, "pending": 0}
+
+        copied = 0
+        remaining = []
+        for entry in entries:
+            vpath = entry.get("vpath", "")
+            final_name = entry.get("final_name", "")
+            targets = list(entry.get("targets", []))
+            still_pending = []
+            for vol_id in targets:
+                vol = self.pool.find_by_id(vol_id)
+                if not vol or not vol.mirror:
+                    continue
+                if not vol.is_online():
+                    still_pending.append(vol_id)
+                    continue
+                dest = self._version_path_for_volume(vol, vpath, final_name)
+                if os.path.exists(dest):
+                    copied += 1
+                    continue
+                source = self._find_version_source(vpath, final_name, exclude_vol_id=vol_id)
+                if not source:
+                    still_pending.append(vol_id)
+                    continue
+                try:
+                    self._copy_version_to_volume(source, vol, vpath, final_name)
+                    copied += 1
+                except Exception as e:
+                    print(f"[ffsfs] pending replication failed for {vol.label}: {e}")
+                    still_pending.append(vol_id)
+            if still_pending:
+                new_entry = dict(entry)
+                new_entry["targets"] = sorted(set(still_pending))
+                remaining.append(new_entry)
+
+        try:
+            self._write_pending_entries(remaining)
+        except Exception as e:
+            print(f"[ffsfs] failed updating pending replication log: {e}")
+        return {"copied": copied, "pending": sum(len(e.get("targets", [])) for e in remaining)}
 
     # temp lifecycle -------------------------------------------------------
 
     def create_temp_for(self, vpath: str) -> str:
-        d = real_dir_for_vpath(self.base, vpath)
+        d = real_dir_for_vpath(self._write_base(), vpath)
         make_dirs(d)
         temp = os.path.join(d, temp_name_for(os.path.basename(vpath)))
         # create empty file
@@ -462,6 +628,7 @@ class StorageBackend:
 
         # metadata + peer notify
         self.meta.append(vpath, final_name, size)
+        self._replicate_commit(final_abspath, vpath, final_name, size)
         if peers and hasattr(peers, "notify_commit_safe"):
             try:
                 peers.notify_commit_safe(vpath=vpath, final_name=final_name, size=size, mtime=ts)
@@ -485,7 +652,7 @@ class StorageBackend:
         best: Tuple[int, int, str] = (-1, -1, "")
         logical_name = os.path.basename(vpath)
         vpath_norm = normalize_vpath(vpath)
-        for root in self._all_data_roots:
+        for root in self.data_roots():
             dirpath = os.path.abspath(os.path.join(root, os.path.dirname(vpath_norm)))
             try:
                 from ffsutils import ensure_within_base
@@ -531,6 +698,8 @@ class FFSFS(Operations):
         self._stop_evt = threading.Event()
         self._open_mon = threading.Thread(target=self._monitor_open_map, daemon=True)
         self._open_mon.start()
+        self._sync_mon = threading.Thread(target=self._monitor_pool_sync, daemon=True)
+        self._sync_mon.start()
 
         # marker + startup scan
         self._ensure_marker()
@@ -590,6 +759,18 @@ class FFSFS(Operations):
             self._open_mon.join(timeout=2.0)
         except Exception:
             pass
+        try:
+            self._sync_mon.join(timeout=2.0)
+        except Exception:
+            pass
+
+    def _monitor_pool_sync(self):
+        while not self._stop_evt.is_set():
+            try:
+                self.backend.sync_pending_replication()
+            except Exception as e:
+                print(f"[ffsfs] pool sync failed: {e}")
+            self._stop_evt.wait(POOL_SYNC_INTERVAL_SECS)
 
     def _monitor_open_map(self):
         while not self._stop_evt.is_set():
@@ -783,12 +964,12 @@ class FFSFS(Operations):
         #if os.path.isdir(abs_path):
         #    st = os.lstat(abs_path)
         # Case 4: maybe the logical name itself is a directory (fallback)
-        abs_path = self._dir_for_listing(vpath)
-        if os.path.isdir(abs_path):
-            st = os.lstat(abs_path)        
-            return {k: getattr(st, k) for k in (
-                "st_mode", "st_size", "st_ctime", "st_mtime", "st_atime",
-                "st_nlink", "st_uid", "st_gid")}
+        for abs_path in self._dirs_for_listing(vpath):
+            if os.path.isdir(abs_path):
+                st = os.lstat(abs_path)
+                return {k: getattr(st, k) for k in (
+                    "st_mode", "st_size", "st_ctime", "st_mtime", "st_atime",
+                    "st_nlink", "st_uid", "st_gid")}
                 
                 
         # Case 5. File is remote
@@ -864,7 +1045,7 @@ class FFSFS(Operations):
         if vpath.endswith("/"):
             vpath = vpath[:-1]
         #dirpath = self._real_dir(vpath)
-        dirpath = self._dir_for_listing(vpath)
+        dirpaths = self._dirs_for_listing(vpath)
 
         entries = [".", ".."]
         dirs = set()
@@ -873,40 +1054,43 @@ class FFSFS(Operations):
 
         latest_local = {}
         try:
-            with os.scandir(dirpath) as it:
-                for de in it:
-                    name = de.name
+            for dirpath in dirpaths:
+                if not os.path.isdir(dirpath):
+                    continue
+                with os.scandir(dirpath) as it:
+                    for de in it:
+                        name = de.name
 
-                    # Show subdirectories
-                    if de.is_dir(follow_symlinks=False):
-                        dirs.add(name)
-                        continue
+                        # Show subdirectories
+                        if de.is_dir(follow_symlinks=False):
+                            dirs.add(name)
+                            continue
 
-                    # Hide internals outright
-                    if name in (MAGIC_MARKER, METALOG_FILENAME):
-                        continue
+                        # Hide internals outright
+                        if name in (MAGIC_MARKER, METALOG_FILENAME):
+                            continue
 
-                    # If it's a committed version, track latest per logical name
-                    parsed = parse_versioned_filename(name)
-                    if parsed:
-                        lname = parsed["logical_name"]
-                        ts = int(parsed["timestamp"])
-                        is_del = parsed.get("mode") == "delete"
-                        prev = latest_local.get(lname)
-                        if prev is None or (ts, int(is_del)) > (prev[0], int(prev[1])):
-                            latest_local[lname] = (ts, is_del)
-                        continue
+                        # If it's a committed version, track latest per logical name
+                        parsed = parse_versioned_filename(name)
+                        if parsed:
+                            lname = parsed["logical_name"]
+                            ts = int(parsed["timestamp"])
+                            is_del = parsed.get("mode") == "delete"
+                            prev = latest_local.get(lname)
+                            if prev is None or (ts, int(is_del)) > (prev[0], int(prev[1])):
+                                latest_local[lname] = (ts, is_del)
+                            continue
 
-                    # If it's a temp, expose the logical name so GUI sees it during copy
-                    # Pattern: "<logical>.NULL_HASH.(tmp-)?STAMP"
-                    if f".{NULL_HASH}." in name:
-                        logical = name.split(f".{NULL_HASH}.", 1)[0]
-                        if logical:
-                            logicals.add(logical)
-                        continue
+                        # If it's a temp, expose the logical name so GUI sees it during copy
+                        # Pattern: "<logical>.NULL_HASH.(tmp-)?STAMP"
+                        if f".{NULL_HASH}." in name:
+                            logical = name.split(f".{NULL_HASH}.", 1)[0]
+                            if logical:
+                                logicals.add(logical)
+                            continue
 
-                    # Otherwise: a plain file (unlikely, but allow)
-                    passthrough.add(name)
+                        # Otherwise: a plain file (unlikely, but allow)
+                        passthrough.add(name)
 
         except FileNotFoundError:
             # Empty/nonexistent dir -> just ". .."
@@ -973,6 +1157,15 @@ class FFSFS(Operations):
         phys = os.path.abspath(os.path.join(base, v))
         ensure_within_base(base, phys)
         return phys
+
+    def _dirs_for_listing(self, dir_vpath: str) -> List[str]:
+        v = normalize_vpath(dir_vpath)
+        result = []
+        for root in self.backend.data_roots():
+            phys = os.path.abspath(os.path.join(root, v))
+            ensure_within_base(root, phys)
+            result.append(phys)
+        return result
     
 
     def open(self, path, flags):

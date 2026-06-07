@@ -25,7 +25,7 @@ vol1 = Volume(primary_path, role="primary", label="ssd")
 if not os.path.exists(os.path.join(primary_path, ".ffsfs-volume.id")):
     vol1.init()
 
-vol2 = Volume(secondary_path, role="archive", label="hdd")
+vol2 = Volume(secondary_path, role="archive", label="hdd", mirror=True)
 vol2.init()
 
 pool = StoragePool(primary=vol1, secondaries=[vol2])
@@ -38,6 +38,8 @@ with open(temp, "wb") as f:
 v1_path = backend.commit_temp("shared/offline-test.txt", temp, "write")
 v1_content = open(v1_path, "rb").read()
 assert v1_content == b"v1-both-online", f"v1 content wrong: {v1_content}"
+v1_mirror = os.path.join(secondary_path, ".ffsfs_data", "shared", os.path.basename(v1_path))
+assert os.path.exists(v1_mirror), f"v1 mirror missing: {v1_mirror}"
 print("v1 OK:", v1_path)
 
 time.sleep(1)
@@ -55,6 +57,8 @@ with open(temp2, "wb") as f:
 v2_path = backend.commit_temp("shared/offline-test.txt", temp2, "write")
 v2_content = open(v2_path, "rb").read()
 assert v2_content == b"v2-offline-write", f"v2 content wrong: {v2_content}"
+pending = backend._pending_entries()
+assert pending and pending[-1]["targets"] == [vol2.vol_id], pending
 print("v2 OK:", v2_path)
 
 # Verify pick_latest returns v2
@@ -66,6 +70,11 @@ print("pick_latest returns v2 while offline")
 # --- Reconnect secondary ---
 vol2.init()
 assert vol2.is_online(), "secondary should be online"
+sync_result = backend.sync_pending_replication()
+assert sync_result["pending"] == 0, sync_result
+v2_mirror = os.path.join(secondary_path, ".ffsfs_data", "shared", os.path.basename(v2_path))
+assert os.path.exists(v2_mirror), f"v2 catch-up mirror missing: {v2_mirror}"
+assert open(v2_mirror, "rb").read() == b"v2-offline-write"
 print("secondary reconnected")
 
 # Rebuild pool to pick up reconnected secondary

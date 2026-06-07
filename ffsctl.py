@@ -158,6 +158,15 @@ def cmd_backend(args):
             print(f"          id:   {vol.vol_id}")
             print(f"          path: {vol.path}")
             print(f"          role: {role}")
+            print(f"          mirror: {'yes' if vol.mirror else 'no'}")
+            if vol.media:
+                print(f"          media: {vol.media}")
+            if vol.max_bytes is not None:
+                print(f"          max_bytes: {vol.max_bytes}")
+            if vol.max_file_size is not None:
+                print(f"          max_file_size: {vol.max_file_size}")
+            if vol.reserve_bytes is not None:
+                print(f"          reserve_bytes: {vol.reserve_bytes}")
             print()
 
     elif action == "add":
@@ -167,18 +176,31 @@ def cmd_backend(args):
             print(f"Path already in pool: {path}")
             return
         role = args.role or ROLE_ARCHIVE
-        vol = Volume(path=path, role=role, label=args.id or os.path.basename(path))
+        vol = Volume(
+            path=path,
+            role=role,
+            label=args.id or os.path.basename(path),
+            mirror=bool(getattr(args, "mirror", False)),
+            media=getattr(args, "media", None),
+            max_bytes=getattr(args, "max_bytes", None),
+            max_file_size=getattr(args, "max_file_size", None),
+            reserve_bytes=getattr(args, "reserve_bytes", None),
+        )
         vol.init()
         pool.add_secondary(vol)
         save_pool_config(cfg, pool, realm=realm)
         print(f"Added backend: {vol.label} ({vol.vol_id})")
         print(f"  path: {vol.path}")
         print(f"  role: {vol.role}")
+        print(f"  mirror: {'yes' if vol.mirror else 'no'}")
 
     elif action == "remove":
         pool, cfg = _load_or_create_pool(realm)
-        target = args.id_or_path
-        vol = pool.find_by_id(target) or pool.find_by_path(target)
+        target = args.id_or_path or args.path
+        if not target:
+            print("volume ID or path required")
+            return
+        vol = pool.find_by_id(target) or pool.find_by_path(target) or pool.find_by_label(target)
         if not vol:
             print(f"Not found in pool: {target}")
             return
@@ -359,9 +381,14 @@ def main():
     sb.add_argument("action", choices=["list", "add", "remove", "register"])
     sb.add_argument("realm", help="realm name")
     sb.add_argument("path", nargs="?", help="backend path (for add/register)")
-    sb.add_argument("id_or_path", nargs="?", help="volume ID or path (for remove)")
+    sb.add_argument("id_or_path", nargs="?", help="volume ID, label, or path (for remove)")
     sb.add_argument("--id", default=None, help="label for the new backend")
     sb.add_argument("--role", default=None, help="backend role (archive, cache)")
+    sb.add_argument("--mirror", action="store_true", help="replicate committed writes to this backend")
+    sb.add_argument("--media", default=None, help="storage media hint (ssd, hdd, network)")
+    sb.add_argument("--max-bytes", type=int, default=None, help="maximum bytes this backend should use")
+    sb.add_argument("--max-file-size", type=int, default=None, help="largest file this backend should accept")
+    sb.add_argument("--reserve-bytes", type=int, default=None, help="free bytes to reserve on this backend")
     sb.set_defaults(func=cmd_backend)
 
     sr = sub.add_parser("realm", help="manage realm configuration")
@@ -383,4 +410,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -38,6 +38,35 @@ def test_backend_add_creates_volume_and_config(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_backend_add_persists_policy_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    backend_path = tmp_path / "mirror-hdd"
+    args = Namespace(
+        action="add",
+        realm="test-realm",
+        path=str(backend_path),
+        id_or_path=None,
+        id="mirror-hdd",
+        role="archive",
+        mirror=True,
+        media="hdd",
+        max_bytes=1000,
+        max_file_size=500,
+        reserve_bytes=100,
+    )
+    cmd_backend(args)
+
+    pool = load_pool_config(_realm_config_path("test-realm"))
+    vol = pool.secondaries[0]
+    assert vol.mirror is True
+    assert vol.media == "hdd"
+    assert vol.max_bytes == 1000
+    assert vol.max_file_size == 500
+    assert vol.reserve_bytes == 100
+
+
+@pytest.mark.unit
 def test_backend_add_duplicate_path(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -106,6 +135,52 @@ def test_backend_remove(tmp_path, monkeypatch, capsys):
     assert len(reloaded.secondaries) == 0
 
     assert (secondary_path / VOLUME_ID_FILE).exists()
+
+
+@pytest.mark.unit
+def test_backend_remove_accepts_cli_positional_shape(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    primary_path = tmp_path / "ssd"
+    primary = Volume(str(primary_path), vol_id="p1", role="primary")
+    primary.init()
+    secondary_path = tmp_path / "hdd"
+    secondary = Volume(str(secondary_path), vol_id="s1", role="archive", label="ext-hdd")
+    secondary.init()
+    cfg_path = _realm_config_path("test-realm")
+    save_pool_config(cfg_path, StoragePool(primary=primary, secondaries=[secondary]), realm="test-realm")
+
+    args = Namespace(
+        action="remove", realm="test-realm", path="s1",
+        id_or_path=None, id=None, role=None,
+    )
+    cmd_backend(args)
+
+    captured = capsys.readouterr()
+    assert "Removed" in captured.out
+    assert load_pool_config(cfg_path).secondaries == []
+
+
+@pytest.mark.unit
+def test_backend_remove_accepts_label(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    primary = Volume(str(tmp_path / "ssd"), vol_id="p1", role="primary")
+    primary.init()
+    secondary = Volume(str(tmp_path / "hdd"), vol_id="s1", role="archive", label="disk1")
+    secondary.init()
+    cfg_path = _realm_config_path("test-realm")
+    save_pool_config(cfg_path, StoragePool(primary=primary, secondaries=[secondary]), realm="test-realm")
+
+    args = Namespace(
+        action="remove", realm="test-realm", path="disk1",
+        id_or_path=None, id=None, role=None,
+    )
+    cmd_backend(args)
+
+    captured = capsys.readouterr()
+    assert "Removed" in captured.out
+    assert load_pool_config(cfg_path).secondaries == []
 
 
 @pytest.mark.unit

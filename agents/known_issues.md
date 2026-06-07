@@ -30,11 +30,11 @@
       - TRUST_UNKNOWN_PEER = True.
       - Peer add/notify/hello behavior is not hardened.
 
-  7. Background sync is not implemented.
-      - Current behavior is mostly on-demand fetch plus cache/index refresh.
-      - No storage roles or sync policies yet.
-      - Pool infrastructure (ffsvolumes.py, ffsctl backend, cross-backend reads) is done.
-      - Catch-up sync worker (SSD→HDD on drive reconnect) is the next piece.
+  7. Rich background sync policy is not implemented.
+      - Current peer behavior is mostly on-demand fetch plus cache/index refresh.
+      - Explicit local mirror volumes now receive mirror-on-write copies, and
+        missed mirror copies are retried from `.ffsfs-pending-replication.jsonl`.
+      - No role/prefix/capacity-aware sync policy or cache eviction yet.
 
   8. Windows adapter has TODOs.
       - timestamp mapping in crossfuse.py:129
@@ -70,7 +70,7 @@
       - storage layout (RESOLVED)
       - known limitations (RESOLVED)
 
-  6. After testing/config: implement background sync and storage policies.
+  6. After mirror/catch-up: implement role, prefix, capacity, and eviction policies.
 
   Recently resolved
 
@@ -79,6 +79,10 @@
     with cross-backend read routing, `ffsctl backend` subcommands,
     `ffsctl realm` subcommands, `launch.sh` and `configure.sh` operator
     scripts. 38 new unit tests (74 total).
+
+  - Storage pool mirror/catch-up prototype: `mirror` policy field on volumes,
+    mirror-on-write copies for online mirrors, pending replication log for
+    offline/failed mirrors, and periodic catch-up retry in mounted filesystems.
 
   - Stale `print ("{realm=}")` debug line removed from MetaLog.__init__
     (ffsfs.py). It was leaking into scenario stdout whenever a realm's

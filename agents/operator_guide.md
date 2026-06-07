@@ -115,6 +115,169 @@ Each file version is stored as:
 - File descriptor and handle cleanup are wrapped in `finally` blocks, meaning resources are freed even on failed commits.
 - Peer sync operations are **best-effort**. Network drops or peer timeouts will produce warning logs but will never block local write completion, ensuring offline-first functionality.
 
+### Backend Configuration
+Storage backends are configured per realm. A realm has one primary backend and
+zero or more additional backends.
+
+```bash
+python3 ffsctl.py realm init myrealm --mountpoint ~/myrealm --base ~/.myrealm
+python3 ffsctl.py backend add myrealm /media/backup-a/ffsfs --id backup-a --role archive --mirror --media hdd
+python3 ffsctl.py backend list myrealm
+```
+
+The primary backend is created by `realm init --base`. It stores the
+authoritative metadata log and is the preferred write target while it is online.
+Additional backends are registered with `backend add`.
+
+#### Backend Options
+
+`--id <label>` sets a human label. It is not the UUID in `.ffsfs-volume.id`.
+You can remove a backend by UUID, label, or path.
+
+`--role <role>` records the intended role. Current values are `archive` and
+`cache`; `primary` is reserved for the primary backend. Today this is mostly
+descriptive except where future policy will use it. Use `archive` for large
+durable disks and `cache` for local scratch/cache storage.
+
+`--mirror` enables mirror-on-write for that backend. Each committed version file
+is copied to every online mirror backend. If the mirror is offline, the write
+still succeeds after the selected write target commits, and the missed copy is
+recorded for later catch-up.
+
+`--media <ssd|hdd|network>` stores a media hint. It is visible in config and
+`backend list`, but it does not yet change routing. Use it now so future
+policy-driven routing can distinguish fast SSDs, slower HDDs, and network
+storage.
+
+`--max-bytes <n>`, `--max-file-size <n>`, and `--reserve-bytes <n>` store
+capacity hints. They do not yet enforce limits or change write routing. They
+are included so configurations can be written before the policy engine lands.
+
+#### How Writes Are Routed
+
+New writes are committed to one write target first:
+
+1. If the primary backend is online, FFSFS writes to the primary.
+2. If the primary is offline, FFSFS writes to the first online secondary.
+3. If all configured volumes appear offline, FFSFS falls back to the primary
+   path and lets the filesystem operation succeed or fail normally.
+
+After the committed version exists on the write target, FFSFS copies that
+version to every online backend marked `mirror: true`, except the volume that
+already received the write.
+
+This means:
+
+- `--mirror` controls replication, not initial write-target priority.
+- `--role archive` by itself does not mirror data. Add `--mirror` for catch-all
+  backup/archive disks.
+- Multiple online mirrors all receive a copy of the same committed version.
+- A write is considered locally successful once the write target commit
+  succeeds. Mirror copy failures are logged and recorded for retry.
+
+#### Offline Mirrors and Catch-Up
+
+Missed mirror copies are stored in:
+
+```text
+<primary-backend>/.ffsfs-pending-replication.jsonl
+```
+
+While the filesystem is mounted, FFSFS periodically retries pending mirror
+copies. You can also trigger the same logic from Python for diagnostics:
+
+```bash
+python3 - <<'PY'
+from ffsfs import StorageBackend
+from ffsvolumes import load_pool_config
+
+cfg = "/home/user/.ffsfs/.storage/myrealm/realm-config.json"
+pool = load_pool_config(cfg)
+backend = StorageBackend(pool.primary.path, "myrealm", pool=pool)
+print(backend.sync_pending_replication())
+PY
+```
+
+Catch-up copies from any online volume that already has the requested version,
+not only from the primary. This is useful when the primary was offline during
+the original write and another backend received the committed file.
+
+#### Common Configurations
+
+Single local SSD, no extra copies:
+
+```bash
+python3 ffsctl.py realm init personal --mountpoint ~/personal --base ~/.personal
+```
+
+Laptop SSD plus one external backup disk:
+
+```bash
+python3 ffsctl.py realm init personal --mountpoint ~/personal --base ~/.personal
+python3 ffsctl.py backend add personal /media/backup-a/ffsfs --id backup-a --role archive --mirror --media hdd
+```
+
+SSD plus two catch-all archive disks:
+
+```bash
+python3 ffsctl.py backend add personal /media/archive-a/ffsfs --id archive-a --role archive --mirror --media hdd
+python3 ffsctl.py backend add personal /media/archive-b/ffsfs --id archive-b --role archive --mirror --media hdd
+```
+
+Cache-like secondary, not a durable mirror:
+
+```bash
+python3 ffsctl.py backend add personal /mnt/fast-cache/ffsfs --id fast-cache --role cache --media ssd
+```
+
+#### Inspecting and Removing Backends
+
+```bash
+python3 ffsctl.py backend list personal
+python3 ffsctl.py backend remove personal archive-a
+```
+
+Removing a backend only detaches it from the realm config. It does not delete
+files from the backend path.
+
+#### Configuration Schema
+
+Backend configuration is stored in
+`~/.ffsfs/.storage/<realm>/realm-config.json`:
+
+```json
+{
+  "realm": "personal",
+  "mountpoint": "/home/user/personal",
+  "base": "/home/user/.personal",
+  "storage_pool": {
+    "primary": {
+      "id": "primary-uuid",
+      "path": "/home/user/.personal",
+      "label": "personal-primary",
+      "role": "primary",
+      "mirror": false
+    },
+    "backends": [
+      {
+        "id": "archive-uuid",
+        "path": "/media/archive-a/ffsfs",
+        "label": "archive-a",
+        "role": "archive",
+        "mirror": true,
+        "media": "hdd",
+        "reserve_bytes": 10737418240
+      }
+    ]
+  }
+}
+```
+
+Each backend path also contains `.ffsfs-volume.id`. FFSFS considers a backend
+online only when the directory exists, that file exists, and the ID inside it
+matches the ID in the realm config. This prevents accidentally writing to the
+wrong mounted disk path.
+
 ---
 
 ## 4) VM Testing Procedure
@@ -180,4 +343,4 @@ FUSE filesystems can sometimes hang or get stuck in a "Transport endpoint is not
 - **No Encryption/Authentication:** The current prototype sends file payloads and metadata in plaintext over HTTP/UDP. It is meant for trusted LANs or private overlay networks (like Tailscale).
 - **Simple Conflict Resolution:** Conflicts are resolved via latest-timestamp-wins. Logical locking or interactive merge flows are not yet supported.
 - **Auto-Discovery Limits:** UDP broadcast autodiscovery is designed for single-subnet LAN networks. For multi-subnet or remote connections, you must add peers manually using `ffsctl.py peers add`.
-- **Background Sync in Progress:** Synchronization currently triggers either on-demand (when reading a file) or periodically. The next feature phase is implementing policies (like `cache_limited` or selective sync by directory prefix).
+- **Background Sync in Progress:** Explicit local mirror volumes have mirror-on-write plus pending catch-up retry. The next feature phase is implementing broader policies such as `cache_limited`, selected-prefix sync, eviction, and capacity-aware routing.

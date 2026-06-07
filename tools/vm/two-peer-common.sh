@@ -135,6 +135,23 @@ nohup env PYTHONPATH=/home/'"$FFSFS_VM_USER"'/work/ffsfs \
     sleep 2
 }
 
+two_peer_stop_servers() {
+    vm_ssh "$ssh_port" '
+pkill -f /tmp/start-peer-a.py >/dev/null 2>&1 || true
+pkill -f /tmp/start-peer-b.py >/dev/null 2>&1 || true
+'
+}
+
+two_peer_reset_guest_state() {
+    two_peer_stop_servers
+    vm_ssh "$ssh_port" '
+set -euo pipefail
+rm -rf '"$peer_a_data_base"' '"$peer_b_data_base"' \
+       /tmp/ffsfs-pool-secondary /tmp/ffsfs-offline-secondary
+rm -f /tmp/ffsfs-peer-a.log /tmp/ffsfs-peer-b.log
+'
+}
+
 two_peer_wait_for_http() {
     echo "waiting for peer HTTP ports (in-guest loopback)"
     local check='
@@ -223,4 +240,3 @@ PY
     two_peer_run_a "$link_a_to_b" | tee "$log_dir/$name_a.link.log"
     two_peer_run_b "$link_b_to_a" | tee "$log_dir/$name_b.link.log"
 }
-

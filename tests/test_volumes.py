@@ -5,7 +5,7 @@ import pytest
 from ffsvolumes import (
     Volume, StoragePool, load_pool_config, save_pool_config,
     VOLUME_ID_FILE, STATUS_ONLINE, STATUS_OFFLINE,
-    ROLE_PRIMARY, ROLE_ARCHIVE, ROLE_CACHE,
+    ROLE_PRIMARY, ROLE_ARCHIVE, ROLE_CACHE, MEDIA_HDD,
 )
 
 
@@ -76,6 +76,36 @@ def test_volume_serialization(tmp_path):
     assert restored.vol_id == vol.vol_id
     assert restored.label == vol.label
     assert restored.path == vol.path
+
+
+@pytest.mark.unit
+def test_volume_policy_serialization(tmp_path):
+    vol = Volume(
+        str(tmp_path / "mirror"),
+        vol_id="m1",
+        label="mirror-hdd",
+        role=ROLE_ARCHIVE,
+        mirror=True,
+        media=MEDIA_HDD,
+        max_bytes=1000,
+        max_file_size=500,
+        reserve_bytes=100,
+    )
+    d = vol.to_dict()
+    assert d["mirror"] is True
+    assert d["media"] == MEDIA_HDD
+    assert d["max_bytes"] == 1000
+
+    restored = Volume.from_dict(d)
+    assert restored.mirror is True
+    assert restored.media == MEDIA_HDD
+    assert restored.max_file_size == 500
+    assert restored.reserve_bytes == 100
+
+    vol.init()
+    loaded = Volume.from_path(str(tmp_path / "mirror"))
+    assert loaded.mirror is True
+    assert loaded.media == MEDIA_HDD
 
 
 @pytest.mark.unit
@@ -208,6 +238,21 @@ def test_pool_read_targets_only_online(tmp_path):
     assert primary in targets
     assert s1 in targets
     assert s2 not in targets
+
+
+@pytest.mark.unit
+def test_pool_mirror_targets_only_online_mirrors(tmp_path):
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY)
+    primary.init()
+    mirror = Volume(str(tmp_path / "hdd1"), role=ROLE_ARCHIVE, mirror=True)
+    mirror.init()
+    offline_mirror = Volume(str(tmp_path / "hdd2"), role=ROLE_ARCHIVE, mirror=True)
+    cache = Volume(str(tmp_path / "cache"), role=ROLE_CACHE, mirror=False)
+    cache.init()
+    pool = StoragePool(primary=primary, secondaries=[mirror, offline_mirror, cache])
+
+    assert pool.configured_mirrors() == [mirror, offline_mirror]
+    assert pool.mirror_targets() == [mirror]
 
 
 @pytest.mark.unit

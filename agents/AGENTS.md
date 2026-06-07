@@ -14,19 +14,17 @@ Read these files before changing behavior:
 
 ## Current Priorities
 
-1. Implement background catch-up sync worker:
-   - Monitor drive mounts for reconnected HDDs
-   - Replicate committed files from primary to reconnected backends
-   - Support disk rotation (swap drives, sync missing writes)
-2. Implement background sync workers and storage roles:
+1. Extend storage policies beyond the first mirror prototype:
    - `access_only`, `cache_limited`, `shared_storage`, `superpeer`, `nas_or_fileserver`
    - Eviction policies for cache-limited nodes
    - Selected-prefix synchronization
-3. Add VM scenarios for offline disk swap and sync catch-up.
-4. Peer trust/security hardening for LAN deployments.
+   - Size/capacity/media-aware write target selection
+2. Add VM scenarios for offline disk swap and broader sync policy coverage.
+3. Peer trust/security hardening for LAN deployments.
 
 Completed:
 - Tiered multi-backend storage pool (`ffsvolumes.py`, pool-aware `StorageBackend`)
+- Mirror-on-write for explicit `mirror` volumes and pending catch-up retry
 - `ffsctl backend` and `ffsctl realm` subcommands
 - `launch.sh` and `configure.sh` operator scripts
 - Two-peer VM scenarios (all 6 passing)
@@ -84,9 +82,10 @@ node names are user configuration.
 ## Known Risks
 
 - Delete/tombstone semantics need stronger peer and VM scenario coverage.
-- Background catch-up sync worker is not yet implemented; current behavior is
-  on-demand fetch plus cache/index refresh. Pool infrastructure exists but
-  does not yet replicate across backends automatically.
+- Storage pool catch-up is a first prototype: explicit `mirror` volumes receive
+  committed files, missed copies are recorded in `.ffsfs-pending-replication.jsonl`,
+  and mounted filesystems retry periodically. Rich role/prefix/capacity policy
+  is not implemented yet.
 - FUSE mount behavior should be validated only inside VMs.
 - Peer trust/security model is prototype-grade.
 
@@ -94,10 +93,10 @@ node names are user configuration.
 
 ```bash
 python3 -m py_compile *.py
-pytest                          # 74 unit tests, <1s
+pytest                          # unit tests, <1s
 ```
 
-VM checks (each boots a QEMU VM, ~2-5 min each; full suite ~30 min):
+VM checks (each boots QEMU; two-peer smoke/all reuse one VM per batch):
 
 ```bash
 tools/vm/run-single-vm-smoke.sh

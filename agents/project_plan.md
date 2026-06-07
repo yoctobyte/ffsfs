@@ -76,17 +76,19 @@ Completed foundation:
 - Base VM image and generated run state live under `.vm/` and are ignored by
   git.
 
-Still open before feature work:
+Still open before broader feature work:
 
-- Implement background catch-up sync worker (replicate committed files from
-  primary SSD to reconnected HDDs; rotate backup drives).
 - Implement background sync workers and role-specific synchronization policies.
+- Extend storage policy beyond explicit mirror volumes: size thresholds,
+  capacity limits, selected prefixes, cache eviction, and disk rotation UX.
 
 Completed infrastructure:
 
 - Tiered multi-backend storage pool foundation (`ffsvolumes.py`).
 - Volume identifiers (`.ffsfs-volume.id`) and ONLINE/OFFLINE tracking.
 - Pool-aware `StorageBackend` with cross-backend read routing.
+- Pool-aware write routing, explicit mirror-on-write, pending replication log,
+  and periodic catch-up retry for reconnected mirror volumes.
 - `ffsctl backend` subcommands (add/remove/list/register).
 - `ffsctl realm` subcommands (init/show/set/list) for realm config management.
 - `launch.sh` and `configure.sh` operator scripts.
@@ -351,22 +353,25 @@ Deliverable:
 
 ## Current Priority Queue
 
-1. Implement Background Catch-Up Sync Worker:
-   - Monitor drive mounts for reconnected HDDs.
-   - Scan metadata log and replicate committed files to reconnected backends.
-   - Support disk rotation (swap HDD1 for HDD2, sync missing writes).
-2. Implement Background Sync Workers and Storage Roles:
+1. Implement Background Sync Workers and Storage Roles:
    - `access_only` (cache-only on demand)
    - `cache_limited` (bounded local cache with eviction)
    - `shared_storage` (selective prefix replicas)
    - `superpeer` (broad replica target)
-3. Add VM scenarios for offline disk swap and sync catch-up.
+2. Extend storage policy:
+   - Size/capacity/media-aware write target selection.
+   - Selected-prefix replication.
+   - Disk rotation UX around mirror volumes.
+3. Add VM scenarios for offline disk swap and broader sync policy coverage.
 
 ### Completed in this cycle
 
 - Tiered Multi-Backend Storage Pool infrastructure:
   - Volume identifiers (`.ffsfs-volume.id`) and status tracking (ONLINE/OFFLINE).
   - Pool-aware `StorageBackend` with cross-backend read routing.
+  - Write routing honors `StoragePool.write_target()`.
+  - Explicit `mirror` volumes receive mirror-on-write copies.
+  - Offline/failed mirror copies are recorded and retried by catch-up sync.
   - `ffsctl backend` CLI subcommands (add/remove/list/register).
 - Realm configuration tooling:
   - `ffsctl realm` subcommands (init/show/set/list).

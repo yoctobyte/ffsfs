@@ -282,27 +282,55 @@ def _is_subscribed(vpath: str) -> bool:
     return False
 
 
+def _local_data_roots() -> List[str]:
+    if not _local_backend:
+        return []
+    if hasattr(_local_backend, "data_roots"):
+        try:
+            roots = list(_local_backend.data_roots())
+        except Exception:
+            roots = []
+        return [os.path.abspath(r) for r in roots if r]
+    base = getattr(_local_backend, "data_path", None)
+    return [os.path.abspath(base)] if base else []
+
+
+def _primary_data_root() -> Optional[str]:
+    roots = _local_data_roots()
+    return roots[0] if roots else None
+
+
 #helper for per-dir listing
-def _safe_dir_abspath(vpath: str) -> str:
+def _safe_dir_abspaths(vpath: str) -> List[str]:
     """
-    Map a virtual directory vpath -> absolute physical directory under the local backend.
+    Map a virtual directory vpath to matching directories under local data roots.
     """
-    if not _local_backend or not getattr(_local_backend, "data_path", None):
+    roots = _local_data_roots()
+    if not roots:
         raise RuntimeError("no backend bound")
-    base = os.path.abspath(_local_backend.data_path)
     vp = (vpath or "").strip("/").replace("\\", "/")
-    full = os.path.abspath(os.path.join(base, vp))
-    # containment guard
-    if not (full == base or full.startswith(base + os.sep)):
-        raise RuntimeError("path escapes base")
-    return full
+    full_paths = []
+    for base in roots:
+        full = os.path.abspath(os.path.join(base, vp))
+        if os.path.commonpath([base, full]) != base:
+            raise RuntimeError("path escapes base")
+        full_paths.append(full)
+    return full_paths
+
+
+def _safe_dir_abspath(vpath: str) -> str:
+    roots = _safe_dir_abspaths(vpath)
+    if not roots:
+        raise RuntimeError("no backend bound")
+    return roots[0]
 
 def _safe_file_abspath(vpath: str) -> str:
     """
     Map a versioned virtual file path to an absolute path under the backend data root.
     Reject traversal instead of normalizing it into a different valid filename.
     """
-    if not _local_backend or not getattr(_local_backend, "data_path", None):
+    roots = _local_data_roots()
+    if not roots:
         raise RuntimeError("no backend bound")
 
     raw = (vpath or "").replace("\\", "/")
@@ -311,13 +339,15 @@ def _safe_file_abspath(vpath: str) -> str:
         raise ValueError("bad vpath")
 
     clean = normalize_vpath(raw)
-    base = os.path.abspath(_local_backend.data_path)
-    full = os.path.abspath(os.path.join(base, clean))
-    if os.path.commonpath([base, full]) != base:
-        raise ValueError("path escapes base")
     if not parse_versioned_filename(clean):
         raise ValueError("not a versioned file path")
-    return full
+    for base in roots:
+        full = os.path.abspath(os.path.join(base, clean))
+        if os.path.commonpath([base, full]) != base:
+            raise ValueError("path escapes base")
+        if os.path.exists(full):
+            return full
+    return os.path.abspath(os.path.join(roots[0], clean))
 
 #helper for heading dir contents
 def _local_head_for(vpath: str) -> Optional[Dict[str, Any]]:
@@ -341,7 +371,7 @@ def _local_head_for(vpath: str) -> Optional[Dict[str, Any]]:
             ts = int(parsed["timestamp"])
             if not best or ts > best["timestamp"]:
                 best = {
-                    "name": name,
+                    "name": os.path.basename(name),
                     "size": int(ent.get("size") or 0),
                     "timestamp": ts,
                     "mode": parsed.get("mode", "write"),
@@ -354,21 +384,23 @@ def _local_head_for(vpath: str) -> Optional[Dict[str, Any]]:
     try:
         dir_v = os.path.dirname(vpath)
         base = os.path.basename(vpath)
-        dpath = _safe_dir_abspath(dir_v)
-        with os.scandir(dpath) as it:
-            for de in it:
-                if not de.is_file():
-                    continue
-                parsed = parse_versioned_filename(de.name)
-                if not parsed:
-                    continue
-                if parsed.get("logical_name") != base:
-                    continue
-                ts = int(parsed.get("timestamp") or 0)
-                mode = parsed.get("mode", "write")
-                if (best is None) or (ts > best["timestamp"]):
-                    best = {"name": de.name, "size": int(getattr(de, "stat", lambda: None)() and de.stat().st_size or 0),
-                            "timestamp": ts, "mode": mode}
+        for dpath in _safe_dir_abspaths(dir_v):
+            if not os.path.isdir(dpath):
+                continue
+            with os.scandir(dpath) as it:
+                for de in it:
+                    if not de.is_file():
+                        continue
+                    parsed = parse_versioned_filename(de.name)
+                    if not parsed:
+                        continue
+                    if parsed.get("logical_name") != base:
+                        continue
+                    ts = int(parsed.get("timestamp") or 0)
+                    mode = parsed.get("mode", "write")
+                    if (best is None) or (ts > best["timestamp"]):
+                        best = {"name": de.name, "size": int(getattr(de, "stat", lambda: None)() and de.stat().st_size or 0),
+                                "timestamp": ts, "mode": mode}
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -529,7 +561,7 @@ def _update_fsid_from_backend():
     """Derive a stable fsid for this storage; persist it so parallel clusters don't collide."""
     global _FSID
     try:
-        base = getattr(_local_backend, "data_path", None)
+        base = _primary_data_root()
         if not base:
             return
         import hashlib, os as _os
@@ -953,9 +985,10 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False) 
             r = requests.get(url, params={"realm": _REALM, "vpath": best_name}, timeout=90)
             r.raise_for_status()
 
-            if not _local_backend:
+            local_root = _primary_data_root()
+            if not local_root:
                 raise RuntimeError("no backend bound")
-            local_path = os.path.join(_local_backend.data_path, best_name)
+            local_path = os.path.join(local_root, best_name)
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
             with open(local_path, "wb") as f:
                 f.write(r.content)
@@ -1376,7 +1409,7 @@ def list_dir():
     kind = (request.args.get("kind") or "all").lower()
 
     try:
-        dpath = _safe_dir_abspath(vdir)
+        dpaths = _safe_dir_abspaths(vdir)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1384,39 +1417,42 @@ def list_dir():
     logicals = set()  # immediate logical filenames inside vdir
     latest_local = {}
     try:
-        with os.scandir(dpath) as it:
-            for de in it:
-                name = de.name
+        for dpath in dpaths:
+            if not os.path.isdir(dpath):
+                continue
+            with os.scandir(dpath) as it:
+                for de in it:
+                    name = de.name
 
-                # subdirectories
-                if de.is_dir(follow_symlinks=False):
-                    dirs.add(name)
-                    continue
+                    # subdirectories
+                    if de.is_dir(follow_symlinks=False):
+                        dirs.add(name)
+                        continue
 
-                # Hide internals outright
-                if name in (".ffsfs", ".ffsfs-meta.log"):
-                    continue
+                    # Hide internals outright
+                    if name in (".ffsfs", ".ffsfs-meta.log"):
+                        continue
 
-                # If it’s a committed version, track latest per logical name
-                parsed = parse_versioned_filename(name)
-                if parsed:
-                    lname = parsed["logical_name"]
-                    ts = int(parsed["timestamp"])
-                    is_del = parsed.get("mode") == "delete"
-                    prev = latest_local.get(lname)
-                    if prev is None or (ts, int(is_del)) > (prev[0], int(prev[1])):
-                        latest_local[lname] = (ts, is_del)
-                    continue
+                    # If it’s a committed version, track latest per logical name
+                    parsed = parse_versioned_filename(name)
+                    if parsed:
+                        lname = parsed["logical_name"]
+                        ts = int(parsed["timestamp"])
+                        is_del = parsed.get("mode") == "delete"
+                        prev = latest_local.get(lname)
+                        if prev is None or (ts, int(is_del)) > (prev[0], int(prev[1])):
+                            latest_local[lname] = (ts, is_del)
+                        continue
 
-                # Expose temp’s logical filename during copy (….<NULL_HASH>.<stamp>)
-                if f".{NULL_HASH}." in name:
-                    logical = name.split(f".{NULL_HASH}.", 1)[0]
-                    if logical:
-                        logicals.add(logical)
-                    continue
+                    # Expose temp’s logical filename during copy (….<NULL_HASH>.<stamp>)
+                    if f".{NULL_HASH}." in name:
+                        logical = name.split(f".{NULL_HASH}.", 1)[0]
+                        if logical:
+                            logicals.add(logical)
+                        continue
 
-                # otherwise: pass through plain files (rare)
-                logicals.add(name)
+                    # otherwise: pass through plain files (rare)
+                    logicals.add(name)
     except FileNotFoundError:
         # nonexistent dir -> empty listing
         pass
@@ -1579,22 +1615,26 @@ def build_local_file_index():
             if not _local_backend:
                 time.sleep(2)
                 continue
-            base = _local_backend.data_path
+            roots = _local_data_roots()
+            if not roots:
+                time.sleep(2)
+                continue
             index: Dict[str, List[Dict[str, Any]]] = {}
-            for root, _, files in os.walk(base):
-                for f in files:
-                    full = os.path.join(root, f)
-                    rel = os.path.relpath(full, base).replace("\\", "/")
-                    parsed = parse_versioned_filename(rel)
-                    if not parsed:
-                        continue
-                    vpath = parsed["logical_name"]
-                    try:
-                        st = os.stat(full)
-                        fileinfo = {"name": rel, "size": st.st_size, "mtime": int(st.st_mtime)}
-                        index.setdefault(vpath, []).append(fileinfo)
-                    except Exception as e:
-                        _log(f"[index] Failed stat {rel}: {e}")
+            for base in roots:
+                for root, _, files in os.walk(base):
+                    for f in files:
+                        full = os.path.join(root, f)
+                        rel = os.path.relpath(full, base).replace("\\", "/")
+                        parsed = parse_versioned_filename(rel)
+                        if not parsed:
+                            continue
+                        vpath = parsed["logical_name"]
+                        try:
+                            st = os.stat(full)
+                            fileinfo = {"name": rel, "size": st.st_size, "mtime": int(st.st_mtime)}
+                            index.setdefault(vpath, []).append(fileinfo)
+                        except Exception as e:
+                            _log(f"[index] Failed stat {rel}: {e}")
             _local_file_index = index
             _last_local_index_time = time.time()
             _log(f"[index] Rebuilt local index ({sum(len(v) for v in index.values())} files)")

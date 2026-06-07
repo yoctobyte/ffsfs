@@ -24,17 +24,29 @@ ROLE_PRIMARY = "primary"
 ROLE_ARCHIVE = "archive"
 ROLE_CACHE = "cache"
 
+MEDIA_SSD = "ssd"
+MEDIA_HDD = "hdd"
+MEDIA_NETWORK = "network"
+
 
 class Volume:
     """A single storage backend location."""
 
     def __init__(self, path: str, vol_id: str = None, label: str = None,
-                 role: str = ROLE_ARCHIVE, created: float = None):
+                 role: str = ROLE_ARCHIVE, created: float = None,
+                 mirror: bool = False, media: str = None,
+                 max_bytes: int = None, max_file_size: int = None,
+                 reserve_bytes: int = None):
         self.path = os.path.abspath(path)
         self.vol_id = vol_id or str(uuid.uuid4())
         self.label = label or os.path.basename(self.path)
         self.role = role
         self.created = created or time.time()
+        self.mirror = bool(mirror)
+        self.media = media
+        self.max_bytes = max_bytes
+        self.max_file_size = max_file_size
+        self.reserve_bytes = reserve_bytes
 
     @property
     def data_path(self) -> str:
@@ -68,19 +80,38 @@ class Volume:
             "label": self.label,
             "role": self.role,
             "created": self.created,
+            "mirror": self.mirror,
         }
+        if self.media is not None:
+            payload["media"] = self.media
+        if self.max_bytes is not None:
+            payload["max_bytes"] = self.max_bytes
+        if self.max_file_size is not None:
+            payload["max_file_size"] = self.max_file_size
+        if self.reserve_bytes is not None:
+            payload["reserve_bytes"] = self.reserve_bytes
         with open(self.id_file_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
             f.write("\n")
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "id": self.vol_id,
             "path": self.path,
             "label": self.label,
             "role": self.role,
             "created": self.created,
+            "mirror": self.mirror,
         }
+        if self.media is not None:
+            data["media"] = self.media
+        if self.max_bytes is not None:
+            data["max_bytes"] = self.max_bytes
+        if self.max_file_size is not None:
+            data["max_file_size"] = self.max_file_size
+        if self.reserve_bytes is not None:
+            data["reserve_bytes"] = self.reserve_bytes
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> Volume:
@@ -90,6 +121,11 @@ class Volume:
             label=data.get("label", ""),
             role=data.get("role", ROLE_ARCHIVE),
             created=data.get("created", 0),
+            mirror=data.get("mirror", False),
+            media=data.get("media"),
+            max_bytes=data.get("max_bytes"),
+            max_file_size=data.get("max_file_size"),
+            reserve_bytes=data.get("reserve_bytes"),
         )
 
     @classmethod
@@ -105,6 +141,11 @@ class Volume:
                 label=data.get("label", ""),
                 role=data.get("role", ROLE_ARCHIVE),
                 created=data.get("created", 0),
+                mirror=data.get("mirror", False),
+                media=data.get("media"),
+                max_bytes=data.get("max_bytes"),
+                max_file_size=data.get("max_file_size"),
+                reserve_bytes=data.get("reserve_bytes"),
             )
         except Exception:
             return None
@@ -143,6 +184,12 @@ class StoragePool:
                 return v
         return None
 
+    def find_by_label(self, label: str) -> Optional[Volume]:
+        for v in self.all_volumes:
+            if v.label == label:
+                return v
+        return None
+
     def add_secondary(self, volume: Volume) -> None:
         if self.find_by_id(volume.vol_id):
             raise ValueError(f"Volume {volume.vol_id} already in pool")
@@ -175,6 +222,14 @@ class StoragePool:
             result.append(self.primary)
         result.extend(self.online_secondaries())
         return result
+
+    def mirror_targets(self) -> List[Volume]:
+        """Return online volumes configured for mirror-on-write replication."""
+        return [v for v in self.all_volumes if v.mirror and v.is_online()]
+
+    def configured_mirrors(self) -> List[Volume]:
+        """Return all volumes configured as mirrors, including offline ones."""
+        return [v for v in self.all_volumes if v.mirror]
 
     def to_dict(self) -> dict:
         return {

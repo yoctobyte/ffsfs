@@ -116,6 +116,20 @@ python3 ffsctl.py peers add 192.168.1.12:8765
 python3 ffsctl.py peers remove 192.168.1.12:8765
 ```
 
+Configure storage backends:
+
+```bash
+python3 ffsctl.py realm init myrealm --mountpoint ~/myrealm --base ~/.myrealm
+python3 ffsctl.py backend add myrealm /media/backup-a/ffsfs --id backup-a --role archive --mirror --media hdd
+python3 ffsctl.py backend list myrealm
+```
+
+The primary backend stores authoritative metadata and is the preferred write
+target. Backends added with `--mirror` receive copies of committed version
+files when online; missed mirror copies are retried later from the pending
+replication log. See `agents/operator_guide.md` for the full backend option
+reference and examples.
+
 Unmount manually on Linux:
 
 ```bash

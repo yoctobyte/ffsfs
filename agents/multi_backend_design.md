@@ -102,7 +102,11 @@ We need a simple tool or subcommand to set up, remove, and query the status of b
         "id": "vol-external-hdd-1",
         "path": "/media/user/backup-hd-1/ffsfs_data",
         "role": "archive",
-        "replication_priority": 1
+        "mirror": true,
+        "media": "hdd",
+        "max_bytes": null,
+        "max_file_size": null,
+        "reserve_bytes": null
       }
     ]
   }
@@ -112,11 +116,13 @@ We need a simple tool or subcommand to set up, remove, and query the status of b
 ### Proposed CLI Subcommands under `ffsctl`:
 1. **Initialize a Storage Space (Backend):**
    ```bash
-   python3 ffsctl.py backend add <realm> <path> [--id <name>] [--role <role>]
+   python3 ffsctl.py backend add <realm> <path> [--id <name>] [--role <role>] [--mirror]
    ```
    - Checks if the target path is a valid directory.
    - Generates and writes `.ffsfs-volume.id` containing a unique ID.
    - Appends the backend definition to the realm configuration.
+   - `--mirror` enables mirror-on-write plus pending catch-up retry for that
+     backend. Media/capacity hints can be stored for future routing policy.
 
 2. **Remove a Storage Space:**
    ```bash

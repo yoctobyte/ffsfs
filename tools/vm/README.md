@@ -59,6 +59,8 @@ file, unmounts, and prints the storage files found under `/tmp/ffsfs-storage`.
 
 ```bash
 tools/vm/run-two-peer-scenario.sh <scenario>
+tools/vm/run-two-peer-scenario.sh smoke
+tools/vm/run-two-peer-scenario.sh all
 tools/vm/run-two-vm-test.sh   # compatibility wrapper: runs file-fetch
 ```
 
@@ -69,7 +71,10 @@ and config tests.
 
 The runner boots one VM, syncs the repository, starts both peer servers
 (without FUSE), waits for `/healthz` on each guest port, and sources the
-named scenario. Inside the guest, scenarios reach the peers over loopback:
+named scenario. `smoke` and `all` keep that one VM running and reset the
+peer data plus peer server processes between scenarios, avoiding one QEMU
+boot per scenario while preserving scenario isolation. Inside the guest,
+scenarios reach the peers over loopback:
 
 - peer A: `http://127.0.0.1:$FFSFS_VM_PEER_A_PORT` (default `18765`)
 - peer B: `http://127.0.0.1:$FFSFS_VM_PEER_B_PORT` (default `18766`)
@@ -81,6 +86,10 @@ Both peer ports are also forwarded to the host for ad-hoc debugging:
 
 Available scenarios:
 
+- `smoke`: a fast default batch; runs `healthz`, `file-fetch`,
+  `delete-tombstone`, and `path-traversal` in one VM boot.
+- `all`: every scenario under `tools/vm/scenarios/two-peer/`, sorted by name,
+  in one VM boot.
 - `healthz`: each peer reaches the other's `/healthz` endpoint over loopback.
 - `file-fetch`: peer A commits a versioned file and peer B fetches it through
   `/list-dir`, `/head`, and `/get-file`.

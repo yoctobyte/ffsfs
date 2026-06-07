@@ -3,7 +3,9 @@ from types import SimpleNamespace
 import pytest
 
 import ffspeers
+from ffsfs import StorageBackend
 from ffsutils import NULL_HASH, build_versioned_filename, get_suffix_from_path
+from ffsvolumes import ROLE_ARCHIVE, ROLE_PRIMARY, StoragePool, Volume
 
 
 @pytest.fixture
@@ -75,6 +77,34 @@ def test_get_file_serves_versioned_file(peer_client, route):
     resp = client.get(route, query_string={"realm": "test", "vpath": name})
     assert resp.status_code == 200
     assert resp.data == b"hello"
+
+
+@pytest.mark.unit
+def test_peer_api_serves_pool_secondary_root(peer_client, tmp_path):
+    client, _ = peer_client
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY)
+    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE)
+    secondary.init()
+    backend = StorageBackend(primary.path, "test", pool=StoragePool(primary=primary, secondaries=[secondary]))
+    ffspeers._local_backend = backend
+
+    temp = backend.create_temp_for("shared/pool-file.txt")
+    with open(temp, "wb") as f:
+        f.write(b"secondary payload")
+    final = backend.commit_temp("shared/pool-file.txt", temp, "write")
+    version = "shared/" + final.rsplit("/", 1)[-1]
+
+    resp = client.get("/list-dir", query_string={"realm": "test", "dir": "shared"})
+    assert resp.status_code == 200
+    assert resp.get_json()["files"] == ["pool-file.txt"]
+
+    resp = client.get("/head", query_string={"realm": "test", "vpath": "shared/pool-file.txt"})
+    assert resp.status_code == 200
+    assert resp.get_json()["version"]["name"].startswith("pool-file.txt.")
+
+    resp = client.get("/get-file", query_string={"realm": "test", "vpath": version})
+    assert resp.status_code == 200
+    assert resp.data == b"secondary payload"
 
 
 @pytest.mark.unit
@@ -155,4 +185,3 @@ def test_notify_delete_with_suffix(peer_client):
     assert "a/b/file2.txt" in peer_files
     tombstone = peer_files["a/b/file2.txt"][0]
     assert f"a/b/file2.txt.{NULL_HASH}.delete.0." in tombstone["name"]
-

@@ -23,7 +23,7 @@ secondary_path = os.path.join(base, "secondary")
 
 vol1 = Volume(primary_path, role="primary", label="ssd")
 vol1.init()
-vol2 = Volume(secondary_path, role="archive", label="hdd")
+vol2 = Volume(secondary_path, role="archive", label="hdd", mirror=True)
 vol2.init()
 
 assert vol1.status() == STATUS_ONLINE
@@ -42,6 +42,10 @@ with open(temp, "wb") as f:
 final = backend.commit_temp("docs/readme.txt", temp, "write")
 assert os.path.exists(final), f"committed file missing: {final}"
 print(f"write OK: {final}")
+mirrored = os.path.join(secondary_path, ".ffsfs_data", "docs", os.path.basename(final))
+assert os.path.exists(mirrored), f"mirrored file missing: {mirrored}"
+assert open(mirrored, "rb").read() == b"pool smoke test content"
+print(f"mirror OK: {mirrored}")
 
 # Read back from pool (scans all online backends)
 latest = backend.pick_latest("docs/readme.txt")
@@ -66,11 +70,18 @@ latest2 = backend.pick_latest("docs/readme.txt")
 assert latest2 is not None
 with open(latest2, "rb") as f:
     assert f.read() == b"write while secondary offline"
+pending = backend._pending_entries()
+assert pending and pending[-1]["targets"] == [vol2.vol_id], pending
 print("write-while-offline OK")
 
 # Reconnect secondary
 vol2.init()
 assert vol2.is_online(), "secondary should be online again"
+sync_result = backend.sync_pending_replication()
+assert sync_result["pending"] == 0, sync_result
+mirrored2 = os.path.join(secondary_path, ".ffsfs_data", "docs", os.path.basename(final2))
+assert os.path.exists(mirrored2), f"catch-up mirror missing: {mirrored2}"
+assert open(mirrored2, "rb").read() == b"write while secondary offline"
 print("reconnect OK")
 
 shutil.rmtree(base)

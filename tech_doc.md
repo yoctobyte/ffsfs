@@ -169,8 +169,10 @@ On mount: verify **empty** mountpoint & **safe** storage base; write/refresh mar
   - FS/instance IDs: `.storage/storage.id`, `.storage/instance.id`
 
 ### Future configuration and sync policy
-Background synchronization is not implemented yet. It should be designed after
-the current VM scenario coverage and explicit config files are in place.
+Local storage-pool mirrors support mirror-on-write plus pending catch-up retry
+for volumes configured with `mirror: true`. Broader synchronization policy still
+needs to be designed after VM scenario coverage and explicit config files are in
+place.
 
 Expected config dimensions:
 - node role: `access_only`, `cache_limited`, `shared_storage`, `superpeer`,

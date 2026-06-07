@@ -20,8 +20,8 @@
 #   add-peer <realm> <host:port>
 #   remove-peer <realm> <host:port>
 #   list-peers
-#   add-backend <realm> <path> [--role <role>] [--id <label>]
-#   remove-backend <realm> <id_or_path>
+#   add-backend <realm> <path> [--role <role>] [--id <label>] [--mirror]
+#   remove-backend <realm> <id_or_label_or_path>
 #   list-backends <realm>
 
 set -euo pipefail
@@ -50,8 +50,10 @@ usage() {
     echo "  remove-peer <realm> <host:port>     Remove known peer"
     echo "  list-peers                          List known peers"
     echo "  add-backend <realm> <path>          Add storage backend"
-    echo "      [--role <archive|cache>] [--id <label>]"
-    echo "  remove-backend <realm> <id_or_path> Remove storage backend"
+    echo "      [--role <archive|cache>] [--id <label>] [--mirror]"
+    echo "      [--media <ssd|hdd|network>] [--max-bytes <n>]"
+    echo "      [--max-file-size <n>] [--reserve-bytes <n>]"
+    echo "  remove-backend <realm> <id_or_label_or_path> Remove storage backend"
     echo "  list-backends <realm>               List storage backends"
     echo ""
     echo "Config keys: mountpoint, base, port, bind_host, node_name,"
@@ -222,7 +224,7 @@ cmd_add_backend() {
 cmd_remove_backend() {
     local realm="${1:-}" target="${2:-}"
     require_arg "$realm" "realm name required"
-    require_arg "$target" "volume ID or path required"
+    require_arg "$target" "volume ID, label, or path required"
     python3 "$FFSCTL" backend remove "$realm" "$target"
 }
 
@@ -319,7 +321,7 @@ interactive_menu() {
                         ;;
                     c)
                         read -rp "Realm name: " realm
-                        read -rp "Volume ID or path to remove: " target
+                        read -rp "Volume ID, label, or path to remove: " target
                         cmd_remove_backend "$realm" "$target"
                         ;;
                     *) echo "Invalid choice" ;;
