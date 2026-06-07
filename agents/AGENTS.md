@@ -80,6 +80,8 @@ node names are user configuration.
 - Avoid broad restructuring until the test foundation exists.
 - Preserve the vdir-preserving storage model unless explicitly changing the
   format with tests and migration notes.
+- Store all architectural designs, feature plans, and progress logs directly in the project folder (under the `agents/` directory) instead of keeping them in conversation-level local memory or temporary/artifact folders. This ensures all design decisions and plans can be Git tracked and shared across different agent sessions (e.g., Claude, Codex, Gemini).
+
 
 ## Known Risks
 
