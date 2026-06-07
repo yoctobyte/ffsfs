@@ -286,3 +286,29 @@ def test_get_newer_or_missing_consumes_background_limits(tmp_path, monkeypatch):
         ffspeers._known_peers = old_known
         ffspeers._peer_cache = old_cache
         ffspeers._REALM = old_realm
+
+
+@pytest.mark.unit
+def test_sync_status_route(peer_client):
+    client, _ = peer_client
+    old_worker = ffspeers._sync_worker
+
+    resp = client.get("/sync-status")
+    assert resp.status_code == 503
+
+    class FakeWorker:
+        def status(self):
+            return {"policy": {}, "failed_paths": {"x.txt": {"attempts": 2}},
+                    "conflicts": {"y.txt": {"local_hash": "AA", "remote_hash": "BB"}},
+                    "active_pull_running": True, "eviction_running": False}
+
+    ffspeers._sync_worker = FakeWorker()
+    try:
+        resp = client.get("/sync-status")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "x.txt" in data["failed_paths"]
+        assert "y.txt" in data["conflicts"]
+        assert data["active_pull_running"] is True
+    finally:
+        ffspeers._sync_worker = old_worker

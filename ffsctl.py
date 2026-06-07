@@ -552,7 +552,6 @@ def cmd_sync(args):
     if args.action == "status":
         import time as _time
         from ffsvolumes import StoragePool, ROLE_CACHE
-        from ffsfs import StorageBackend
         try:
             import ffspeers as peers_mod
         except Exception:
@@ -617,43 +616,47 @@ def cmd_sync(args):
 
         print()
         print("Failed paths:")
-        pool_data = data.get("storage_pool")
-        if pool_data:
-            pool = StoragePool.from_dict(pool_data)
-            base_path = pool.primary.path
-        else:
-            base_path = data.get("base") or data.get("storage_base")
-            pool = None
-        if base_path:
-            from ffsratelimit import RateLimits
-            rate_limits = RateLimits.from_config(data.get("rate_limits"))
-            backend = StorageBackend(base_path, realm, pool=pool,
-                                     rate_limits=rate_limits)
-            from ffssync import SyncWorker
-            worker = SyncWorker(backend, peers_mod, policy, rate_limits)
-            st = worker.status()
-            failed = st.get("failed_paths", {})
+        port = data.get("port")
+        live_status = None
+        if port:
+            try:
+                r = requests.get(f"http://127.0.0.1:{port}/sync-status", timeout=3)
+                if r.status_code == 200:
+                    live_status = r.json()
+            except Exception:
+                pass
+
+        if live_status:
+            failed = live_status.get("failed_paths", {})
             if not failed:
                 print("  (none)")
             for vpath, info in failed.items():
                 retry_in = max(0, int(info.get("next_retry", 0) - _time.time()))
                 print(f"  {vpath}: attempts={info['attempts']} "
                       f"error={info['last_error']!r} retry_in={retry_in}s")
-
-            if pool:
+            conflicts = live_status.get("conflicts", {})
+            if conflicts:
                 print()
-                print("Storage volumes:")
-                for vol in pool.all_volumes:
-                    online = vol.is_online()
-                    used = vol.used_bytes() if online else 0
-                    role_str = vol.role
-                    status_str = "online" if online else "OFFLINE"
-                    print(f"  {vol.path}: role={role_str} status={status_str} used={used} bytes")
-                    if vol.role == ROLE_CACHE and policy.cache_max_bytes:
-                        pct = int(100 * used / policy.cache_max_bytes) if policy.cache_max_bytes else 0
-                        print(f"    cache pressure: {pct}% ({used}/{policy.cache_max_bytes})")
+                print(f"Conflicts: {len(conflicts)}")
+                for vpath in sorted(conflicts):
+                    print(f"  {vpath}")
         else:
-            print("  (no storage configured)")
+            print("  (service not running — no live failure data available)")
+
+        pool_data = data.get("storage_pool")
+        if pool_data:
+            pool = StoragePool.from_dict(pool_data)
+            print()
+            print("Storage volumes:")
+            for vol in pool.all_volumes:
+                online = vol.is_online()
+                used = vol.used_bytes() if online else 0
+                role_str = vol.role
+                status_str = "online" if online else "OFFLINE"
+                print(f"  {vol.path}: role={role_str} status={status_str} used={used} bytes")
+                if vol.role == ROLE_CACHE and policy.cache_max_bytes:
+                    pct = int(100 * used / policy.cache_max_bytes) if policy.cache_max_bytes else 0
+                    print(f"    cache pressure: {pct}% ({used}/{policy.cache_max_bytes})")
 
 
 def cmd_ratelimit(args):

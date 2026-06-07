@@ -16,20 +16,13 @@ Read these files before changing behavior:
 
 ## Current Priorities
 
-1. Tighten sync semantics for MVP:
-   - Delete/tombstone propagation guarantees
-   - Rename and cross-directory move behavior
-   - Conflict handling for offline concurrent writes
-   - Non-blocking retry/status for transient failed syncs
-   - `ffsctl` sync/status visibility for pending, failed, and stale work
-2. Extend storage policies beyond the first prototype:
+1. Extend storage policies beyond the first prototype:
    - Media/role-aware write target selection
    - Disk rotation UX around mirror volumes
    - Broader sync policy coverage in VM scenarios
-3. Peer trust/security hardening and secure sockets. Important for wider
+2. Peer trust/security hardening and secure sockets. Important for wider
    deployment, but not the next implementation blocker for checkout-and-run
    local/LAN MVP testing.
-   - Always require per-realm secret for peer data exchange.
    - Optional per-node manual approval.
    - HTTP remains supported for trusted LAN performance.
    - HTTPS is optional transport privacy; HMAC realm auth is still required.
@@ -53,6 +46,19 @@ Completed:
 - Sync review fixes: segment-safe prefix matching, newest-version selection
   across peers, wired `ffsctl sync run-once`, one-shot peer-cache refresh
 - Fast two-peer VM smoke batch passes in one VM boot
+- Delete/tombstone propagation: push notifications, active-pull propagation,
+  FUSE visibility, `/head` deleted flag, full test coverage
+- Rename/move behavior: true filesystem rename, `moved` markers, peer move
+  notifications, sync-side local-move optimization via content hash
+- Non-blocking retry with exponential backoff (30s–3600s cap), per-vpath
+  failure tracking, auto-clear on success
+- `ffsctl sync status` with peer info, storage volumes, cache pressure
+- HMAC peer authentication with per-realm secret (`ffsauth.py`)
+- Conflict detection and handling: same-hash auto-resolve, different-hash
+  records conflict, virtual `.CONFLICT.<hash8>` FUSE entries, user resolves
+  by deleting unwanted version, persistent `.ffsfs-conflicts.json`
+- Live sync status via `/sync-status` HTTP route; `ffsctl sync status` queries
+  the running FUSE process for real failure/conflict data
 
 ## Product Direction
 
@@ -134,14 +140,13 @@ node names are user configuration.
 
 ## Known Risks
 
-- Delete/tombstone semantics need stronger peer and VM scenario coverage.
 - Storage pool catch-up is a first prototype: explicit `mirror` volumes receive
   committed files, missed copies are recorded in `.ffsfs-pending-replication.jsonl`,
   and mounted filesystems retry periodically. Final placement honors
   `max_file_size`, `max_bytes`, and `reserve_bytes`. Rich role/prefix/media
   policy is not implemented yet.
 - FUSE mount behavior should be validated only inside VMs.
-- Peer trust/security model is prototype-grade.
+- Peer trust/security model is prototype-grade (TRUST_UNKNOWN_PEER = True).
 
 ## Verification Baseline
 

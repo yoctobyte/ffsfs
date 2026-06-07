@@ -200,3 +200,88 @@ def test_rename_missing_source_does_not_create_tombstone(fs):
     with pytest.raises(OSError) as exc:
         fs.rename("/missing.txt", "/new.txt")
     assert exc.value.errno == errno.ENOENT
+
+
+# ---- conflict virtual entries ----
+
+@pytest.mark.unit
+def test_conflict_entry_appears_in_readdir(fs, monkeypatch):
+    _create_file(fs, "/doc.txt", b"local data", monkeypatch, 100)
+    local_path = fs.backend.pick_latest("doc.txt")
+    local_parsed = parse_versioned_filename(os.path.basename(local_path))
+    local_hash = local_parsed["content_hash"]
+
+    fs.sync_worker._record_conflict(
+        "doc.txt", local_hash, 100, "REMOTEHASH123456", 200)
+
+    entries = fs.readdir("/", 0)
+    assert "doc.txt" in entries
+    conflict_entries = [e for e in entries if ".CONFLICT." in e]
+    assert len(conflict_entries) == 1
+    assert conflict_entries[0] == f"doc.txt.CONFLICT.{local_hash[:8]}"
+
+
+@pytest.mark.unit
+def test_conflict_entry_getattr(fs, monkeypatch):
+    _create_file(fs, "/doc.txt", b"local data", monkeypatch, 100)
+    local_path = fs.backend.pick_latest("doc.txt")
+    local_parsed = parse_versioned_filename(os.path.basename(local_path))
+    local_hash = local_parsed["content_hash"]
+
+    fs.sync_worker._record_conflict(
+        "doc.txt", local_hash, 100, "REMOTEHASH123456", 200)
+
+    conflict_name = f"/doc.txt.CONFLICT.{local_hash[:8]}"
+    st = fs.getattr(conflict_name)
+    assert st["st_size"] == 10
+
+
+@pytest.mark.unit
+def test_conflict_entry_open_and_read(fs, monkeypatch):
+    _create_file(fs, "/doc.txt", b"local data", monkeypatch, 100)
+    local_path = fs.backend.pick_latest("doc.txt")
+    local_parsed = parse_versioned_filename(os.path.basename(local_path))
+    local_hash = local_parsed["content_hash"]
+
+    fs.sync_worker._record_conflict(
+        "doc.txt", local_hash, 100, "REMOTEHASH123456", 200)
+
+    conflict_name = f"/doc.txt.CONFLICT.{local_hash[:8]}"
+    fh = fs.open(conflict_name, os.O_RDONLY)
+    data = fs.read(conflict_name, 1024, 0, fh)
+    fs.release(conflict_name, fh)
+    assert data == b"local data"
+
+
+@pytest.mark.unit
+def test_conflict_entry_write_denied(fs, monkeypatch):
+    _create_file(fs, "/doc.txt", b"local data", monkeypatch, 100)
+    local_path = fs.backend.pick_latest("doc.txt")
+    local_parsed = parse_versioned_filename(os.path.basename(local_path))
+    local_hash = local_parsed["content_hash"]
+
+    fs.sync_worker._record_conflict(
+        "doc.txt", local_hash, 100, "REMOTEHASH123456", 200)
+
+    conflict_name = f"/doc.txt.CONFLICT.{local_hash[:8]}"
+    with pytest.raises(OSError) as exc:
+        fs.open(conflict_name, os.O_WRONLY)
+    assert exc.value.errno == errno.EACCES
+
+
+@pytest.mark.unit
+def test_unlink_conflict_clears_record(fs, monkeypatch):
+    _create_file(fs, "/doc.txt", b"local data", monkeypatch, 100)
+    local_path = fs.backend.pick_latest("doc.txt")
+    local_parsed = parse_versioned_filename(os.path.basename(local_path))
+    local_hash = local_parsed["content_hash"]
+
+    fs.sync_worker._record_conflict(
+        "doc.txt", local_hash, 100, "REMOTEHASH123456", 200)
+
+    conflict_name = f"/doc.txt.CONFLICT.{local_hash[:8]}"
+    fs.unlink(conflict_name)
+
+    assert "doc.txt" not in fs.sync_worker.get_conflicts()
+    entries = fs.readdir("/", 0)
+    assert all(".CONFLICT." not in e for e in entries)

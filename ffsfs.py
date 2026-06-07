@@ -842,6 +842,8 @@ class FFSFS(Operations):
         self.sync_policy = sync_policy or SyncPolicy.for_role("cache_limited")
         self.sync_worker = SyncWorker(self.backend, peers, self.sync_policy, self.rate_limits)
         self.sync_worker.start()
+        if hasattr(peers, "register_sync_worker"):
+            peers.register_sync_worker(self.sync_worker)
 
         # marker + startup scan
         self._ensure_marker()
@@ -1014,6 +1016,33 @@ class FFSFS(Operations):
     def _real_path(self, path: str) -> str:
         return real_path_for_vpath(self.base, path)
 
+    def _resolve_conflict_path(self, vpath: str):
+        """Resolve a virtual .CONFLICT.<hash8> path to the physical version file."""
+        fname = os.path.basename(vpath)
+        parts = fname.rsplit(".CONFLICT.", 1)
+        if len(parts) != 2:
+            return None
+        logical_name = parts[0]
+        hash_prefix = parts[1]
+        real_vpath = os.path.join(os.path.dirname(vpath), logical_name)
+        for root in self.backend.data_roots():
+            dirpath = os.path.join(root, os.path.dirname(normalize_vpath(real_vpath)))
+            if not os.path.isdir(dirpath):
+                continue
+            with os.scandir(dirpath) as it:
+                for de in it:
+                    if not de.is_file():
+                        continue
+                    parsed = parse_versioned_filename(de.name)
+                    if not parsed:
+                        continue
+                    if parsed["logical_name"] != logical_name:
+                        continue
+                    if parsed["content_hash"].startswith(hash_prefix):
+                        if not is_hidden_mode(parsed.get("mode", "")):
+                            return de.path
+        return None
+
     # ---- FUSE required ops ----------------------------------------------
 
     def getattr(self, path, fh=None):
@@ -1024,6 +1053,17 @@ class FFSFS(Operations):
         vpath = normalize_vpath(path)
         if vpath.endswith("/"):
             vpath = vpath[:-1]
+
+        # ---- Handle .CONFLICT.<hash8> virtual entries ----
+        fname_raw = os.path.basename(vpath)
+        if ".CONFLICT." in fname_raw and hasattr(self, "sync_worker"):
+            conflict_path = self._resolve_conflict_path(vpath)
+            if conflict_path:
+                st = os.lstat(conflict_path)
+                return {k: getattr(st, k) for k in (
+                    "st_mode", "st_size", "st_ctime", "st_mtime", "st_atime",
+                    "st_nlink", "st_uid", "st_gid")}
+            raise FuseOSError(errno.ENOENT)
 
         #dirpath = self._dir_for_listing(vpath)      # physical directory of the vpath
         #fname   = os.path.basename(vpath)
@@ -1280,6 +1320,15 @@ class FFSFS(Operations):
                 # keep directory listing resilient if peers layer has a hiccup
                 pass
         
+        # ---- Overlay CONFLICT virtual entries ----
+        if hasattr(self, "sync_worker"):
+            conflicts = self.sync_worker.get_conflicts()
+            for cvpath, cinfo in conflicts.items():
+                cparent = os.path.dirname(cvpath)
+                cbase = os.path.basename(cvpath)
+                if cparent == vpath:
+                    loser_hash = cinfo.get("local_hash", "")[:8]
+                    logicals.add(f"{cbase}.CONFLICT.{loser_hash}")
             
 
         # Assemble: dirs first (sorted), then logical files (sorted), then plain files (sorted)
@@ -1320,6 +1369,18 @@ class FFSFS(Operations):
         mode = "read" if ((flags & os.O_WRONLY) == 0 and (flags & os.O_RDWR) == 0) else "write"
         if flags & os.O_APPEND:
             mode = "append"
+
+        # ---- Handle .CONFLICT.<hash8> virtual entries (read-only) ----
+        if ".CONFLICT." in os.path.basename(vpath) and hasattr(self, "sync_worker"):
+            if mode != "read":
+                raise FuseOSError(errno.EACCES)
+            conflict_path = self._resolve_conflict_path(vpath)
+            if not conflict_path:
+                raise FuseOSError(errno.ENOENT)
+            f = open(conflict_path, "rb")
+            fh = self._alloc_fh(f)
+            self.fh_meta[fh] = {"mode": "read", "vpath": vpath}
+            return fh
 
         # for reads, open the latest version (local or remote-on-demand)
         if mode == "read":
@@ -1480,6 +1541,13 @@ class FFSFS(Operations):
     def unlink(self, path):
         vpath = normalize_vpath(path)
         base = os.path.basename(vpath)
+
+        # ---- Handle .CONFLICT.<hash8> virtual entries ----
+        if ".CONFLICT." in base and hasattr(self, "sync_worker"):
+            parts = base.rsplit(".CONFLICT.", 1)
+            real_vpath = os.path.join(os.path.dirname(vpath), parts[0])
+            self.sync_worker.clear_conflict(real_vpath)
+            return 0
 
         # Minimal policy:
         #  1) If the logical name looks ephemeral/lock/backup → remove directly (no history).

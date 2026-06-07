@@ -115,7 +115,7 @@ def test_active_pull_considers_best_version_across_peers(tmp_path, monkeypatch):
     policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     worker = SyncWorker(backend, peers, policy, None)
     result = worker.run_active_once()
-    assert result == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0, "tombstones_written": 0}
+    assert result == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0, "tombstones_written": 0, "conflicts": 1}
     assert peers.fetch_calls == [("doc.txt", 150, True)]
 
 
@@ -165,7 +165,7 @@ def test_active_pull_failed_path_does_not_block_other_files(tmp_path, monkeypatc
 
     result = worker.run_active_once()
 
-    assert result == {"fetched": 1, "considered": 2, "failed": 1, "skipped_backoff": 0, "tombstones_written": 0}
+    assert result == {"fetched": 1, "considered": 2, "failed": 1, "skipped_backoff": 0, "tombstones_written": 0, "conflicts": 0}
     assert [c[0] for c in peers.fetch_calls] == ["big.bin", "ok.txt"]
     status = worker.status()
     assert "big.bin" in status["failed_paths"]
@@ -189,7 +189,7 @@ def test_active_pull_backoff_skips_only_failed_path(tmp_path, monkeypatch):
     peers.fetch_calls.clear()
 
     second = worker.run_active_once()
-    assert second == {"fetched": 1, "considered": 2, "failed": 0, "skipped_backoff": 1, "tombstones_written": 0}
+    assert second == {"fetched": 1, "considered": 2, "failed": 0, "skipped_backoff": 1, "tombstones_written": 0, "conflicts": 0}
     assert [c[0] for c in peers.fetch_calls] == ["ok.txt"]
 
 
@@ -211,7 +211,7 @@ def test_active_pull_success_clears_previous_failure(tmp_path, monkeypatch):
     worker._failures["big.bin"]["next_retry"] = 0
     peers.fail_vpaths.clear()
     second = worker.run_active_once()
-    assert second == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0, "tombstones_written": 0}
+    assert second == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0, "tombstones_written": 0, "conflicts": 0}
     assert worker.status()["failed_paths"] == {}
 
 
@@ -296,6 +296,96 @@ def test_active_pull_tombstone_wins_over_older_write(tmp_path, monkeypatch):
     latest = backend.pick_latest("file.txt")
     parsed = parse_versioned_filename(os.path.basename(latest))
     assert parsed["mode"] == "delete"
+
+
+# ---- conflict detection ----
+
+@pytest.mark.unit
+def test_same_hash_skips_fetch(tmp_path, monkeypatch):
+    """If local and remote have the same content hash, no fetch is needed."""
+    backend, _ = _make_backend(tmp_path)
+    _commit(backend, "doc.txt", b"hello", 100, monkeypatch)
+    local_path = backend.pick_latest("doc.txt")
+    from ffsutils import parse_versioned_filename as pvf
+    local_parsed = pvf(os.path.basename(local_path))
+    local_hash = local_parsed["content_hash"]
+
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {"doc.txt": [
+            {"name": f"doc.txt.{local_hash}.write.0.200"}
+        ]}},
+    })
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
+    worker = SyncWorker(backend, peers, policy, None)
+    result = worker.run_active_once()
+    assert result["fetched"] == 0
+    assert peers.fetch_calls == []
+    assert result["conflicts"] == 0
+
+
+@pytest.mark.unit
+def test_different_hash_records_conflict(tmp_path, monkeypatch):
+    """If local and remote have different hashes, a conflict is recorded."""
+    backend, _ = _make_backend(tmp_path)
+    _commit(backend, "doc.txt", b"local version", 100, monkeypatch)
+
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {"doc.txt": [
+            {"name": "doc.txt.BBBBBBBB.write.0.200"}
+        ]}},
+    })
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
+    worker = SyncWorker(backend, peers, policy, None)
+    result = worker.run_active_once()
+    assert result["fetched"] == 1
+    assert result["conflicts"] == 1
+    conflicts = worker.get_conflicts()
+    assert "doc.txt" in conflicts
+    assert conflicts["doc.txt"]["remote_hash"] == "BBBBBBBB"
+    assert conflicts["doc.txt"]["remote_ts"] == 200
+
+
+@pytest.mark.unit
+def test_conflict_persists_to_file(tmp_path, monkeypatch):
+    """Conflicts are saved to .ffsfs-conflicts.json and reload on new worker."""
+    backend, _ = _make_backend(tmp_path)
+    _commit(backend, "doc.txt", b"local version", 100, monkeypatch)
+
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {"doc.txt": [
+            {"name": "doc.txt.CCCCCCCC.write.0.200"}
+        ]}},
+    })
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
+    worker = SyncWorker(backend, peers, policy, None)
+    worker.run_active_once()
+    assert "doc.txt" in worker.get_conflicts()
+
+    worker2 = SyncWorker(backend, peers, policy, None)
+    assert "doc.txt" in worker2.get_conflicts()
+
+
+@pytest.mark.unit
+def test_clear_conflict(tmp_path, monkeypatch):
+    """clear_conflict removes the entry and persists."""
+    backend, _ = _make_backend(tmp_path)
+    _commit(backend, "doc.txt", b"local version", 100, monkeypatch)
+
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {"doc.txt": [
+            {"name": "doc.txt.DDDDDDDD.write.0.200"}
+        ]}},
+    })
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
+    worker = SyncWorker(backend, peers, policy, None)
+    worker.run_active_once()
+    assert "doc.txt" in worker.get_conflicts()
+
+    worker.clear_conflict("doc.txt")
+    assert "doc.txt" not in worker.get_conflicts()
+
+    worker2 = SyncWorker(backend, peers, policy, None)
+    assert "doc.txt" not in worker2.get_conflicts()
 
 
 # ---- eviction ----

@@ -1,13 +1,13 @@
   Known Code Bugs / Risks
 
-  1. Delete/tombstone peer semantics — mostly resolved.
-      - FIXED: FUSE getattr/readdir/open now return ENOENT for delete tombstones.
-      - FIXED: /list-dir and /head use latest-version-wins logic (delete hides file).
-      - FIXED: /head returns explicit “deleted” boolean flag.
-      - FIXED: getattr falls through to remote check, surfacing write-after-delete.
-      - REMAINING: /notify synthesizes delete tombstones with NULL_HASH (cosmetic;
-        deletes are never fetched by content, only by timestamp ordering).
-      - REMAINING: no two-peer VM scenario for notify propagation timing.
+  1. Delete/tombstone peer semantics — RESOLVED.
+      - FUSE getattr/readdir/open return ENOENT for delete tombstones.
+      - /list-dir and /head use latest-version-wins logic (delete hides file).
+      - /head returns explicit “deleted” boolean flag.
+      - getattr falls through to remote check, surfacing write-after-delete.
+      - Active-pull propagates remote tombstones to local disk.
+      - Two-peer VM scenarios cover delete-tombstone propagation.
+      - /notify synthesizes delete tombstones with NULL_HASH (cosmetic; acceptable).
 
   2. fsync() can silently swallow commit failures.
       - ffsfs.py:1045
@@ -26,19 +26,31 @@
       - Especially in ffsfs.py, ffspeers.py, and ffsautodiscover.py.
       - Some are acceptable resilience paths, but write/delete/sync/startup paths need logging or propagation.
 
-  6. Peer trust/security model is prototype-grade.
-      - TRUST_UNKNOWN_PEER = True.
-      - Peer add/notify/hello behavior is not hardened.
+  6. Peer trust/security model — partially addressed.
+      - HMAC per-realm secret authentication is implemented (ffsauth.py).
+      - TRUST_UNKNOWN_PEER = True remains the default (auto-add on /hello).
+      - Optional manual peer approval not yet implemented.
 
-  7. Rich background sync policy is not implemented.
-      - Current peer behavior is mostly on-demand fetch plus cache/index refresh.
-      - Explicit local mirror volumes now receive mirror-on-write copies, and
-        missed mirror copies are retried from `.ffsfs-pending-replication.jsonl`.
-      - No role/prefix/media-aware sync policy or cache eviction yet.
+  7. Rich background sync policy — base infrastructure done, rich policies open.
+      - Background SyncWorker with active-pull and cache eviction is implemented.
+      - Node roles, prefix filtering, interval config, and rate limits work.
+      - No role/prefix/media-aware write-target or eviction policy yet.
 
   8. Windows adapter has TODOs.
       - timestamp mapping in crossfuse.py:129
       - utimens mapping in crossfuse.py:267
+
+  9. Conflict handling — RESOLVED.
+      - Sync worker detects divergent versions via content hash comparison.
+      - Same-hash conflicts auto-resolve (skip fetch).
+      - Different-hash conflicts recorded and persisted to .ffsfs-conflicts.json.
+      - Virtual .CONFLICT.<hash8> entries surfaced in FUSE readdir/getattr/open.
+      - User resolves by deleting the unwanted conflict entry.
+
+  10. ffsctl sync status live daemon state — RESOLVED.
+      - /sync-status HTTP route added to peer server.
+      - ffsctl sync status queries running FUSE process for live failure/conflict data.
+      - Falls back gracefully when service is not running.
 
   Top To-Dos
 

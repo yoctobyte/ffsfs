@@ -1406,6 +1406,16 @@ def add_page():
     return make_response(html, 200)    
     
 
+@app.route("/sync-status", methods=["GET"])
+def sync_status():
+    if _sync_worker is None:
+        return jsonify({"error": "sync worker not registered"}), 503
+    try:
+        return jsonify(_sync_worker.status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/notify", methods=["POST"])
 def notify():
     data = request.get_json(force=True) or {}
@@ -1790,6 +1800,14 @@ def register_local_backend(backend):
         _update_fsid_from_backend()
     except Exception:
         pass
+
+
+_sync_worker: Any = None
+
+
+def register_sync_worker(worker):
+    global _sync_worker
+    _sync_worker = worker
 
 
 def start_local_peer_server(port: int = PEER_PORT) -> None:

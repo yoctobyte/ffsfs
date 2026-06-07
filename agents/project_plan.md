@@ -136,9 +136,6 @@ Completed foundation:
 
 Still open before broader feature work:
 
-- Tighten sync semantics: delete/tombstone propagation guarantees,
-  rename/move behavior, conflict handling, stale peer cache recovery, and
-  sync/status visibility.
 - Extend storage policy: media/role-aware write target selection, disk
   rotation UX, broader sync policy coverage in VM scenarios.
 
@@ -164,6 +161,14 @@ Completed infrastructure:
   across peers, one-shot peer-cache refresh, and wired
   `ffsctl sync <realm> run-once`.
 - `launch.sh` and `configure.sh` operator scripts.
+- Delete/tombstone propagation (push notifications, active-pull, FUSE visibility).
+- True filesystem rename/move with `moved` markers and peer notifications.
+- Non-blocking retry with exponential backoff and per-vpath failure tracking.
+- `ffsctl sync status` command with live daemon query via `/sync-status` route.
+- HMAC peer authentication with per-realm secret.
+- Conflict detection: same-hash auto-skip, different-hash conflict recording,
+  `.ffsfs-conflicts.json` persistence, virtual `.CONFLICT.<hash8>` FUSE entries,
+  user resolution by deleting the unwanted version.
 
 ## Phase 1: Test Foundation
 

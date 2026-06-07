@@ -191,7 +191,7 @@ def test_sync_status_shows_policy_and_peers(tmp_path, monkeypatch, capsys):
     assert "active" in out
     assert "10.0.0.1:8765" in out
     assert "Failed paths:" in out
-    assert "(none)" in out
+    assert "service not running" in out
 
 
 @pytest.mark.unit

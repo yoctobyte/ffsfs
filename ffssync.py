@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -133,6 +134,11 @@ class SyncWorker:
         self._evict_thread: Optional[threading.Thread] = None
         self._failures = {}
         self._failure_lock = threading.Lock()
+        self._conflicts: dict = {}
+        self._conflicts_lock = threading.Lock()
+        self._conflicts_file = os.path.join(
+            getattr(backend, "base", ""), ".ffsfs-conflicts.json")
+        self._load_conflicts()
 
     # lifecycle ---------------------------------------------------------
 
@@ -209,6 +215,15 @@ class SyncWorker:
             if local_ts is not None and local_ts >= newest_ts:
                 self._clear_failure(vpath)
                 continue
+            local_hash = self._local_latest_hash(vpath)
+            remote_parsed = parse_versioned_filename(_newest_name)
+            remote_hash = remote_parsed.get("content_hash") if remote_parsed else None
+            if local_hash and remote_hash and local_hash == remote_hash:
+                self._clear_failure(vpath)
+                continue
+            if local_hash and remote_hash and local_hash != remote_hash:
+                self._record_conflict(vpath, local_hash, local_ts or 0,
+                                      remote_hash, newest_ts)
             if self._try_local_move(vpath, _newest_name):
                 fetched += 1
                 self._clear_failure(vpath)
@@ -242,7 +257,8 @@ class SyncWorker:
 
         return {"fetched": fetched, "considered": considered,
                 "failed": failed, "skipped_backoff": skipped_backoff,
-                "tombstones_written": tombstones_written}
+                "tombstones_written": tombstones_written,
+                "conflicts": len(self._conflicts)}
 
     def _record_failure(self, vpath: str, error: str) -> None:
         now = time.time()
@@ -273,11 +289,14 @@ class SyncWorker:
                 vpath: dict(data)
                 for vpath, data in sorted(self._failures.items())
             }
+        with self._conflicts_lock:
+            conflicts = dict(self._conflicts)
         return {
             "policy": self.policy.to_dict(),
             "active_pull_running": bool(self._pull_thread and self._pull_thread.is_alive()),
             "eviction_running": bool(self._evict_thread and self._evict_thread.is_alive()),
             "failed_paths": failures,
+            "conflicts": conflicts,
         }
 
     @staticmethod
@@ -352,6 +371,58 @@ class SyncWorker:
                             local_vpath, target_hash, dest_vpath=dest_vpath)
                         return True
         return False
+
+    def _local_latest_hash(self, vpath: str) -> Optional[str]:
+        try:
+            local = self.backend.pick_latest(vpath)
+        except Exception:
+            return None
+        if not local:
+            return None
+        parsed = parse_versioned_filename(os.path.basename(local))
+        if not parsed:
+            return None
+        if is_hidden_mode(parsed.get("mode", "")):
+            return None
+        return parsed.get("content_hash")
+
+    # conflict management --------------------------------------------------
+
+    def _record_conflict(self, vpath: str, local_hash: str, local_ts: int,
+                         remote_hash: str, remote_ts: int) -> None:
+        with self._conflicts_lock:
+            self._conflicts[vpath] = {
+                "local_hash": local_hash,
+                "local_ts": local_ts,
+                "remote_hash": remote_hash,
+                "remote_ts": remote_ts,
+                "detected_at": time.time(),
+            }
+            self._save_conflicts()
+
+    def clear_conflict(self, vpath: str) -> None:
+        with self._conflicts_lock:
+            if vpath in self._conflicts:
+                del self._conflicts[vpath]
+                self._save_conflicts()
+
+    def get_conflicts(self) -> dict:
+        with self._conflicts_lock:
+            return dict(self._conflicts)
+
+    def _load_conflicts(self) -> None:
+        try:
+            with open(self._conflicts_file, "r") as f:
+                self._conflicts = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            self._conflicts = {}
+
+    def _save_conflicts(self) -> None:
+        try:
+            with open(self._conflicts_file, "w") as f:
+                json.dump(self._conflicts, f)
+        except OSError:
+            pass
 
     # eviction ----------------------------------------------------------
 
