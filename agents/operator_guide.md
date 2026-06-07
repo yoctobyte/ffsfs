@@ -13,6 +13,7 @@ FFSFS supports explicit configuration files in JSON format. This allows configur
 ```json
 {
   "realm": "myrealm",
+  "realm_secret": "a1b2c3...64_hex_chars...",
   "node_name": "backup-node-1",
   "base": "/home/ubuntu/.myrealm",
   "mountpoint": "/home/ubuntu/myrealm",
@@ -23,6 +24,8 @@ FFSFS supports explicit configuration files in JSON format. This allows configur
     "192.168.1.50:18765",
     "192.168.1.51:18765"
   ],
+  "peer_trust": "realm_secret",
+  "peer_transport": "http",
   "node_role": "replica_storage",
   "node_availability": "on_demand",
   "node_storage_profile": "bulk_storage",
@@ -86,6 +89,93 @@ Peers list is stored in `.storage/peers-<realm>.conf`. You can manipulate this c
   ```bash
   python3 ffsctl.py peers ban 192.168.1.99:18765 --conf ~/.ffsfs/.storage/peers-myrealm.conf
   ```
+
+---
+
+## 2b) Peer Authentication
+
+FFSFS uses HMAC request signing with a shared realm secret to authenticate
+peer-to-peer communication. Every peer request includes a signature header that
+proves the sender knows the realm secret.
+
+### Generating a Realm Secret
+
+A realm secret is automatically generated when you initialize a realm:
+
+```bash
+python3 ffsctl.py realm init myrealm --base ~/myrealm-storage
+```
+
+The secret is stored in `~/.ffsfs/.storage/myrealm/realm-config.json`.
+
+### Sharing the Secret Between Nodes
+
+There are three ways to get the same secret on multiple nodes:
+
+**Option 1: Passphrase (easiest for humans)**
+
+Use the same passphrase and realm name on each node. The secret is derived
+deterministically (PBKDF2-SHA256, 600k iterations, realm name in salt):
+
+```bash
+# Node A:
+python3 ffsctl.py realm init myrealm --passphrase "correct horse battery staple"
+
+# Node B (same passphrase + realm name → same secret):
+python3 ffsctl.py realm init myrealm --passphrase "correct horse battery staple"
+```
+
+**Option 2: Copy the hex secret**
+
+Generate on one node, then pass the hex to the other:
+
+```bash
+# Node A — show the secret:
+cat ~/.ffsfs/.storage/myrealm/realm-config.json | python3 -c "import sys,json; print(json.load(sys.stdin)['realm_secret'])"
+
+# Node B — init with the same secret:
+python3 ffsctl.py realm init myrealm --secret <paste-hex>
+```
+
+**Option 3: Update an existing node**
+
+If a node already has a realm config, update the secret directly:
+
+```bash
+python3 ffsctl.py realm set myrealm realm_secret <hex-from-other-node>
+```
+
+Both nodes must have the identical `realm_secret` to exchange data.
+
+### Trust Modes
+
+Configure via `ffsctl.py realm set <realm> peer_trust <mode>`:
+
+- **`realm_secret`** (default): Any peer that can sign requests with the realm
+  secret is trusted to participate.
+- **`manual`**: Peers must both know the realm secret AND be listed in the
+  node's `approved_peers` list before data exchange is allowed.
+
+### Transport
+
+Configure via `ffsctl.py realm set <realm> peer_transport <mode>`:
+
+- **`http`** (default): Plain HTTP. Authentication is via HMAC signatures, not
+  transport encryption. Suitable for trusted LANs.
+- **`https`**: TLS-encrypted transport. Provides confidentiality against passive
+  network observers. HMAC auth is still required.
+
+### What Auth Protects Against
+
+- Random LAN devices joining your realm without the secret
+- Forged sync/notify requests from unauthorized peers
+- Replay attacks (nonce + timestamp checking)
+
+### What Auth Does NOT Protect Against
+
+- Passive network observation (use `peer_transport=https` for that)
+- A compromised node that already has the secret
+- Key rotation (not yet implemented — change the secret manually on all nodes)
 
 ---
 
@@ -362,7 +452,7 @@ FUSE filesystems can sometimes hang or get stuck in a "Transport endpoint is not
 
 ## 6) Known Limitations
 
-- **No Encryption/Authentication:** The current prototype sends file payloads and metadata in plaintext over HTTP/UDP. It is meant for trusted LANs or private overlay networks (like Tailscale).
+- **No Transport Encryption by Default:** Peer communication uses HTTP with HMAC request signing for authentication. File payloads and metadata are authenticated but not encrypted in transit. For confidentiality, configure `peer_transport=https` (requires manual cert setup) or use an encrypted overlay network like Tailscale.
 - **Simple Conflict Resolution:** Conflicts are resolved via latest-timestamp-wins. Logical locking or interactive merge flows are not yet supported.
 - **Auto-Discovery Limits:** UDP broadcast autodiscovery is designed for single-subnet LAN networks. For multi-subnet or remote connections, you must add peers manually using `ffsctl.py peers add`.
 - **Background Sync in Progress:** Explicit local mirror volumes have mirror-on-write plus pending catch-up retry. Final placement honors configured size/capacity limits. The next feature phase is implementing broader policies such as `cache_limited`, selected-prefix sync, media/role-aware routing, and eviction.

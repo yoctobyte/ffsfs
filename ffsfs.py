@@ -288,8 +288,20 @@ def _short_mode_launch(realm_arg: str) -> None:
     print(f"[ffsfs] storage={realm_base}")
     print(f"[ffsfs] peer-port={chosen} (seed {seed})")
 
+    # Load realm config if available (for auth, sync, etc.)
+    realm_cfg_path = os.path.expanduser(f"~/.ffsfs/.storage/{safe_realm}/realm-config.json")
+    realm_config = {}
+    if os.path.isfile(realm_cfg_path):
+        try:
+            import json as _json
+            with open(realm_cfg_path, "r", encoding="utf-8") as _f:
+                realm_config = _json.load(_f)
+        except Exception:
+            pass
+
     # Foreground per consilium in brevitate
-    mount(mountpoint, base_path=realm_base, foreground=True, realm=safe_realm)
+    mount(mountpoint, base_path=realm_base, foreground=True, realm=safe_realm,
+          realm_config=realm_config)
 
 
 
@@ -1551,7 +1563,7 @@ class FFSFS(Operations):
 
 # Convenience runner (optional)
 def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool = True, realm: str = None, pool: StoragePool = None,
-          sync_policy: SyncPolicy = None, rate_limits: RateLimits = None):
+          sync_policy: SyncPolicy = None, rate_limits: RateLimits = None, realm_config: dict = None):
     fs = FFSFS(mount_root=mountpoint, base_path=base_path, realm=realm, pool=pool,
                sync_policy=sync_policy, rate_limits=rate_limits)
     # --- Start peer HTTP server (optional if ffspeers available) ---
@@ -1561,6 +1573,16 @@ def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool 
             peers.register_local_backend(fs.backend)
             if hasattr(peers, "set_rate_limits"):
                 peers.set_rate_limits(fs.rate_limits)
+
+            # Configure auth if realm_secret is available
+            cfg = realm_config or {}
+            secret = cfg.get("realm_secret")
+            if secret and hasattr(peers, "set_auth_config"):
+                peers.set_auth_config(
+                    realm_secret=secret,
+                    peer_trust=cfg.get("peer_trust", "realm_secret"),
+                    approved_peers=set(cfg.get("approved_peers") or []),
+                )
 
             # Add known peers from environment if any
             known_env = os.environ.get("FFSFS_KNOWN_PEERS")
@@ -1688,4 +1710,4 @@ if __name__ == "__main__":
 
     # Mount with your existing helper
     mount(mountpoint, base_path=realm_base, foreground=not bg, realm=realm, pool=pool,
-          sync_policy=sync_policy, rate_limits=rate_limits)
+          sync_policy=sync_policy, rate_limits=rate_limits, realm_config=config_data)

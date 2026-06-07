@@ -236,7 +236,11 @@ _REALM_CONFIG_KEYS = {
     "mountpoint", "base", "storage_base", "port", "bind_host",
     "node_name", "autodiscover", "known_peers", "realm",
     "node_role", "node_availability", "node_storage_profile",
+    "peer_trust", "peer_transport", "realm_secret",
 }
+
+_PEER_TRUST_VALUES = {"realm_secret", "manual"}
+_PEER_TRANSPORT_VALUES = {"http", "https"}
 
 def _load_realm_config(realm: str) -> dict:
     cfg_path = _realm_config_path(realm)
@@ -264,7 +268,26 @@ def cmd_realm(args):
         if os.path.exists(cfg_path):
             print(f"Realm config already exists: {cfg_path}")
             return
-        data = {"realm": realm}
+        if getattr(args, "secret", None) and getattr(args, "passphrase", None):
+            print("Cannot use both --secret and --passphrase")
+            return
+        if getattr(args, "secret", None):
+            try:
+                bytes.fromhex(args.secret)
+            except ValueError:
+                print("--secret must be a valid hex string")
+                return
+            if len(args.secret) < 32:
+                print("--secret too short (minimum 32 hex chars / 16 bytes)")
+                return
+            secret = args.secret
+        elif getattr(args, "passphrase", None):
+            from ffspeer_auth import secret_from_passphrase
+            secret = secret_from_passphrase(args.passphrase, realm)
+        else:
+            from ffspeer_auth import generate_realm_secret
+            secret = generate_realm_secret()
+        data = {"realm": realm, "realm_secret": secret}
         if args.mountpoint:
             data["mountpoint"] = os.path.abspath(args.mountpoint)
         if args.base:
@@ -274,6 +297,8 @@ def cmd_realm(args):
         _save_realm_config(realm, data)
         print(f"Initialized realm config: {cfg_path}")
         print(f"  realm: {realm}")
+        secret_src = "(provided)" if getattr(args, 'secret', None) else "(from passphrase)" if getattr(args, 'passphrase', None) else "(generated)"
+        print(f"  realm_secret: {secret_src}")
         if "mountpoint" in data:
             print(f"  mountpoint: {data['mountpoint']}")
         if "base" in data:
@@ -301,6 +326,8 @@ def cmd_realm(args):
                 print(f"  known_peers:")
                 for p in value:
                     print(f"    - {p}")
+            elif key == "realm_secret":
+                print(f"  realm_secret: {'*' * 8} (use realm-config.json to view)")
             else:
                 print(f"  {key}: {value}")
 
@@ -341,6 +368,25 @@ def cmd_realm(args):
             if value not in NODE_STORAGE_PROFILES:
                 print(f"Unknown node_storage_profile: {value}")
                 print(f"Valid values: {', '.join(sorted(NODE_STORAGE_PROFILES))}")
+                return
+        elif key == "peer_trust":
+            if value not in _PEER_TRUST_VALUES:
+                print(f"Unknown peer_trust: {value}")
+                print(f"Valid values: {', '.join(sorted(_PEER_TRUST_VALUES))}")
+                return
+        elif key == "peer_transport":
+            if value not in _PEER_TRANSPORT_VALUES:
+                print(f"Unknown peer_transport: {value}")
+                print(f"Valid values: {', '.join(sorted(_PEER_TRANSPORT_VALUES))}")
+                return
+        elif key == "realm_secret":
+            try:
+                bytes.fromhex(value)
+            except ValueError:
+                print("realm_secret must be a hex string")
+                return
+            if len(value) < 32:
+                print("realm_secret too short (minimum 32 hex chars / 16 bytes)")
                 return
         data[key] = value
         _save_realm_config(realm, data)
@@ -598,6 +644,8 @@ def main():
     sr.add_argument("value", nargs="?", help="config value (for set)")
     sr.add_argument("--mountpoint", default=None, help="mountpoint path (for init)")
     sr.add_argument("--base", default=None, help="storage base path (for init)")
+    sr.add_argument("--secret", default=None, help="existing realm secret hex (for joining a realm)")
+    sr.add_argument("--passphrase", default=None, help="derive realm secret from a passphrase")
     sr.set_defaults(func=cmd_realm)
 
     sro = sub.add_parser("role", help="show or set the node storage role")

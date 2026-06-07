@@ -61,7 +61,8 @@ def _fetch_dir_from_peer(peer: str, vdir: str) -> Optional[Dict[str, Any]]:
     """Ex uno pari directorium planum affer; nullam recursionem."""
     try:
         url = _peer_url(peer, "/list-dir")
-        r = requests.get(url, params={"realm": _REALM, "dir": vdir, "kind": "all"}, timeout=20)
+        params = {"realm": _REALM, "dir": vdir, "kind": "all"}
+        r = _authed_get(url, "/list-dir", params, timeout=20)
         if not r.ok:
             return None
         data = r.json() or {}
@@ -503,6 +504,22 @@ def _get_node_name() -> str:
 
 app = Flask(__name__)
 
+_AUTH_EXEMPT_PATHS = {"/healthz"}
+
+@app.before_request
+def _check_auth():
+    if _request_verifier is None:
+        return None
+    if request.path in _AUTH_EXEMPT_PATHS:
+        return None
+    body = request.get_data()
+    query_params = dict(request.args)
+    headers = dict(request.headers)
+    ok, reason = _request_verifier.verify(
+        request.method, request.path, query_params, body, headers)
+    if not ok:
+        return jsonify({"error": f"auth failed: {reason}"}), 403
+
 # Peer state
 _known_peers: List[str] = []
 _last_seen: Dict[str, float] = {}           # "ip[:port]" -> last ping ts
@@ -698,6 +715,56 @@ def set_realm(realm: Optional[str]) -> None:
         global _config_path
         _config_path = cfg
 
+
+# -------------------- Auth state --------------------
+
+_realm_secret: Optional[str] = None
+_request_verifier = None  # type: Optional[Any]
+
+def set_auth_config(realm_secret: Optional[str] = None,
+                    peer_trust: str = "realm_secret",
+                    approved_peers: Optional[set] = None) -> None:
+    """Configure HMAC request authentication for this peer server."""
+    global _realm_secret, _request_verifier
+    _realm_secret = realm_secret
+    if realm_secret:
+        from ffspeer_auth import RequestVerifier
+        _request_verifier = RequestVerifier(
+            realm=_REALM,
+            realm_secret=realm_secret,
+            manual_approval=(peer_trust == "manual"),
+            approved_peers=approved_peers or set(),
+        )
+        _log(f"[peer] Auth enabled (peer_trust={peer_trust})")
+    else:
+        _request_verifier = None
+
+
+def _signed_headers(method: str, path: str, query_params: dict = None,
+                    body: bytes = b"") -> dict:
+    """Return HMAC auth headers for an outbound request, or {} if auth disabled."""
+    if not _realm_secret:
+        return {}
+    from ffspeer_auth import sign_request
+    return sign_request(_realm_secret, method, path,
+                        query_params or {}, body, _REALM, _get_node_name())
+
+
+def _authed_get(url: str, path: str, params: dict = None, **kwargs) -> "requests.Response":
+    hdrs = _signed_headers("GET", path, params or {})
+    if hdrs:
+        kwargs.setdefault("headers", {}).update(hdrs)
+    return requests.get(url, params=params, **kwargs)
+
+
+def _authed_post(url: str, path: str, json_body=None, **kwargs) -> "requests.Response":
+    import json as _json
+    body = _json.dumps(json_body).encode() if json_body is not None else b""
+    hdrs = _signed_headers("POST", path, {}, body)
+    if hdrs:
+        kwargs.setdefault("headers", {}).update(hdrs)
+    return requests.post(url, json=json_body, **kwargs)
+
 def _wants_html() -> bool:
     # Accept-header vel ?html=1 → pagina HTML redditur
     acc = (request.headers.get("Accept") or "").lower()
@@ -830,7 +897,8 @@ def ping_all():
             continue
         try:
             url = f"http://{host}:{port}/hello"
-            r = requests.get(url, params={"realm": _REALM, "ts": time.time(), "port": _actual_flask_port or PEER_PORT}, timeout=3)
+            params = {"realm": _REALM, "ts": time.time(), "port": _actual_flask_port or PEER_PORT}
+            r = _authed_get(url, "/hello", params, timeout=3)
             if r.ok:
                 _last_seen[peer] = time.time()
                 _log(f"[peer] {peer} is alive")
@@ -859,7 +927,7 @@ def notify_commit(vpath: str, fullpath: str) -> None:
                "from_port": (_actual_flask_port or PEER_PORT)}    
     for peer in list(_known_peers):
         try:
-            r = requests.post(_peer_url(peer, "/notify"), json=payload, timeout=12)
+            r = _authed_post(_peer_url(peer, "/notify"), "/notify", payload, timeout=12)
             _log(f"[peer] notify_commit → {peer}: {r.status_code}")
         except Exception as e:
             print(f"[peer] notify_commit failed to {peer}: {e}")
@@ -878,7 +946,7 @@ def notify_commit_safe(vpath: str, final_name: str, size: int, mtime: int) -> No
     
     for peer in list(_known_peers):
         try:
-            requests.post(_peer_url(peer, "/notify"), json=payload, timeout=12)
+            _authed_post(_peer_url(peer, "/notify"), "/notify", payload, timeout=12)
         except Exception as e:
             print(f"[peer] notify_commit_safe failed to {peer}: {e}")
 
@@ -898,7 +966,7 @@ def notify_delete(vpath: str, suffix: str = "") -> None:
         payload["suffix"] = suffix
     for peer in list(_known_peers):
         try:
-            r = requests.post(_peer_url(peer, "/notify"), json=payload, timeout=12)
+            r = _authed_post(_peer_url(peer, "/notify"), "/notify", payload, timeout=12)
             _log(f"[peer] notify_delete → {peer}: {r.status_code}")
         except Exception as e:
             print(f"[peer] notify_delete failed to {peer}: {e}")
@@ -941,7 +1009,7 @@ def notify_modify(vpath: str, path: str) -> None:
     
     for peer in list(_known_peers):
         try:
-            requests.post(_peer_url(peer, "/notify"), json=payload, timeout=12)
+            _authed_post(_peer_url(peer, "/notify"), "/notify", payload, timeout=12)
         except Exception as e:
             print(f"[peer] notify_modify failed to {peer}: {e}")
 
@@ -998,8 +1066,8 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False,
         #url = _peer_url(peer, f"/get-file?realm={_REALM}&vpath={best_name}")
         #r = requests.get(url, timeout=90)
         url = _peer_url(best_peer, "/get-file")
-        r = requests.get(url, params={"realm": _REALM, "vpath": best_name},
-                         timeout=90, stream=True)
+        params = {"realm": _REALM, "vpath": best_name}
+        r = _authed_get(url, "/get-file", params, timeout=90, stream=True)
         r.raise_for_status()
 
         local_root = _primary_data_root()
@@ -1289,8 +1357,8 @@ def add_page():
                     # conamur statim pulsare
                     now = time.time()
                     port = _actual_flask_port or PEER_PORT
-                    url = _peer_url(peer, f"/hello?realm={_REALM}&ts={now}&port={port}")
-                    requests.get(url, timeout=5)
+                    params = {"realm": _REALM, "ts": now, "port": port}
+                    _authed_get(_peer_url(peer, "/hello"), "/hello", params, timeout=5)
                 except Exception:
                     pass
                 msg = f"Added peer: {peer}"
@@ -1575,8 +1643,8 @@ def refresh_peer_filecache_once(force: bool = False) -> dict:
             cache = _ensure_peer_cache_entry(peer)
             if not force and now - cache["last_sync"] < FILECACHE_REFRESH_INTERVAL:
                 continue
-            url = _peer_url(peer, f"/list-files?realm={_REALM}&prefix=")
-            r = requests.get(url, timeout=90)
+            url = _peer_url(peer, "/list-files")
+            r = _authed_get(url, "/list-files", {"realm": _REALM, "prefix": ""}, timeout=90)
             r.raise_for_status()
             data = r.json()
             cache["last_sync"] = now
@@ -1619,8 +1687,8 @@ def refresh_peer_filecache_simplified():
                 cache = _ensure_peer_cache_entry(peer)
                 if now - cache["last_sync"] < FILECACHE_REFRESH_INTERVAL:
                     continue
-                url = _peer_url(peer, f"/list-files?realm={_REALM}&prefix=")
-                r = requests.get(url, timeout=90)
+                url = _peer_url(peer, "/list-files")
+                r = _authed_get(url, "/list-files", {"realm": _REALM, "prefix": ""}, timeout=90)
                 r.raise_for_status()
                 data = r.json()
                 cache["last_sync"] = now
