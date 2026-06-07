@@ -78,12 +78,8 @@ Completed foundation:
 
 Still open before feature work:
 
-- More two-peer VM scenarios for update, delete/tombstone, traversal, and
-  restart behavior.
-- Cleaner configuration and CLI semantics.
-- Less silent failure handling.
-- Operator-facing documentation.
-- Background sync and storage policy design after config and tests.
+- Implement tiered multi-backend storage pool (as described in agents/multi_backend_design.md).
+- Implement background sync workers and role-specific synchronization policies.
 
 ## Phase 1: Test Foundation
 
@@ -345,24 +341,16 @@ Deliverable:
 
 ## Current Priority Queue
 
-1. Add two-peer VM scenarios:
-   - update-newer-version
-   - delete-tombstone
-   - path-traversal
-   - peer-restart
-2. Tighten peer delete/tombstone semantics in `/list-dir`, `/head`, caches,
-   and notify handling.
-3. Add `tools/vm/run-two-peer-scenario.sh all`, scenario timeouts, and concise
-   failure summaries pointing at exact log files.
-4. Normalize CLI and configuration behavior, including explicit config files
-   for realm, node name, storage, mountpoint, ports, peers, autodiscovery,
-   storage role, and sync policy.
-5. Reduce silent failures in commit, delete, fsync, peer notify, and startup
-   paths where callers need reliable errors or logs.
-6. Expand documentation around operator workflow, VM testing, storage format,
-   stuck mount recovery, and known limitations.
-7. After testing and config are solid, start background synchronization and
-   storage-policy work.
+1. Implement Tiered Multi-Backend Storage Pool (as detailed in agents/multi_backend_design.md):
+   - Volume identifiers (`.ffsfs-volume.id`) and status tracking (ONLINE/OFFLINE).
+   - Write-anywhere SSD staging with HDD sync workers.
+   - Fault-tolerance for unplugged/offline drives.
+2. Implement Background Sync Workers and Storage Roles:
+   - `access_only` (cache-only on demand)
+   - `cache_limited` (bounded local cache with eviction)
+   - `shared_storage` (selective prefix replicas)
+   - `superpeer` (broad replica target)
+3. Add VM scenarios for offline disk swap and sync catch-up.
 
 ## Done Criteria for Stabilization
 
