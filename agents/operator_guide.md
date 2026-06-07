@@ -50,7 +50,7 @@ When starting the FFSFS daemon, parameters are resolved in the following priorit
 
 ### Launching FFSFS
 
-**Using a Configuration File (Recommended):**
+**Using a Configuration File:**
 ```bash
 python3 ffsfs.py --config ~/.ffsfs/myrealm.json
 ```
@@ -71,6 +71,33 @@ To check the status of the local node and its connected peers, use `ffsctl.py`:
 ```bash
 python3 ffsctl.py status --port 18765
 ```
+
+### Setup App
+
+Use the console setup app for normal create/edit flows:
+
+```bash
+./setup.sh
+./setup.sh --realm myrealm --check
+./setup.sh --realm myrealm --activate
+./setup.sh --list-devices
+```
+
+The setup app writes `realm-config.json` after each step but leaves the realm
+inactive until validation and final activation. `launch.sh` refuses inactive
+setup configs unless `--allow-inactive` is passed.
+
+The setup flow records:
+
+- host alias and admin password hash
+- expected online pattern: always, hours/day, casual/on-demand, or unknown
+- backend policy: greedy, redundancy-balanced, minimal, metadata/access-only,
+  or capped by local cache size
+- backend folders and mirror/media hints
+- bandwidth/rate limits
+- seed peers, including optional Tailscale interface discovery. Tailscale is
+  treated as another reachable interface, not a separate trust mode; duplicate
+  seed endpoints are ignored.
 
 ### Managing Peers Manually
 Realm peer lists are stored in `realm-config.json`. Use `configure.sh` for
@@ -473,6 +500,11 @@ FUSE filesystems can sometimes hang or get stuck in a "Transport endpoint is not
 
 ## 6) Known Limitations
 
+- **No Direct Public Internet Support:** Do not expose the peer HTTP API
+  directly on a public IP or router port-forward yet. The current security and
+  resource model is intended for trusted LANs, isolated test networks, and
+  private overlays. See `agents/public_internet_exposure.md` for the blocker
+  analysis.
 - **No Transport Encryption by Default:** Peer communication uses HTTP with HMAC request signing for authentication. File payloads and metadata are authenticated but not encrypted in transit. For confidentiality, configure `peer_transport=https` (requires manual cert setup) or use an encrypted overlay network like Tailscale.
 - **Simple Conflict Resolution:** Conflicts are resolved via latest-timestamp-wins. Logical locking or interactive merge flows are not yet supported.
 - **Auto-Discovery Limits:** UDP broadcast autodiscovery is designed for single-subnet LAN networks. Unknown peers are not auto-added by default; for multi-subnet or remote connections, add peers explicitly using `ffsctl.py peer <realm> add`.

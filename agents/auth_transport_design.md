@@ -16,6 +16,9 @@ approval, HTTP, and HTTPS. It is intentionally MVP-oriented.
 - HTTP remains supported for trusted LAN performance.
 - HTTPS should be supported as optional transport privacy, not as the primary
   authentication mechanism.
+- Direct public-IP exposure is not supported yet. Public Internet use needs
+  additional transport, identity, DoS, peer-scaling, and operational hardening;
+  see `public_internet_exposure.md`.
 
 ## Authentication
 
@@ -100,4 +103,3 @@ After MVP:
 - per-peer capabilities such as list/fetch/notify/replica-source
 - SSH bootstrap command
 - certificate validation or mTLS for remote exposure
-

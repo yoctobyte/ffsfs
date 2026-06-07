@@ -1,0 +1,932 @@
+#!/usr/bin/env python3
+"""
+ffssetup.py - console setup and edit app for FFSFS.
+
+The setup app edits the same realm-config.json files used by launch.sh and
+ffsctl.py. It saves after each step, but marks configs inactive until the final
+activation step succeeds.
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import hashlib
+import json
+import os
+import secrets
+import socket
+import subprocess
+import sys
+from dataclasses import dataclass
+from typing import Iterable, List, Optional
+
+from ffsctl import _load_realm_config, _realm_config_path, _save_realm_config
+from ffspeer_auth import generate_realm_secret, secret_from_passphrase
+from ffsvolumes import (
+    DEFAULT_NODE_AVAILABILITY,
+    DEFAULT_NODE_ROLE,
+    DEFAULT_NODE_STORAGE_PROFILE,
+    MEDIA_HDD,
+    MEDIA_NETWORK,
+    MEDIA_SSD,
+    ROLE_ARCHIVE,
+    ROLE_PRIMARY,
+    StoragePool,
+    Volume,
+)
+
+
+SETUP_SCHEMA_VERSION = 1
+ADMIN_HASH_ITERATIONS = 200_000
+
+ONLINE_EXPECTATIONS = {
+    "always": {
+        "label": "always online",
+        "node_availability": "always_online",
+    },
+    "hours": {
+        "label": "hours per day",
+        "node_availability": "intermittent",
+    },
+    "casual": {
+        "label": "casual/on demand",
+        "node_availability": "on_demand",
+    },
+    "unknown": {
+        "label": "do not know yet",
+        "node_availability": DEFAULT_NODE_AVAILABILITY,
+    },
+}
+
+BACKEND_POLICIES = {
+    "greedy": {
+        "label": "greedy - use available storage freely",
+        "node_role": "replica_storage",
+        "node_storage_profile": "bulk_storage",
+        "sync": {"mode": "active", "prefixes": []},
+    },
+    "balanced": {
+        "label": "redundancy balanced",
+        "node_role": "shared_storage",
+        "node_storage_profile": "limited",
+        "sync": {"mode": "active", "prefixes": []},
+    },
+    "minimal": {
+        "label": "minimal local cache",
+        "node_role": "cache_limited",
+        "node_storage_profile": "limited",
+        "sync": {"mode": "lazy", "prefixes": []},
+    },
+    "meta": {
+        "label": "only metadata/access node",
+        "node_role": "access_only",
+        "node_storage_profile": "cache_only",
+        "sync": {"mode": "lazy", "prefixes": []},
+    },
+    "capped": {
+        "label": "capped local cache",
+        "node_role": "cache_limited",
+        "node_storage_profile": "limited",
+        "sync": {"mode": "active", "prefixes": []},
+    },
+}
+
+
+def config_base() -> str:
+    return os.path.expanduser("~/.ffsfs/.storage")
+
+
+def _cfg_path(realm: str) -> str:
+    return _realm_config_path(realm)
+
+
+def _ensure_setup_state(data: dict) -> dict:
+    state = dict(data.get("setup_state") or {})
+    state.setdefault("schema_version", SETUP_SCHEMA_VERSION)
+    state.setdefault("activated", False)
+    state.setdefault("completed_steps", [])
+    data["setup_state"] = state
+    return state
+
+
+def _mark_step(data: dict, step: str) -> None:
+    state = _ensure_setup_state(data)
+    steps = list(state.get("completed_steps") or [])
+    if step not in steps:
+        steps.append(step)
+    state["completed_steps"] = steps
+
+
+def _save_inactive(realm: str, data: dict, step: Optional[str] = None) -> None:
+    state = _ensure_setup_state(data)
+    state["activated"] = False
+    if step:
+        _mark_step(data, step)
+    _save_realm_config(realm, data)
+
+
+def hash_admin_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("ascii"), ADMIN_HASH_ITERATIONS
+    ).hex()
+    return f"pbkdf2_sha256${ADMIN_HASH_ITERATIONS}${salt}${digest}"
+
+
+def generate_admin_password() -> str:
+    return secrets.token_urlsafe(18)
+
+
+def list_realms() -> List[str]:
+    base = config_base()
+    if not os.path.isdir(base):
+        return []
+    realms = []
+    for entry in sorted(os.listdir(base)):
+        if os.path.isfile(os.path.join(base, entry, "realm-config.json")):
+            realms.append(entry)
+    return realms
+
+
+def load_realm(realm: str) -> dict:
+    return _load_realm_config(realm)
+
+
+def setup_defaults(realm: str, data: Optional[dict] = None) -> dict:
+    data = dict(data or {})
+    data.setdefault("realm", realm)
+    data.setdefault("node_name", socket.gethostname())
+    data.setdefault("host_alias", data.get("node_name") or socket.gethostname())
+    data.setdefault("peer_trust", "realm_secret")
+    data.setdefault("peer_transport", "http")
+    data.setdefault("trust_unknown_peers", False)
+    data.setdefault("autodiscover", True)
+    data.setdefault("node_role", DEFAULT_NODE_ROLE)
+    data.setdefault("node_availability", DEFAULT_NODE_AVAILABILITY)
+    data.setdefault("node_storage_profile", DEFAULT_NODE_STORAGE_PROFILE)
+    data.setdefault("sync", {"mode": "lazy", "prefixes": []})
+    data.setdefault("online_expectation", "unknown")
+    data.setdefault("backend_policy", "minimal")
+    _ensure_setup_state(data)
+    return data
+
+
+def create_realm_config(
+    realm: str,
+    mountpoint: str,
+    primary_base: str,
+    passphrase: Optional[str] = None,
+    secret: Optional[str] = None,
+) -> dict:
+    if secret and passphrase:
+        raise ValueError("use either secret or passphrase, not both")
+    if secret:
+        bytes.fromhex(secret)
+        if len(secret) < 32:
+            raise ValueError("realm secret must be at least 32 hex chars")
+        realm_secret = secret
+    elif passphrase:
+        realm_secret = secret_from_passphrase(passphrase, realm)
+    else:
+        realm_secret = generate_realm_secret()
+
+    base = os.path.abspath(os.path.expanduser(primary_base))
+    mount = os.path.abspath(os.path.expanduser(mountpoint))
+    primary = Volume(path=base, role=ROLE_PRIMARY, label=f"{realm}-primary")
+    primary.init()
+    data = setup_defaults(realm)
+    data.update({
+        "realm_secret": realm_secret,
+        "mountpoint": mount,
+        "base": base,
+        "storage_pool": StoragePool(primary=primary).to_dict(),
+    })
+    _save_inactive(realm, data, "realm")
+    return data
+
+
+def add_backend(
+    realm: str,
+    path: str,
+    label: Optional[str] = None,
+    role: str = ROLE_ARCHIVE,
+    mirror: bool = False,
+    media: Optional[str] = None,
+) -> Volume:
+    data = load_realm(realm)
+    if not data:
+        raise ValueError(f"realm not configured: {realm}")
+    pool = StoragePool.from_dict(data.get("storage_pool") or StoragePool.single(data.get("base")).to_dict())
+    abs_path = os.path.abspath(os.path.expanduser(path))
+    if pool.find_by_path(abs_path):
+        raise ValueError(f"backend already registered: {abs_path}")
+    vol = Volume(
+        path=abs_path,
+        label=label or os.path.basename(abs_path) or "backend",
+        role=role,
+        mirror=mirror,
+        media=media,
+    )
+    vol.init()
+    pool.add_secondary(vol)
+    data["storage_pool"] = pool.to_dict()
+    _save_inactive(realm, data, "backends")
+    return vol
+
+
+def remove_backend(realm: str, target: str) -> Volume:
+    data = load_realm(realm)
+    if not data:
+        raise ValueError(f"realm not configured: {realm}")
+    pool = StoragePool.from_dict(data.get("storage_pool"))
+    vol = pool.find_by_id(target) or pool.find_by_label(target) or pool.find_by_path(target)
+    if not vol:
+        raise ValueError(f"backend not found: {target}")
+    if vol is pool.primary or vol.vol_id == pool.primary.vol_id:
+        raise ValueError("cannot remove primary backend")
+    pool.remove(vol.vol_id)
+    data["storage_pool"] = pool.to_dict()
+    _save_inactive(realm, data, "backends")
+    return vol
+
+
+def add_peer(realm: str, peer: str, approved: bool = False) -> None:
+    data = load_realm(realm)
+    if not data:
+        raise ValueError(f"realm not configured: {realm}")
+    key = "approved_peers" if approved else "known_peers"
+    peers = dedupe_peer_endpoints(data.get(key, []))
+    if peer not in peers:
+        peers.append(peer)
+    data[key] = peers
+    _save_inactive(realm, data, "peers")
+
+
+def remove_peer(realm: str, peer: str, approved: bool = False) -> None:
+    data = load_realm(realm)
+    if not data:
+        raise ValueError(f"realm not configured: {realm}")
+    key = "approved_peers" if approved else "known_peers"
+    peers = [p for p in dedupe_peer_endpoints(data.get(key, [])) if p != peer]
+    if peers:
+        data[key] = peers
+    else:
+        data.pop(key, None)
+    _save_inactive(realm, data, "peers")
+
+
+def set_node_identity(realm: str, node_name: str, host_alias: str, admin_password: Optional[str]) -> dict:
+    data = setup_defaults(realm, load_realm(realm))
+    data["node_name"] = node_name
+    data["host_alias"] = host_alias
+    if admin_password is None:
+        admin_password = generate_admin_password()
+        data["admin_password_generated"] = True
+    else:
+        data["admin_password_generated"] = False
+    data["admin_password_hash"] = hash_admin_password(admin_password)
+    _save_inactive(realm, data, "identity")
+    return {"generated_password": admin_password if data["admin_password_generated"] else None}
+
+
+def set_sync_preset(realm: str, preset: str) -> None:
+    data = load_realm(realm)
+    if not data:
+        raise ValueError(f"realm not configured: {realm}")
+    presets = {
+        "access": {
+            "node_role": "access_only",
+            "node_storage_profile": "cache_only",
+            "sync": {"mode": "lazy", "prefixes": []},
+        },
+        "shared": {
+            "node_role": "shared_storage",
+            "node_storage_profile": "limited",
+            "sync": {"mode": "active", "prefixes": []},
+        },
+        "replica": {
+            "node_role": "replica_storage",
+            "node_storage_profile": "bulk_storage",
+            "sync": {"mode": "active", "prefixes": []},
+        },
+    }
+    if preset not in presets:
+        raise ValueError(f"unknown sync preset: {preset}")
+    data.update(presets[preset])
+    _save_inactive(realm, data, "sync")
+
+
+def set_online_expectation(realm: str, expectation: str) -> None:
+    if expectation not in ONLINE_EXPECTATIONS:
+        raise ValueError(f"unknown online expectation: {expectation}")
+    data = setup_defaults(realm, load_realm(realm))
+    data["online_expectation"] = expectation
+    data["node_availability"] = ONLINE_EXPECTATIONS[expectation]["node_availability"]
+    _save_inactive(realm, data, "availability")
+
+
+def set_backend_policy(realm: str, policy: str, max_gb: Optional[int] = None) -> None:
+    if policy not in BACKEND_POLICIES:
+        raise ValueError(f"unknown backend policy: {policy}")
+    data = setup_defaults(realm, load_realm(realm))
+    preset = BACKEND_POLICIES[policy]
+    data["backend_policy"] = policy
+    data["node_role"] = preset["node_role"]
+    data["node_storage_profile"] = preset["node_storage_profile"]
+    data["sync"] = dict(preset["sync"])
+    if max_gb is not None:
+        data["cache_max_gb"] = int(max_gb)
+        data["sync"]["cache_max_bytes"] = int(max_gb) * 1024 * 1024 * 1024
+    elif policy != "capped":
+        data.pop("cache_max_gb", None)
+        data.get("sync", {}).pop("cache_max_bytes", None)
+    _save_inactive(realm, data, "storage_policy")
+
+
+def _parse_rate(value: str) -> int:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return 0
+    multiplier = 1
+    for suffix, factor in (("kbps", 1024), ("k", 1024), ("mbps", 1024 * 1024),
+                           ("m", 1024 * 1024), ("gbps", 1024 * 1024 * 1024),
+                           ("g", 1024 * 1024 * 1024)):
+        if raw.endswith(suffix):
+            multiplier = factor
+            raw = raw[:-len(suffix)].strip()
+            break
+    return int(float(raw) * multiplier)
+
+
+def set_bandwidth_limits(
+    realm: str,
+    net_bg: int = 0,
+    net_fg: int = 0,
+    disk_bg: int = 0,
+    disk_fg: int = 0,
+) -> None:
+    data = setup_defaults(realm, load_realm(realm))
+    data["rate_limits"] = {
+        "net_bg_bps": int(net_bg),
+        "net_fg_bps": int(net_fg),
+        "disk_bg_bps": int(disk_bg),
+        "disk_fg_bps": int(disk_fg),
+    }
+    _save_inactive(realm, data, "bandwidth")
+
+
+def discover_tailscale_peers() -> List[str]:
+    try:
+        out = subprocess.check_output(
+            ["tailscale", "status", "--json"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        data = json.loads(out)
+    except Exception:
+        return []
+    peers = []
+    for peer in (data.get("Peer") or {}).values():
+        if not isinstance(peer, dict):
+            continue
+        ips = peer.get("TailscaleIPs") or []
+        if ips:
+            peers.append(ips[0])
+    return sorted(set(peers))
+
+
+def dedupe_peer_endpoints(peers: Iterable[str]) -> List[str]:
+    out = []
+    seen = set()
+    for value in peers or []:
+        peer = str(value).strip()
+        if not peer:
+            continue
+        key = peer.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(peer)
+    return out
+
+
+def merge_peer_endpoints(existing: Iterable[str], additions: Iterable[str]) -> List[str]:
+    return dedupe_peer_endpoints(list(existing or []) + list(additions or []))
+
+
+@dataclass
+class ValidationIssue:
+    level: str
+    message: str
+
+
+def validate_realm(realm: str) -> List[ValidationIssue]:
+    data = load_realm(realm)
+    if not data:
+        return [ValidationIssue("error", f"realm config not found: {realm}")]
+    issues: List[ValidationIssue] = []
+    for key in ("realm", "realm_secret", "mountpoint", "storage_pool"):
+        if not data.get(key):
+            issues.append(ValidationIssue("error", f"missing required key: {key}"))
+    mountpoint = data.get("mountpoint")
+    if mountpoint:
+        mp = os.path.abspath(os.path.expanduser(mountpoint))
+        pool_data = data.get("storage_pool")
+        if pool_data:
+            pool = StoragePool.from_dict(pool_data)
+            for vol in pool.all_volumes:
+                try:
+                    common = os.path.commonpath([mp, vol.path])
+                    if common == mp:
+                        issues.append(ValidationIssue("error", f"backend is inside mountpoint: {vol.path}"))
+                except ValueError:
+                    pass
+    try:
+        pool = StoragePool.from_dict(data.get("storage_pool"))
+        if not pool.primary.is_online():
+            issues.append(ValidationIssue("error", f"primary backend is not online: {pool.primary.path}"))
+        for vol in pool.secondaries:
+            if not vol.is_online():
+                issues.append(ValidationIssue("warning", f"secondary backend is offline: {vol.path}"))
+    except Exception as e:
+        issues.append(ValidationIssue("error", f"invalid storage pool: {e}"))
+    if data.get("peer_trust") == "manual" and not data.get("approved_peers"):
+        issues.append(ValidationIssue("warning", "manual peer trust has no approved peers"))
+    return issues
+
+
+def activate_realm(realm: str) -> bool:
+    issues = validate_realm(realm)
+    errors = [i for i in issues if i.level == "error"]
+    if errors:
+        return False
+    data = load_realm(realm)
+    state = _ensure_setup_state(data)
+    state["activated"] = True
+    _mark_step(data, "activated")
+    _save_realm_config(realm, data)
+    return True
+
+
+def discover_devices() -> List[dict]:
+    try:
+        out = subprocess.check_output(
+            ["lsblk", "--json", "-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,TRAN,RM"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        data = json.loads(out)
+        return data.get("blockdevices", [])
+    except Exception:
+        return []
+
+
+def _flatten_mounts(devices: Iterable[dict], parent: str = "") -> List[dict]:
+    rows = []
+    for dev in devices:
+        name = f"{parent}/{dev.get('name')}" if parent else dev.get("name", "")
+        mounts = dev.get("mountpoints") or []
+        for mount in mounts:
+            if mount:
+                row = dict(dev)
+                row["device"] = name
+                row["mountpoint"] = mount
+                rows.append(row)
+        rows.extend(_flatten_mounts(dev.get("children") or [], name))
+    return rows
+
+
+def print_device_summary() -> None:
+    rows = _flatten_mounts(discover_devices())
+    if not rows:
+        print("No mounted block devices found via lsblk.")
+        return
+    print("Mounted devices:")
+    for idx, row in enumerate(rows, start=1):
+        model = row.get("model") or ""
+        tran = row.get("tran") or ""
+        print(f"  {idx}) {row['device']:<16} {row.get('size',''):<8} {tran:<8} {model} -> {row['mountpoint']}")
+
+
+def _prompt(msg: str, default: Optional[str] = None) -> str:
+    suffix = f" [{default}]" if default is not None else ""
+    value = input(f"{msg}{suffix}: ").strip()
+    return value if value else (default or "")
+
+
+def _yes_no(msg: str, default: bool = False) -> bool:
+    d = "Y/n" if default else "y/N"
+    value = input(f"{msg} [{d}]: ").strip().lower()
+    if not value:
+        return default
+    return value in ("y", "yes", "1", "true")
+
+
+def _choose_realm() -> Optional[str]:
+    realms = list_realms()
+    if realms:
+        print("Configured realms:")
+        for idx, realm in enumerate(realms, start=1):
+            data = load_realm(realm)
+            active = bool((data.get("setup_state") or {}).get("activated"))
+            print(f"  {idx}) {realm} {'active' if active else 'inactive'}")
+    realm = _prompt("Realm name")
+    return realm or None
+
+
+def wizard_create_or_edit(realm: str) -> None:
+    data = setup_defaults(realm, load_realm(realm))
+    if not data.get("realm_secret"):
+        print()
+        print("Realm setup")
+        mount = _prompt("Mountpoint", os.path.expanduser(f"~/{realm}"))
+        base = _prompt("Primary backend folder", os.path.expanduser(f"~/.{realm}/{realm}"))
+        join = _prompt("Realm passphrase/key (blank = create new secret)", "")
+        secret = None
+        passphrase = None
+        if join:
+            if all(ch in "0123456789abcdefABCDEF" for ch in join) and len(join) >= 32:
+                secret = join
+            else:
+                passphrase = join
+        data = create_realm_config(realm, mount, base, passphrase=passphrase, secret=secret)
+    else:
+        _save_inactive(realm, data)
+
+    print()
+    print("Node identity")
+    node_name = _prompt("Node name", data.get("node_name") or socket.gethostname())
+    host_alias = _prompt("Host alias", data.get("host_alias") or node_name)
+    admin_pass = getpass.getpass("Host admin password (blank = auto-generate): ")
+    generated = set_node_identity(realm, node_name, host_alias, admin_pass or None).get("generated_password")
+    if generated:
+        print(f"Generated admin password: {generated}")
+        print("Store this password now; only its hash is saved.")
+
+    print()
+    prompt_online_expectation(realm)
+
+    print()
+    prompt_backend_policy(realm)
+
+    print()
+    print_device_summary()
+    while _yes_no("Add a secondary backend?", False):
+        path = _prompt("Backend folder")
+        label = _prompt("Label", os.path.basename(path.rstrip("/")) or "backend")
+        media = _prompt("Media hint (ssd/hdd/network/blank)", "")
+        if media not in ("", MEDIA_SSD, MEDIA_HDD, MEDIA_NETWORK):
+            print("Unknown media hint; leaving blank.")
+            media = ""
+        mirror = _yes_no("Mirror committed writes to this backend?", False)
+        try:
+            vol = add_backend(realm, path, label=label, mirror=mirror, media=media or None)
+            print(f"Added backend {vol.label}: {vol.path}")
+        except Exception as e:
+            print(f"Could not add backend: {e}")
+
+    print()
+    while _yes_no("Add a seed/known peer?", False):
+        peer = _prompt("Peer host:port")
+        if peer:
+            add_peer(realm, peer, approved=False)
+
+    if _yes_no("Use manual peer approval?", False):
+        data = load_realm(realm)
+        data["peer_trust"] = "manual"
+        _save_inactive(realm, data, "peers")
+        while _yes_no("Approve a peer node name?", False):
+            peer = _prompt("Peer node name")
+            if peer:
+                add_peer(realm, peer, approved=True)
+
+    print()
+    print_realm_summary(realm)
+    issues = validate_realm(realm)
+    print_issues(issues)
+    if not any(i.level == "error" for i in issues) and _yes_no("Activate this realm?", True):
+        activate_realm(realm)
+        print("Activated.")
+    else:
+        print("Saved as inactive. Re-run setup when ready.")
+
+
+def print_issues(issues: List[ValidationIssue]) -> None:
+    if not issues:
+        print("Validation: OK")
+        return
+    print("Validation:")
+    for issue in issues:
+        print(f"  {issue.level.upper()}: {issue.message}")
+
+
+def print_realm_summary(realm: str) -> None:
+    data = load_realm(realm)
+    if not data:
+        print(f"Realm not configured: {realm}")
+        return
+    state = data.get("setup_state") or {}
+    print(f"Realm: {realm}")
+    print(f"  active: {bool(state.get('activated'))}")
+    print(f"  node: {data.get('node_name', '?')} alias={data.get('host_alias', '?')}")
+    print(f"  mountpoint: {data.get('mountpoint', '?')}")
+    print(f"  peer_trust: {data.get('peer_trust', 'realm_secret')}")
+    print(f"  trust_unknown_peers: {bool(data.get('trust_unknown_peers', False))}")
+    print(f"  known_peers: {len(data.get('known_peers') or [])}")
+    print(f"  approved_peers: {len(data.get('approved_peers') or [])}")
+    pool_data = data.get("storage_pool")
+    if pool_data:
+        pool = StoragePool.from_dict(pool_data)
+        print("  backends:")
+        for vol in pool.all_volumes:
+            role = "primary" if vol.vol_id == pool.primary.vol_id else vol.role
+            print(f"    - {role}: {vol.label} {vol.path} [{vol.status()}]")
+
+
+def prompt_identity(realm: str) -> None:
+    data = setup_defaults(realm, load_realm(realm))
+    print("Node identity")
+    node_name = _prompt("Node name", data.get("node_name") or socket.gethostname())
+    host_alias = _prompt("Host alias", data.get("host_alias") or node_name)
+    admin_pass = getpass.getpass("Host admin password (blank = auto-generate/rotate): ")
+    generated = set_node_identity(realm, node_name, host_alias, admin_pass or None).get("generated_password")
+    if generated:
+        print(f"Generated admin password: {generated}")
+        print("Store this password now; only its hash is saved.")
+
+
+def prompt_add_backend(realm: str) -> None:
+    print_device_summary()
+    path = _prompt("Backend folder")
+    if not path:
+        return
+    label = _prompt("Label", os.path.basename(path.rstrip("/")) or "backend")
+    media = _prompt("Media hint (ssd/hdd/network/blank)", "")
+    if media not in ("", MEDIA_SSD, MEDIA_HDD, MEDIA_NETWORK):
+        print("Unknown media hint; leaving blank.")
+        media = ""
+    mirror = _yes_no("Mirror committed writes to this backend?", False)
+    try:
+        vol = add_backend(realm, path, label=label, mirror=mirror, media=media or None)
+        print(f"Added backend {vol.label}: {vol.path}")
+    except Exception as e:
+        print(f"Could not add backend: {e}")
+
+
+def prompt_remove_backend(realm: str) -> None:
+    print_realm_summary(realm)
+    target = _prompt("Backend id, label, or path to remove")
+    if not target:
+        return
+    try:
+        vol = remove_backend(realm, target)
+        print(f"Removed backend {vol.label}. Files on disk were left untouched.")
+    except Exception as e:
+        print(f"Could not remove backend: {e}")
+
+
+def prompt_sync_preset(realm: str) -> None:
+    print("Sync preset")
+    print("  1) access laptop/cache")
+    print("  2) shared workstation/server")
+    print("  3) replica/archive node")
+    choice = _prompt("Preset", "1")
+    preset = {"1": "access", "2": "shared", "3": "replica"}.get(choice, "access")
+    set_sync_preset(realm, preset)
+    print(f"Set sync preset: {preset}")
+
+
+def prompt_online_expectation(realm: str) -> None:
+    print("How much is this node expected to be online?")
+    keys = list(ONLINE_EXPECTATIONS.keys())
+    for idx, key in enumerate(keys, start=1):
+        print(f"  {idx}) {ONLINE_EXPECTATIONS[key]['label']}")
+    choice = _prompt("Choice", "4")
+    try:
+        key = keys[int(choice) - 1]
+    except Exception:
+        key = "unknown"
+    set_online_expectation(realm, key)
+    print(f"Set online expectation: {ONLINE_EXPECTATIONS[key]['label']}")
+
+
+def prompt_backend_policy(realm: str) -> None:
+    print("Backend storage policy")
+    keys = list(BACKEND_POLICIES.keys())
+    for idx, key in enumerate(keys, start=1):
+        print(f"  {idx}) {BACKEND_POLICIES[key]['label']}")
+    choice = _prompt("Choice", "3")
+    try:
+        key = keys[int(choice) - 1]
+    except Exception:
+        key = "minimal"
+    max_gb = None
+    if key == "capped":
+        raw = _prompt("Maximum local cache GB", "100")
+        try:
+            max_gb = int(raw)
+        except ValueError:
+            print("Invalid number; using 100 GB.")
+            max_gb = 100
+    set_backend_policy(realm, key, max_gb=max_gb)
+    print(f"Set backend policy: {BACKEND_POLICIES[key]['label']}")
+
+
+def prompt_bandwidth(realm: str) -> None:
+    print("Bandwidth/rate limits. Blank or 0 means unlimited.")
+    net_bg = _parse_rate(_prompt("Background network bytes/sec (e.g. 5m)", "0"))
+    net_fg = _parse_rate(_prompt("Foreground network bytes/sec", "0"))
+    disk_bg = _parse_rate(_prompt("Background disk bytes/sec", "0"))
+    disk_fg = _parse_rate(_prompt("Foreground disk bytes/sec", "0"))
+    set_bandwidth_limits(realm, net_bg=net_bg, net_fg=net_fg, disk_bg=disk_bg, disk_fg=disk_fg)
+    print("Updated rate limits.")
+
+
+def prompt_tailscale_seeds(realm: str) -> None:
+    peers = discover_tailscale_peers()
+    if not peers:
+        print("No Tailscale interface peers found. Is tailscale installed and logged in?")
+        return
+    print("Tailscale interface peers:")
+    for idx, peer in enumerate(peers, start=1):
+        print(f"  {idx}) {peer}")
+    raw = _prompt("Add which peers? numbers, comma-separated, or 'all'", "all")
+    selected = peers
+    if raw.lower() != "all":
+        selected = []
+        for part in raw.split(","):
+            try:
+                selected.append(peers[int(part.strip()) - 1])
+            except Exception:
+                pass
+    data = load_realm(realm)
+    port = _prompt("FFSFS peer port for selected hosts", str(data.get("port") or "8765"))
+    for host in selected:
+        add_peer(realm, f"{host}:{port}", approved=False)
+    print(f"Added {len(selected)} interface seed host(s); duplicates are ignored.")
+
+
+def prompt_peer_action(realm: str) -> None:
+    print("Peer management")
+    print("  1) Add known peer host:port")
+    print("  2) Remove known peer host:port")
+    print("  3) Approve peer node name")
+    print("  4) Unapprove peer node name")
+    print("  5) Toggle trust_unknown_peers")
+    print("  6) Add Tailscale seed hosts")
+    choice = _prompt("Choice", "1")
+    if choice == "1":
+        peer = _prompt("Peer host:port")
+        if peer:
+            add_peer(realm, peer, approved=False)
+    elif choice == "2":
+        peer = _prompt("Peer host:port")
+        if peer:
+            remove_peer(realm, peer, approved=False)
+    elif choice == "3":
+        peer = _prompt("Peer node name")
+        if peer:
+            add_peer(realm, peer, approved=True)
+    elif choice == "4":
+        peer = _prompt("Peer node name")
+        if peer:
+            remove_peer(realm, peer, approved=True)
+    elif choice == "5":
+        data = load_realm(realm)
+        current = bool(data.get("trust_unknown_peers", False))
+        data["trust_unknown_peers"] = _yes_no("Auto-add authenticated unknown peers?", current)
+        _save_inactive(realm, data, "peers")
+    elif choice == "6":
+        prompt_tailscale_seeds(realm)
+
+
+def edit_realm_menu(realm: str) -> None:
+    if not load_realm(realm):
+        wizard_create_or_edit(realm)
+        return
+    while True:
+        print()
+        print_realm_summary(realm)
+        print()
+        print("1) Edit identity/admin password")
+        print("2) Set online expectation")
+        print("3) Set backend policy")
+        print("4) Add backend")
+        print("5) Remove backend")
+        print("6) Manage peers")
+        print("7) Set sync preset")
+        print("8) Set bandwidth/rate limits")
+        print("9) Validate")
+        print("10) Activate")
+        print("0) Back")
+        choice = _prompt("Choice", "9")
+        if choice == "1":
+            prompt_identity(realm)
+        elif choice == "2":
+            prompt_online_expectation(realm)
+        elif choice == "3":
+            prompt_backend_policy(realm)
+        elif choice == "4":
+            prompt_add_backend(realm)
+        elif choice == "5":
+            prompt_remove_backend(realm)
+        elif choice == "6":
+            prompt_peer_action(realm)
+        elif choice == "7":
+            prompt_sync_preset(realm)
+        elif choice == "8":
+            prompt_bandwidth(realm)
+        elif choice == "9":
+            print_issues(validate_realm(realm))
+        elif choice == "10":
+            print_issues(validate_realm(realm))
+            if activate_realm(realm):
+                print("Activated.")
+            else:
+                print("Not activated.")
+        elif choice == "0":
+            return
+        else:
+            print("Invalid choice")
+
+
+def interactive_main(args) -> int:
+    print("FFSFS setup")
+    print()
+    while True:
+        print("1) Create/edit realm")
+        print("2) Show realm")
+        print("3) Validate realm")
+        print("4) Activate realm")
+        print("5) List devices")
+        print("0) Exit")
+        choice = _prompt("Choice", "1")
+        if choice == "1":
+            realm = args.realm or _choose_realm()
+            if realm:
+                edit_realm_menu(realm)
+        elif choice == "2":
+            realm = args.realm or _choose_realm()
+            if realm:
+                print_realm_summary(realm)
+        elif choice == "3":
+            realm = args.realm or _choose_realm()
+            if realm:
+                print_issues(validate_realm(realm))
+        elif choice == "4":
+            realm = args.realm or _choose_realm()
+            if realm:
+                print_issues(validate_realm(realm))
+                if activate_realm(realm):
+                    print("Activated.")
+                else:
+                    print("Not activated.")
+        elif choice == "5":
+            print_device_summary()
+        elif choice == "0":
+            return 0
+        else:
+            print("Invalid choice")
+        print()
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="FFSFS console setup app")
+    parser.add_argument("--realm", help="realm to edit/check")
+    parser.add_argument("--check", action="store_true", help="validate configured realms and exit")
+    parser.add_argument("--activate", action="store_true", help="validate and activate --realm")
+    parser.add_argument("--list-devices", action="store_true", help="list mounted devices and exit")
+    args = parser.parse_args(argv)
+
+    if args.list_devices:
+        print_device_summary()
+        return 0
+    if args.check:
+        realms = [args.realm] if args.realm else list_realms()
+        if not realms:
+            print("No realms configured.")
+            return 1
+        failed = False
+        for realm in realms:
+            print_realm_summary(realm)
+            issues = validate_realm(realm)
+            print_issues(issues)
+            failed = failed or any(i.level == "error" for i in issues)
+        return 1 if failed else 0
+    if args.activate:
+        if not args.realm:
+            print("--activate requires --realm", file=sys.stderr)
+            return 2
+        print_issues(validate_realm(args.realm))
+        if activate_realm(args.realm):
+            print("Activated.")
+            return 0
+        print("Not activated.")
+        return 1
+    return interactive_main(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

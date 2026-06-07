@@ -10,6 +10,8 @@ Read these files before changing behavior:
 - `project_plan.md`: stabilization roadmap and current priority queue.
 - `auth_transport_design.md`: peer authentication, realm secret, approval, and
   HTTP/HTTPS transport decisions.
+- `public_internet_exposure.md`: unsupported public-IP boundary and hardening
+  blockers.
 - `vm_testing_plan.md`: VM-first strategy for FUSE and peer-network tests.
 - `../README.md`: user-facing install and quick-start notes.
 - `../tech_doc.md`: storage layout, peer API, discovery, and tunables.
@@ -37,6 +39,9 @@ Completed:
 - Mirror-on-write for explicit `mirror` volumes and pending catch-up retry
 - `ffsctl backend` and `ffsctl realm` subcommands
 - `launch.sh` and `configure.sh` operator scripts
+- `setup.sh` / `ffssetup.py` console setup app with inactive-until-activated
+  realm configs, online expectation, backend policy, bandwidth limits, and
+  optional Tailscale seed discovery
 - Two-peer VM scenarios (all passing)
 - Error propagation, CLI normalization, config file loading
 - Operator documentation
@@ -129,6 +134,9 @@ automatic discovery, mandatory realm-secret request signing for data exchange,
 optional manual peer approval per node, HTTP allowed for trusted LAN
 performance, and HTTPS as optional transport privacy rather than the primary
 trust mechanism. See `auth_transport_design.md`.
+
+Do not present direct public-IP exposure as supported. Public Internet use
+requires separate hardening work; see `public_internet_exposure.md`.
 
 Automated tests should use named VMs and isolated VM networks. Do not rely on
 LAN broadcast, Tailscale, or real remote sites for default test runs. Real-world

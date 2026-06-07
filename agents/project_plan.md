@@ -138,6 +138,11 @@ exchange. Manual peer approval is optional per node. HTTP remains valid for
 trusted LAN performance; HTTPS is optional transport privacy and should not
 replace HMAC realm authentication. See `agents/auth_transport_design.md`.
 
+Direct public-IP exposure is explicitly out of scope for the current LAN/overlay
+MVP. It needs separate hardening for transport security, per-node identity,
+DoS/resource controls, bounded peer sets, public endpoint operations, and
+hostile-network testing. See `agents/public_internet_exposure.md`.
+
 Automated testing should use isolated VM networks, not the workstation LAN,
 Tailscale, or real remote sites. Real-world deployments are valuable later, but
 they are cumbersome and should be configured deliberately by the user for the
@@ -489,6 +494,8 @@ Deliverable:
    - Add HMAC request signing and nonce/timestamp replay checks.
    - Add optional manual peer approval/pending peer state.
    - Add optional HTTPS transport with self-signed cert support.
+   - Keep direct public-IP exposure unsupported until the blocker list in
+     `agents/public_internet_exposure.md` is addressed.
 
 ### Completed in this cycle
 

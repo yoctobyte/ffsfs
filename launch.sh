@@ -2,7 +2,7 @@
 # launch.sh — Launch FFSFS with realm configuration
 #
 # Usage:
-#   ./launch.sh [realm] [--bg]
+#   ./launch.sh [realm] [--bg] [--allow-inactive]
 #
 # Reads realm config from ~/.ffsfs/.storage/<realm>/realm-config.json.
 # Halts with a clear error if the realm is not configured.
@@ -15,13 +15,14 @@ FFSCTL="$SCRIPT_DIR/ffsctl.py"
 CONFIG_BASE="$HOME/.ffsfs/.storage"
 
 usage() {
-    echo "Usage: $0 <realm> [--bg]"
+    echo "Usage: $0 <realm> [--bg] [--allow-inactive]"
     echo ""
     echo "Launch FFSFS using the realm's stored configuration."
-    echo "The realm must be configured first (use configure.sh)."
+    echo "The realm must be configured first (use setup.sh)."
     echo ""
     echo "Options:"
-    echo "  --bg    Run in background mode"
+    echo "  --bg              Run in background mode"
+    echo "  --allow-inactive  Launch even if setup has not been activated"
     echo ""
     echo "Examples:"
     echo "  $0 my-realm"
@@ -36,10 +37,12 @@ die() {
 
 REALM=""
 BG_FLAG=""
+ALLOW_INACTIVE=""
 
 for arg in "$@"; do
     case "$arg" in
         --bg)   BG_FLAG="--bg" ;;
+        --allow-inactive) ALLOW_INACTIVE="1" ;;
         --help|-h) usage ;;
         -*)     die "unknown option: $arg" ;;
         *)
@@ -55,7 +58,7 @@ done
 # If no realm given, try to find the only configured one
 if [ -z "$REALM" ]; then
     if [ ! -d "$CONFIG_BASE" ]; then
-        die "no realms configured. Run ./configure.sh to set up a realm."
+        die "no realms configured. Run ./setup.sh to set up a realm."
     fi
     realms=()
     for d in "$CONFIG_BASE"/*/; do
@@ -65,7 +68,7 @@ if [ -z "$REALM" ]; then
         fi
     done
     if [ ${#realms[@]} -eq 0 ]; then
-        die "no realms configured. Run ./configure.sh to set up a realm."
+        die "no realms configured. Run ./setup.sh to set up a realm."
     elif [ ${#realms[@]} -eq 1 ]; then
         REALM="${realms[0]}"
         echo "Using realm: $REALM"
@@ -83,7 +86,7 @@ CONFIG_FILE="$CONFIG_BASE/$REALM/realm-config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
     die "realm '$REALM' is not configured ($CONFIG_FILE not found)."
     echo ""
-    echo "Run: ./configure.sh init $REALM --mountpoint <path> --base <path>"
+    echo "Run: ./setup.sh --realm $REALM"
 fi
 
 # Validate required fields
@@ -99,7 +102,7 @@ v = d.get('$key')
 print(v if v else '')
 " 2>/dev/null)"
     if [ -z "$val" ]; then
-        die "$label not configured for realm '$REALM'. Run: ./configure.sh"
+        die "$label not configured for realm '$REALM'. Run: ./setup.sh --realm $REALM"
     fi
     echo "$val"
 }
@@ -123,7 +126,19 @@ print('yes' if v else '')
 " 2>/dev/null)"
 
 if [ -z "$HAS_POOL" ] && [ -z "$HAS_BASE" ]; then
-    die "no storage configured for realm '$REALM'. Run: ./configure.sh"
+    die "no storage configured for realm '$REALM'. Run: ./setup.sh --realm $REALM"
+fi
+
+IS_ACTIVE="$(python3 -c "
+import json
+with open('$CONFIG_FILE') as f:
+    d = json.load(f)
+state = d.get('setup_state') or {}
+print('yes' if state.get('activated') or not state else '')
+" 2>/dev/null)"
+
+if [ -z "$IS_ACTIVE" ] && [ -z "$ALLOW_INACTIVE" ]; then
+    die "realm '$REALM' has not been activated by setup. Run: ./setup.sh --realm $REALM --activate (or pass --allow-inactive)."
 fi
 
 # Ensure mountpoint directory exists

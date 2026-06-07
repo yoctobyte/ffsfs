@@ -77,12 +77,12 @@ python3 ffsfs.py --base /tmp/ffsfs-storage --realm myrealm /tmp/ffsfs-mount
 The mountpoint must be an empty directory. Keep the storage directory outside
 the mountpoint.
 
-### Option 2: Configure Then Launch
+### Option 2: Setup Then Launch
 
 This is the recommended operator flow for repeatable realms:
 
 ```bash
-./configure.sh init myrealm --mountpoint ~/myrealm --base ~/.myrealm
+./setup.sh
 ./launch.sh myrealm
 ```
 
@@ -95,14 +95,18 @@ Run in the background:
 If exactly one realm is configured, `./launch.sh` can be run without a realm
 argument. With multiple configured realms, pass the realm explicitly.
 
-Useful configuration commands:
+Useful setup commands:
 
 ```bash
-./configure.sh show myrealm
-./configure.sh list
-./configure.sh set-node-name myrealm laptop-a
-./configure.sh set-port myrealm 18765
+./setup.sh --realm myrealm --check
+./setup.sh --realm myrealm --activate
+./setup.sh --list-devices
 ```
+
+The setup app asks for node online expectations, storage/backend policy,
+optional bandwidth limits, and seed peers. It can also list mounted devices and
+import Tailscale interface addresses as ordinary seed hosts when the
+`tailscale` CLI is available.
 
 The config file lives at:
 
@@ -126,7 +130,7 @@ python3 ffsctl.py backend add myrealm /media/backup-a/ffsfs \
   --media hdd
 ```
 
-Equivalent wrapper command:
+Equivalent helper command:
 
 ```bash
 ./configure.sh add-backend myrealm /media/backup-a/ffsfs \
@@ -200,6 +204,11 @@ Unknown peers are not auto-added by default. For loose LAN testing only:
 
 Peer networking is still prototype-grade and intended for trusted LAN or
 private overlay networks.
+
+Do not expose the peer HTTP API directly on a public IP or router port-forward
+yet. Public Internet support needs additional transport, identity, DoS, and
+peer-scaling hardening; see
+[agents/public_internet_exposure.md](agents/public_internet_exposure.md).
 
 ## Unmounting
 
