@@ -168,7 +168,7 @@ class SyncWorker:
             self._stop.wait(self.policy.interval_secs)
 
     def run_active_once(self) -> dict:
-        """One pass of active prefetch. Returns {fetched, considered}."""
+        """One pass of active prefetch + tombstone propagation."""
         if self.policy.mode != SYNC_MODE_ACTIVE:
             return {"fetched": 0, "considered": 0}
         peers = self.peers
@@ -178,21 +178,29 @@ class SyncWorker:
         fetched = 0
         skipped_backoff = 0
         failed = 0
+        tombstones_written = 0
         remote_best = {}
+        remote_tombstones = {}
+
         for peer_id, peer_data in list(cache.items()):
             files = (peer_data or {}).get("files") or {}
             for vpath, versions in files.items():
                 if not self.policy.wants(vpath):
                     continue
                 newest_name, newest_ts = self._newest_non_delete(versions)
-                if newest_name is None:
-                    continue
-                cur = remote_best.get(vpath)
-                if cur is None or newest_ts > cur[0]:
-                    remote_best[vpath] = (newest_ts, newest_name)
+                any_name, any_ts = self._newest_any(versions)
+                if newest_name is not None and newest_ts >= any_ts:
+                    cur = remote_best.get(vpath)
+                    if cur is None or newest_ts > cur[0]:
+                        remote_best[vpath] = (newest_ts, newest_name)
+                elif any_name is not None:
+                    cur = remote_tombstones.get(vpath)
+                    if cur is None or any_ts > cur[0]:
+                        remote_tombstones[vpath] = (any_ts, any_name)
 
-        considered = len(remote_best)
+        considered = len(remote_best) + len(remote_tombstones)
         now = time.time()
+
         for vpath, (newest_ts, _newest_name) in remote_best.items():
             if self._is_backing_off(vpath, now):
                 skipped_backoff += 1
@@ -219,8 +227,22 @@ class SyncWorker:
                 failed += 1
                 self._record_failure(vpath, str(e))
                 print(f"[ffsfs] sync fetch failed for {vpath}: {e}")
+
+        for vpath, (tomb_ts, _tomb_name) in remote_tombstones.items():
+            local_ts = self._local_latest_ts(vpath)
+            if local_ts is not None and local_ts >= tomb_ts:
+                continue
+            if local_ts is None:
+                continue
+            try:
+                self.backend.commit_delete(vpath)
+                tombstones_written += 1
+            except Exception as e:
+                print(f"[ffsfs] sync tombstone write failed for {vpath}: {e}")
+
         return {"fetched": fetched, "considered": considered,
-                "failed": failed, "skipped_backoff": skipped_backoff}
+                "failed": failed, "skipped_backoff": skipped_backoff,
+                "tombstones_written": tombstones_written}
 
     def _record_failure(self, vpath: str, error: str) -> None:
         now = time.time()
@@ -268,6 +290,21 @@ class SyncWorker:
             if not parsed:
                 continue
             if is_hidden_mode(parsed.get("mode")):
+                continue
+            ts = int(parsed.get("timestamp", 0))
+            if ts > best_ts:
+                best_ts = ts
+                best_name = name
+        return best_name, best_ts
+
+    @staticmethod
+    def _newest_any(versions) -> tuple:
+        best_name = None
+        best_ts = -1
+        for entry in versions or []:
+            name = entry.get("name") if isinstance(entry, dict) else str(entry)
+            parsed = parse_versioned_filename(name)
+            if not parsed:
                 continue
             ts = int(parsed.get("timestamp", 0))
             if ts > best_ts:

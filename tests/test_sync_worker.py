@@ -115,7 +115,7 @@ def test_active_pull_considers_best_version_across_peers(tmp_path, monkeypatch):
     policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
     worker = SyncWorker(backend, peers, policy, None)
     result = worker.run_active_once()
-    assert result == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0}
+    assert result == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0, "tombstones_written": 0}
     assert peers.fetch_calls == [("doc.txt", 150, True)]
 
 
@@ -165,7 +165,7 @@ def test_active_pull_failed_path_does_not_block_other_files(tmp_path, monkeypatc
 
     result = worker.run_active_once()
 
-    assert result == {"fetched": 1, "considered": 2, "failed": 1, "skipped_backoff": 0}
+    assert result == {"fetched": 1, "considered": 2, "failed": 1, "skipped_backoff": 0, "tombstones_written": 0}
     assert [c[0] for c in peers.fetch_calls] == ["big.bin", "ok.txt"]
     status = worker.status()
     assert "big.bin" in status["failed_paths"]
@@ -189,7 +189,7 @@ def test_active_pull_backoff_skips_only_failed_path(tmp_path, monkeypatch):
     peers.fetch_calls.clear()
 
     second = worker.run_active_once()
-    assert second == {"fetched": 1, "considered": 2, "failed": 0, "skipped_backoff": 1}
+    assert second == {"fetched": 1, "considered": 2, "failed": 0, "skipped_backoff": 1, "tombstones_written": 0}
     assert [c[0] for c in peers.fetch_calls] == ["ok.txt"]
 
 
@@ -211,8 +211,91 @@ def test_active_pull_success_clears_previous_failure(tmp_path, monkeypatch):
     worker._failures["big.bin"]["next_retry"] = 0
     peers.fail_vpaths.clear()
     second = worker.run_active_once()
-    assert second == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0}
+    assert second == {"fetched": 1, "considered": 1, "failed": 0, "skipped_backoff": 0, "tombstones_written": 0}
     assert worker.status()["failed_paths"] == {}
+
+
+@pytest.mark.unit
+def test_active_pull_propagates_remote_tombstone(tmp_path, monkeypatch):
+    """When the only remote version is a tombstone newer than local, write a local delete."""
+    backend, _ = _make_backend(tmp_path)
+    _commit(backend, "file.txt", b"content", 100, monkeypatch)
+
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {"file.txt": [{"name": "file.txt.AAAAAAAA.delete.0.200", "size": 0, "mtime": 200}]}},
+    })
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
+    worker = SyncWorker(backend, peers, policy, None)
+
+    result = worker.run_active_once()
+    assert result["tombstones_written"] == 1
+    assert result["fetched"] == 0
+
+    from ffsutils import parse_versioned_filename, is_hidden_mode
+    latest = backend.pick_latest("file.txt")
+    assert latest is not None
+    parsed = parse_versioned_filename(os.path.basename(latest))
+    assert parsed["mode"] == "delete"
+
+
+@pytest.mark.unit
+def test_active_pull_skips_tombstone_when_local_is_newer(tmp_path, monkeypatch):
+    """Remote tombstone older than local write should not overwrite."""
+    backend, _ = _make_backend(tmp_path)
+    _commit(backend, "file.txt", b"content", 300, monkeypatch)
+
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {"file.txt": [{"name": "file.txt.AAAAAAAA.delete.0.200", "size": 0, "mtime": 200}]}},
+    })
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
+    worker = SyncWorker(backend, peers, policy, None)
+
+    result = worker.run_active_once()
+    assert result["tombstones_written"] == 0
+
+    from ffsutils import parse_versioned_filename
+    latest = backend.pick_latest("file.txt")
+    parsed = parse_versioned_filename(os.path.basename(latest))
+    assert parsed["mode"] == "write"
+
+
+@pytest.mark.unit
+def test_active_pull_skips_tombstone_for_unknown_file(tmp_path, monkeypatch):
+    """Remote tombstone for a file we never had locally should be ignored."""
+    backend, _ = _make_backend(tmp_path)
+
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {"never_had.txt": [{"name": "never_had.txt.AAAAAAAA.delete.0.200", "size": 0, "mtime": 200}]}},
+    })
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
+    worker = SyncWorker(backend, peers, policy, None)
+
+    result = worker.run_active_once()
+    assert result["tombstones_written"] == 0
+
+
+@pytest.mark.unit
+def test_active_pull_tombstone_wins_over_older_write(tmp_path, monkeypatch):
+    """When peer has write@100 and delete@200, tombstone should propagate."""
+    backend, _ = _make_backend(tmp_path)
+    _commit(backend, "file.txt", b"data", 50, monkeypatch)
+
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {"file.txt": [
+            {"name": "file.txt.AAAAAAAA.write.0.100", "size": 4, "mtime": 100},
+            {"name": "file.txt.AAAAAAAA.delete.0.200", "size": 0, "mtime": 200},
+        ]}},
+    })
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
+    worker = SyncWorker(backend, peers, policy, None)
+
+    result = worker.run_active_once()
+    assert result["tombstones_written"] == 1
+
+    from ffsutils import parse_versioned_filename
+    latest = backend.pick_latest("file.txt")
+    parsed = parse_versioned_filename(os.path.basename(latest))
+    assert parsed["mode"] == "delete"
 
 
 # ---- eviction ----

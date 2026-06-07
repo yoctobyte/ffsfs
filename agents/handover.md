@@ -4,6 +4,44 @@ This document serves as the developer handover details for the next agent workin
 
 ---
 
+## 0.8. Follow-up: Tombstone Propagation in Sync
+
+Previously, the sync worker only pulled newer non-delete versions. Remote
+tombstones were received into the peer cache but never written locally,
+causing deleted files to "resurrect" when a peer reconnected.
+
+### Fix
+
+- `SyncWorker.run_active_once()` now has a two-phase approach:
+  1. Fetch newer non-delete versions (as before).
+  2. Propagate tombstones: for each vpath where the absolute newest remote
+     version is a tombstone newer than the local latest, write a local
+     `commit_delete()`.
+- Added `_newest_any()` static method that finds the newest version
+  regardless of mode (counterpart to `_newest_non_delete()`).
+- The tombstone-wins logic correctly handles the case where a peer has both
+  `write@100` and `delete@200` — the tombstone wins over the older write.
+- Tombstones are only propagated for files that exist locally
+  (`local_ts is not None`). Remote deletions of files we never had are
+  silently ignored.
+
+### Safety guarantees
+
+- A local write newer than a remote tombstone is NOT overwritten (last-write-
+  wins by timestamp).
+- A tombstone for a file we never had is not written (avoids polluting
+  storage with stale tombstones for files the node never synced).
+- `run_active_once()` now returns `tombstones_written` in its result dict.
+
+### Test coverage (176 tests pass)
+
+- `test_active_pull_propagates_remote_tombstone`
+- `test_active_pull_skips_tombstone_when_local_is_newer`
+- `test_active_pull_skips_tombstone_for_unknown_file`
+- `test_active_pull_tombstone_wins_over_older_write`
+
+---
+
 ## 0.7. Follow-up: True Move/Rename (No Byte Duplication)
 
 Replaced the previous "copy bytes + tombstone source" rename with a
