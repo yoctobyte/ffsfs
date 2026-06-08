@@ -109,6 +109,21 @@ Web configuration UI direction (next UI milestone):
 - Keep it a single-file embedded UI (no JS framework, no build step). Use the
   same minimal inline HTML+CSS pattern as the existing `/status` page.
 
+Web UI status (DONE 2026-06-08):
+
+- `/dashboard` read-only overview: peers, sync status (failed paths, conflicts,
+  policy), storage volumes with cached liveness (ONLINE/OFFLINE/STALLED) and
+  guarded capacity, plus realm/auth/notify-scope metadata. Renders without ever
+  blocking on a stalled volume.
+- `/dashboard/config`: applies peer-add live in-process; emits copy-paste
+  `ffsctl`/`configure.sh` commands (realm pre-filled) for backend/role/sync/
+  ratelimit/realm changes it does not mutate directly.
+- Access: HMAC-exempt (a browser cannot sign) and gated to loopback. Remote
+  session-password access is the documented follow-up — not yet implemented.
+- Open follow-ups: remote session-password auth; richer in-process safe
+  mutations; backend-as-resource vs realm-as-logical model with
+  detect->suggest->confirm reuse (see below).
+
 NAS deployment strategy (Synology, QNAP, etc.):
 
 - Running FFSFS directly on a NAS appliance is not a near-term goal. DSM/QTS

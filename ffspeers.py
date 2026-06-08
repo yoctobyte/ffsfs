@@ -23,6 +23,7 @@ import hashlib
 from ffsratelimit import RateLimits
 
 import unicodedata
+import html as _esc
 from urllib.parse import quote
 
 
@@ -532,9 +533,25 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 _AUTH_EXEMPT_PATHS = {"/healthz"}
+# Human-facing UI pages. A browser cannot produce an HMAC request signature, so
+# these are exempt from the peer-API HMAC check and instead gated to localhost.
+# Remote access (session password per agents/project_plan.md) is a TODO; until
+# then the dashboard is reachable only from loopback (or via an SSH tunnel).
+_UI_PATHS = {"/dashboard", "/dashboard/config"}
+
+
+def _is_loopback_request() -> bool:
+    addr = _normalize_remote_addr(request.remote_addr or "")
+    return addr in ("127.0.0.1", "::1", "localhost") or addr.startswith("127.")
+
 
 @app.before_request
 def _check_auth():
+    if request.path in _UI_PATHS:
+        if not _is_loopback_request():
+            return jsonify({"error": "dashboard is localhost-only; remote "
+                            "access needs session auth (not yet implemented)"}), 403
+        return None
     if _request_verifier is None:
         return None
     if request.path in _AUTH_EXEMPT_PATHS:
@@ -1460,6 +1477,269 @@ def sync_status():
         return jsonify(_sync_worker.status())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ----------------------------- Dashboard -----------------------------------
+# Two human-facing pages on the existing peer server:
+#   /dashboard         read-only observability (peers, sync, volumes, config)
+#   /dashboard/config  configuration helper: safe in-process peer actions plus
+#                      copy-paste ffsctl/configure.sh commands for everything
+#                      it does not mutate directly.
+# Both are localhost-gated (see _UI_PATHS / _check_auth). No JS, no build step,
+# same inline HTML+CSS pattern as /status.
+
+_DASHBOARD_CSS = """
+  body { font-family: system-ui, sans-serif; margin: 2rem; color:#222; }
+  h1 { margin-bottom:.25rem; } h2 { margin-top:2rem; }
+  .meta { color:#555; margin-bottom:1rem; }
+  table { border-collapse: collapse; width:100%; max-width:920px; margin:.5rem 0; }
+  td, th { border:1px solid #ddd; padding:.4rem .6rem; font-size:.95rem; }
+  th { text-align:left; background:#f7f7f7; }
+  nav a { margin-right:1rem; }
+  code, pre { background:#f4f4f4; }
+  pre { padding:.6rem .8rem; overflow-x:auto; border:1px solid #e3e3e3; }
+  .ok { color:#157f3b; } .warn { color:#b36b00; } .bad { color:#b00020; }
+  .pill { display:inline-block; padding:.05rem .45rem; border-radius:.7rem;
+          font-size:.8rem; background:#eee; }
+"""
+
+
+def _fmt_bytes(n) -> str:
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "—"
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if abs(n) < 1024.0:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} EiB"
+
+
+def _guarded_value(fn, timeout: float = 2.0, default=None):
+    """Run fn() with a timeout so a hung/stalled device cannot freeze a page
+    render. Returns default on timeout or error."""
+    box = {}
+
+    def run():
+        try:
+            box["v"] = fn()
+        except Exception:
+            box["v"] = default
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return default
+    return box.get("v", default)
+
+
+def _status_class(status: str) -> str:
+    return {"ONLINE": "ok", "STALLED": "bad", "OFFLINE": "warn"}.get(status, "")
+
+
+def _collect_volumes():
+    pool = getattr(_local_backend, "pool", None)
+    if pool is None:
+        return []
+    out = []
+    for vol in pool.all_volumes:
+        status = vol.liveness()  # cached, non-blocking
+        cap = None
+        if status == "ONLINE":
+            def _cap(p=vol.path):
+                st = os.statvfs(p)
+                return (st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize)
+            cap = _guarded_value(_cap, timeout=2.0)
+        out.append({
+            "label": vol.label,
+            "role": vol.role,
+            "media": vol.media or "—",
+            "mirror": bool(getattr(vol, "mirror", False)),
+            "path": vol.path,
+            "status": status,
+            "capacity": cap,
+        })
+    return out
+
+
+def _collect_peers():
+    now = time.time()
+    rows = []
+    for peer in _known_peers:
+        last = _last_seen.get(peer, 0)
+        rows.append({
+            "peer": peer,
+            "last": (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last))
+                     if last else "—"),
+            "active": bool(last and (now - last) < LIVENESS_INTERVAL * 2),
+        })
+    return rows
+
+
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    e = _esc.escape
+    peers = _collect_peers()
+    volumes = _collect_volumes()
+    sync = None
+    if _sync_worker is not None:
+        try:
+            sync = _sync_worker.status()
+        except Exception as exc:
+            sync = {"error": str(exc)}
+
+    peer_rows = "\n".join(
+        f"<tr><td>{e(p['peer'])}</td><td>{p['last']}</td>"
+        f"<td class='{'ok' if p['active'] else 'warn'}'>"
+        f"{'active' if p['active'] else 'stale'}</td></tr>"
+        for p in peers
+    ) or "<tr><td colspan='3'><em>No peers known.</em></td></tr>"
+
+    vol_rows = []
+    for v in volumes:
+        if v["capacity"]:
+            total, free = v["capacity"]
+            cap = f"{_fmt_bytes(free)} free / {_fmt_bytes(total)}"
+        else:
+            cap = "—"
+        vol_rows.append(
+            f"<tr><td>{e(v['label'])}</td><td>{e(v['role'])}</td>"
+            f"<td>{e(v['media'])}</td><td>{'yes' if v['mirror'] else 'no'}</td>"
+            f"<td class='{_status_class(v['status'])}'>{v['status']}</td>"
+            f"<td>{cap}</td><td><code>{e(v['path'])}</code></td></tr>"
+        )
+    vol_html = "\n".join(vol_rows) or \
+        "<tr><td colspan='7'><em>No volumes (single-store mode).</em></td></tr>"
+
+    if sync is None:
+        sync_html = "<p><em>Sync worker not registered.</em></p>"
+    elif "error" in sync:
+        sync_html = f"<p class='bad'>sync status error: {e(str(sync['error']))}</p>"
+    else:
+        failed = sync.get("failed_paths") or {}
+        conflicts = sync.get("conflicts") or {}
+        pol = sync.get("policy") or {}
+        f_rows = "\n".join(
+            f"<tr><td>{e(vp)}</td><td>{e(str(d.get('attempts','?')))}</td>"
+            f"<td>{e(str(d.get('last_error','')))}</td></tr>"
+            for vp, d in failed.items()
+        ) or "<tr><td colspan='3'><em>none</em></td></tr>"
+        c_rows = "\n".join(
+            f"<tr><td>{e(vp)}</td><td>{e(str(d.get('local_hash','')))}</td>"
+            f"<td>{e(str(d.get('remote_hash','')))}</td></tr>"
+            for vp, d in conflicts.items()
+        ) or "<tr><td colspan='3'><em>none</em></td></tr>"
+        sync_html = f"""
+<p>policy mode: <span class="pill">{e(str(pol.get('mode','?')))}</span>
+   active-pull: {'running' if sync.get('active_pull_running') else 'stopped'} ·
+   eviction: {'running' if sync.get('eviction_running') else 'stopped'}</p>
+<h3>Failed syncs ({len(failed)})</h3>
+<table><thead><tr><th>Path</th><th>Attempts</th><th>Last error</th></tr></thead>
+<tbody>{f_rows}</tbody></table>
+<h3>Conflicts ({len(conflicts)})</h3>
+<table><thead><tr><th>Path</th><th>Local hash</th><th>Remote hash</th></tr></thead>
+<tbody>{c_rows}</tbody></table>"""
+
+    auth_on = _request_verifier is not None
+    html = f"""<!doctype html>
+<meta charset="utf-8"><title>FFSFS Dashboard</title>
+<style>{_DASHBOARD_CSS}</style>
+<h1>FFSFS Dashboard</h1>
+<nav><a href="/dashboard">Overview</a><a href="/dashboard/config">Configuration</a>
+     <a href="/status?html=1">Legacy status</a></nav>
+<div class="meta">
+  <strong>{e(_get_node_name())}</strong> · realm <strong>{e(str(_REALM))}</strong>
+  · port {e(str(_actual_flask_port))}
+  · HMAC auth {'<span class="ok">on</span>' if auth_on else '<span class="warn">off</span>'}
+  · unknown peers {'trusted' if TRUST_UNKNOWN_PEER else 'not trusted'}
+  · notify scope {e(NOTIFY_SCOPE)}
+</div>
+
+<h2>Peers</h2>
+<table><thead><tr><th>Peer</th><th>Last seen</th><th>State</th></tr></thead>
+<tbody>{peer_rows}</tbody></table>
+
+<h2>Volumes</h2>
+<table><thead><tr><th>Label</th><th>Role</th><th>Media</th><th>Mirror</th>
+<th>Status</th><th>Capacity</th><th>Path</th></tr></thead>
+<tbody>{vol_html}</tbody></table>
+
+<h2>Sync</h2>
+{sync_html}
+"""
+    return make_response(html, 200)
+
+
+@app.route("/dashboard/config", methods=["GET", "POST"])
+def dashboard_config():
+    e = _esc.escape
+    realm = _REALM or "<realm>"
+    msg = ""
+    # The only mutation done in-process is peer add (already supported live).
+    # Everything else is emitted as a copy-paste CLI command, since it edits the
+    # realm config on disk and generally wants a service restart to take effect.
+    if request.method == "POST" and request.form.get("action") == "add_peer":
+        peer = (request.form.get("peer") or "").strip()
+        if not peer:
+            msg = "<p class='bad'>Peer field is required.</p>"
+        else:
+            try:
+                add(peer)
+                save_config()
+                msg = f"<p class='ok'>Added peer: {e(peer)}</p>"
+            except Exception as exc:
+                msg = f"<p class='bad'>Error: {e(str(exc))}</p>"
+
+    r = e(str(realm))
+    commands = [
+        ("Add a storage backend",
+         f"python3 ffsctl.py backend add {r} /path/to/disk --id LABEL --role archive --mirror --media hdd"),
+        ("Remove a backend (config only, keeps files)",
+         f"python3 ffsctl.py backend remove {r} LABEL"),
+        ("List backends",
+         f"python3 ffsctl.py backend list {r}"),
+        ("Add / remove a peer",
+         f"./configure.sh add-peer {r} HOST\n./configure.sh remove-peer {r} HOST"),
+        ("Approve a peer (manual-approval mode)",
+         f"./configure.sh approve-peer {r} NODE"),
+        ("Set node role",
+         f"python3 ffsctl.py role {r} set replica_storage"),
+        ("Set sync policy",
+         f"python3 ffsctl.py sync {r} set --mode active --prefixes /docs,/photos"),
+        ("Set rate limits",
+         f"python3 ffsctl.py ratelimit {r} set --net-bg 10MB --disk-bg 50MB"),
+        ("Show realm config",
+         f"python3 ffsctl.py realm show {r}"),
+    ]
+    cmd_html = "\n".join(
+        f"<h3>{e(title)}</h3><pre>{e(cmd)}</pre>" for title, cmd in commands
+    )
+
+    html = f"""<!doctype html>
+<meta charset="utf-8"><title>FFSFS Configuration</title>
+<style>{_DASHBOARD_CSS}</style>
+<h1>FFSFS Configuration</h1>
+<nav><a href="/dashboard">Overview</a><a href="/dashboard/config">Configuration</a></nav>
+<p class="meta">realm <strong>{r}</strong>. Live changes here are limited to peer
+   add; other changes edit the on-disk realm config — copy the command, run it,
+   then restart the service so it takes effect.</p>
+{msg}
+
+<h2>Add a peer (applied live)</h2>
+<form method="post">
+  <input type="hidden" name="action" value="add_peer">
+  <input type="text" name="peer" placeholder="192.168.1.23:8765" required
+         style="padding:.35rem .5rem;min-width:18rem">
+  <button type="submit" style="padding:.4rem .75rem">Add peer</button>
+</form>
+
+<h2>Configuration commands</h2>
+<p class="meta">Replace placeholders (LABEL, HOST, paths) before running.</p>
+{cmd_html}
+"""
+    return make_response(html, 200)
 
 
 @app.route("/notify", methods=["POST"])
