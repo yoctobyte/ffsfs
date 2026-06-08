@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from typing import List, Optional, Dict
@@ -19,6 +20,44 @@ VOLUME_ID_FILE = ".ffsfs-volume.id"
 
 STATUS_ONLINE = "ONLINE"
 STATUS_OFFLINE = "OFFLINE"
+# A volume whose liveness probe did not return within the timeout. Any media
+# (SD, USB, external/internal disk, network share) can hang in uninterruptible
+# I/O; STALLED means "do not route here" without ever blocking the caller.
+STATUS_STALLED = "STALLED"
+
+# Liveness tunables (env-overridable). The probe is tiny (stat + small read),
+# so a multi-second timeout tolerates genuinely slow devices/links while still
+# catching a true hang. TTL keeps hot-path callers from probing; the mounted
+# service refreshes the cache on a shorter interval so the hot path is always
+# fresh and never blocks. Stall backoff stops us from spawning a new probe
+# thread into a black hole on every check.
+LIVENESS_PROBE_TIMEOUT = float(os.environ.get("FFSFS_VOL_PROBE_TIMEOUT", "5.0"))
+LIVENESS_TTL = float(os.environ.get("FFSFS_VOL_LIVENESS_TTL", "15.0"))
+LIVENESS_STALL_BACKOFF = float(os.environ.get("FFSFS_VOL_STALL_BACKOFF", "30.0"))
+
+
+def _probe_with_timeout(fn, timeout: float):
+    """Run fn() in a daemon thread; give up after timeout.
+
+    Returns (result_bool, timed_out_bool). On timeout the worker thread is
+    abandoned — it may stay stuck in uninterruptible I/O on a dead device, but
+    it is a daemon so it never blocks process exit, and stall backoff bounds how
+    often we spawn one.
+    """
+    box = {}
+
+    def run():
+        try:
+            box["ok"] = bool(fn())
+        except Exception:
+            box["ok"] = False
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return False, True
+    return box.get("ok", False), False
 
 ROLE_PRIMARY = "primary"
 ROLE_ARCHIVE = "archive"
@@ -85,6 +124,12 @@ class Volume:
         self.max_bytes = max_bytes
         self.max_file_size = max_file_size
         self.reserve_bytes = reserve_bytes
+        # liveness cache (non-blocking hot-path reads; monitor keeps it fresh)
+        self._live_lock = threading.Lock()
+        self._live_status: Optional[str] = None
+        self._live_checked = 0.0
+        self._stall_until = 0.0
+        self._probing = False
 
     def used_bytes(self) -> int:
         total = 0
@@ -123,7 +168,9 @@ class Volume:
     def id_file_path(self) -> str:
         return os.path.join(self.path, VOLUME_ID_FILE)
 
-    def is_online(self) -> bool:
+    def _raw_is_online(self) -> bool:
+        """Authoritative liveness probe. May block on a hung device — only ever
+        call this through a timeout guard (see liveness())."""
         try:
             if not os.path.isdir(self.path):
                 return False
@@ -135,8 +182,46 @@ class Volume:
         except Exception:
             return False
 
+    def liveness(self, ttl: float = LIVENESS_TTL,
+                 timeout: float = LIVENESS_PROBE_TIMEOUT) -> str:
+        """Return ONLINE / OFFLINE / STALLED without ever blocking longer than
+        `timeout`. Serves a cached result when fresh; otherwise runs a single
+        timeout-guarded probe. A hung device yields STALLED, not a hang."""
+        now = time.time()
+        with self._live_lock:
+            if self._live_status is not None and (now - self._live_checked) < ttl:
+                return self._live_status
+            if self._live_status == STATUS_STALLED and now < self._stall_until:
+                return STATUS_STALLED
+            if self._probing:
+                # another caller is probing; don't pile on — use last known.
+                return self._live_status or STATUS_OFFLINE
+            self._probing = True
+        try:
+            ok, timed_out = _probe_with_timeout(self._raw_is_online, timeout)
+            with self._live_lock:
+                if timed_out:
+                    self._live_status = STATUS_STALLED
+                    self._stall_until = time.time() + LIVENESS_STALL_BACKOFF
+                else:
+                    self._live_status = STATUS_ONLINE if ok else STATUS_OFFLINE
+                self._live_checked = time.time()
+                return self._live_status
+        finally:
+            with self._live_lock:
+                self._probing = False
+
+    def refresh_liveness(self, timeout: float = LIVENESS_PROBE_TIMEOUT) -> str:
+        """Force a fresh probe (used by the background monitor). Stall backoff
+        is still honored so we never hammer a dead device."""
+        return self.liveness(ttl=0.0, timeout=timeout)
+
+    def is_online(self, ttl: float = LIVENESS_TTL,
+                  timeout: float = LIVENESS_PROBE_TIMEOUT) -> bool:
+        return self.liveness(ttl=ttl, timeout=timeout) == STATUS_ONLINE
+
     def status(self) -> str:
-        return STATUS_ONLINE if self.is_online() else STATUS_OFFLINE
+        return self.liveness()
 
     def init(self) -> None:
         """Write the volume ID file and create the data directory."""
@@ -231,6 +316,13 @@ class StoragePool:
     @property
     def all_volumes(self) -> List[Volume]:
         return [self.primary] + self.secondaries
+
+    def refresh_liveness(self, timeout: float = LIVENESS_PROBE_TIMEOUT) -> None:
+        """Probe every volume so the cached liveness stays fresh for the
+        non-blocking hot path. Each probe is independently timeout-guarded, so a
+        single hung volume cannot stall the refresh of the others."""
+        for v in self.all_volumes:
+            v.refresh_liveness(timeout)
 
     def online_volumes(self) -> List[Volume]:
         return [v for v in self.all_volumes if v.is_online()]

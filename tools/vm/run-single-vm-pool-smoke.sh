@@ -57,6 +57,7 @@ print(f"read OK: {latest}")
 
 # Mark secondary offline
 os.remove(os.path.join(secondary_path, ".ffsfs-volume.id"))
+vol2.refresh_liveness()  # liveness is cached; force a re-probe (the monitor does this in the mounted service)
 assert not vol2.is_online(), "secondary should be offline"
 assert vol2.status() == STATUS_OFFLINE
 print("offline detection OK")
@@ -76,6 +77,7 @@ print("write-while-offline OK")
 
 # Reconnect secondary
 vol2.init()
+vol2.refresh_liveness()  # force re-probe of the reconnected volume
 assert vol2.is_online(), "secondary should be online again"
 sync_result = backend.sync_pending_replication()
 assert sync_result["pending"] == 0, sync_result

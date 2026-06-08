@@ -27,10 +27,12 @@ def test_volume_init_creates_id_file(tmp_path):
 def test_volume_online_offline(tmp_path):
     vol_path = tmp_path / "backend"
     vol = Volume(str(vol_path))
-    assert vol.status() == STATUS_OFFLINE
+    # refresh_liveness() forces a fresh probe; status() is cached (the mounted
+    # service observes transitions via the background liveness monitor).
+    assert vol.refresh_liveness() == STATUS_OFFLINE
 
     vol.init()
-    assert vol.status() == STATUS_ONLINE
+    assert vol.refresh_liveness() == STATUS_ONLINE
 
 
 @pytest.mark.unit
@@ -38,13 +40,13 @@ def test_volume_offline_when_id_mismatch(tmp_path):
     vol_path = tmp_path / "backend"
     vol = Volume(str(vol_path))
     vol.init()
-    assert vol.status() == STATUS_ONLINE
+    assert vol.refresh_liveness() == STATUS_ONLINE
 
     id_file = vol_path / VOLUME_ID_FILE
     data = json.loads(id_file.read_text())
     data["id"] = "wrong-id"
     id_file.write_text(json.dumps(data))
-    assert vol.status() == STATUS_OFFLINE
+    assert vol.refresh_liveness() == STATUS_OFFLINE
 
 
 @pytest.mark.unit

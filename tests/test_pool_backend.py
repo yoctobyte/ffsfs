@@ -123,6 +123,7 @@ def test_backend_pick_latest_sees_secondary_after_reconnect(tmp_path):
 
     backend = StorageBackend(str(tmp_path / "ssd"), "test", pool=pool)
     secondary.init()
+    pool.refresh_liveness()  # model the liveness monitor detecting the reconnect
     secondary_backend = StorageBackend(str(tmp_path / "hdd"), "test")
     temp = secondary_backend.create_temp_for("later.txt")
     with open(temp, "wb") as f:
@@ -191,6 +192,7 @@ def test_backend_records_pending_and_catches_up_reconnected_mirror(tmp_path):
     assert pending[0]["targets"] == [mirror.vol_id]
 
     mirror.init()
+    pool.refresh_liveness()  # model the liveness monitor detecting the reconnect
     result = backend.sync_pending_replication()
     mirrored = os.path.join(mirror.data_path, "docs", os.path.basename(final))
     assert result == {"copied": 1, "pending": 0}

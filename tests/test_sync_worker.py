@@ -279,6 +279,9 @@ def test_active_pull_tombstone_wins_over_older_write(tmp_path, monkeypatch):
     """When peer has write@100 and delete@200, tombstone should propagate."""
     backend, _ = _make_backend(tmp_path)
     _commit(backend, "file.txt", b"data", 50, monkeypatch)
+    # _commit froze time at 50; pin it to a strictly newer, deterministic value
+    # so the propagated tombstone outranks write@50 by timestamp (no mtime tie).
+    monkeypatch.setattr(ffsfs.time, "time", lambda: 10_000)
 
     peers = FakePeers(peer_cache={
         "peerA": {"files": {"file.txt": [

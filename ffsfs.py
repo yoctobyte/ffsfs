@@ -125,6 +125,9 @@ LAZY_COMMIT_IDLE_SECS = 10.0
 # Background thread intervals (seconds)
 OPEN_MAP_MONITOR_PERIOD = 2.0
 POOL_SYNC_INTERVAL_SECS = 30.0
+# Refresh volume liveness more often than its cache TTL so the hot path always
+# reads a fresh, non-blocking status and never probes a (possibly hung) device.
+LIVENESS_MONITOR_INTERVAL_SECS = 10.0
 ORPHAN_SCAN_AT_START = True  # enumerate orphan temps on startup but do *not* auto-commit
 
 # For read/write handles
@@ -837,6 +840,15 @@ class FFSFS(Operations):
         self._open_mon.start()
         self._sync_mon = threading.Thread(target=self._monitor_pool_sync, daemon=True)
         self._sync_mon.start()
+        # Prime liveness once up front so first FUSE ops have a fresh cache, then
+        # keep it fresh in the background. Hot-path is_online() reads this cache
+        # and never blocks on a stalled volume.
+        try:
+            self.backend.pool.refresh_liveness()
+        except Exception as e:
+            print(f"[ffsfs] initial liveness probe failed: {e}")
+        self._liveness_mon = threading.Thread(target=self._monitor_liveness, daemon=True)
+        self._liveness_mon.start()
 
         # sync policy + rate limits
         self.sync_policy = sync_policy or SyncPolicy.for_role("cache_limited")
@@ -912,6 +924,10 @@ class FFSFS(Operations):
             self._sync_mon.join(timeout=2.0)
         except Exception:
             pass
+        try:
+            self._liveness_mon.join(timeout=2.0)
+        except Exception:
+            pass
 
     def _monitor_pool_sync(self):
         while not self._stop_evt.is_set():
@@ -920,6 +936,17 @@ class FFSFS(Operations):
             except Exception as e:
                 print(f"[ffsfs] pool sync failed: {e}")
             self._stop_evt.wait(POOL_SYNC_INTERVAL_SECS)
+
+    def _monitor_liveness(self):
+        # Dedicated from pool-sync: sync_pending_replication() itself does volume
+        # I/O and could block on a hung device, so the stall *detector* must be
+        # its own thread with timeout-guarded probes.
+        while not self._stop_evt.is_set():
+            try:
+                self.backend.pool.refresh_liveness()
+            except Exception as e:
+                print(f"[ffsfs] liveness refresh failed: {e}")
+            self._stop_evt.wait(LIVENESS_MONITOR_INTERVAL_SECS)
 
     def _monitor_open_map(self):
         while not self._stop_evt.is_set():
