@@ -220,6 +220,9 @@ def test_active_pull_propagates_remote_tombstone(tmp_path, monkeypatch):
     """When the only remote version is a tombstone newer than local, write a local delete."""
     backend, _ = _make_backend(tmp_path)
     _commit(backend, "file.txt", b"content", 100, monkeypatch)
+    # _commit froze time at 100; pin it to a strictly newer, deterministic value
+    # so the written tombstone outranks write@100 by timestamp (no mtime tie).
+    monkeypatch.setattr(ffsfs.time, "time", lambda: 10_000)
 
     peers = FakePeers(peer_cache={
         "peerA": {"files": {"file.txt": [{"name": "file.txt.AAAAAAAA.delete.0.200", "size": 0, "mtime": 200}]}},

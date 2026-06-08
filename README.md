@@ -134,9 +134,21 @@ Useful setup commands:
 ```
 
 The setup app asks for node online expectations, storage/backend policy,
-optional bandwidth limits, and seed peers. It can also list mounted devices and
-import Tailscale interface addresses as ordinary seed hosts when the
-`tailscale` CLI is available.
+collaboration intent, optional bandwidth limits, and seed peers. It can also
+list mounted devices and import Tailscale interface addresses as ordinary seed
+hosts when the `tailscale` CLI is available.
+
+Setup also records *intent* so behavior can be tuned later:
+
+- **Collaboration** (`solo` or `shared`, default `solo`). `solo` is a single
+  curator (last-write-wins, conflicts only warned); `shared` anticipates
+  multiple writers (conflicts surfaced). This is recorded now; richer
+  conflict resolution per mode is future work.
+- **Per-backend device class** (`internal`, `usb`, `sd`, `optical`, `network`).
+  Setup suggests sensible defaults per class — for example, removable USB/SD
+  keys default to mirrored backup with a small max file size — and you can
+  assign a themed job (e.g. "music only", scoped to a `/music` prefix). The
+  size cap is enforced today; theme/prefix write-routing is future work.
 
 `setup.sh` saves after each step but marks a realm inactive until activation.
 `launch.sh` refuses inactive setup configs unless `--allow-inactive` is passed.
@@ -262,6 +274,32 @@ Do not expose the peer HTTP API directly on a public IP or router port-forward
 yet. Public Internet support needs additional transport, identity, DoS, and
 peer-scaling hardening; see
 [agents/public_internet_exposure.md](agents/public_internet_exposure.md).
+
+## Dashboard
+
+A running peer node serves two human-facing web pages on its peer port:
+
+- `/dashboard` — read-only overview: known peers, sync status (failed paths and
+  conflicts), storage volumes with live status (ONLINE / OFFLINE / **STALLED**)
+  and free space, plus realm/auth metadata.
+- `/dashboard/config` — applies peer-add immediately; for everything else
+  (backends, roles, sync policy, rate limits) it shows the exact
+  `ffsctl`/`configure.sh` command to copy, run, and then restart the service.
+
+```text
+http://localhost:<peer-port>/dashboard
+```
+
+The dashboard is **localhost-only**. A browser cannot sign the peer HMAC, so the
+pages are reached from the machine itself or over an SSH tunnel:
+
+```bash
+ssh -L 8765:localhost:<peer-port> user@node   # then open http://localhost:8765/dashboard
+```
+
+Remote access with a session password is a planned follow-up; until then it is
+loopback-gated. The dashboard reads volume status from a non-blocking liveness
+cache, so a stalled or unplugged backend never freezes the page or the service.
 
 ## Unmounting
 
