@@ -502,6 +502,13 @@ Deliverable:
 2. Extend storage policy:
    - Media/role-aware write target selection.
    - Disk rotation UX around mirror volumes.
+   - Intent capture DONE 2026-06-08 (enforcement still pending): realm
+     `collaboration` (solo|shared, default solo) and per-backend advisory
+     hints `device_class` (internal/usb/sd/optical/network), `job`/`job_prefix`,
+     with setup assumption defaults (suggest_backend_defaults) and dashboard
+     display. Write-routing by job/prefix and "high-prio-small" preference are
+     the remaining enforcement work; `max_file_size` from assumptions IS already
+     enforced by can_accept_write.
 3. Add VM scenarios for cross-directory moves, conflict writes,
    restart-during-fetch, offline disk swap, and broader sync policy coverage.
    - DONE 2026-06-08: `cross-dir-move` (content-hash local move reconstruction,

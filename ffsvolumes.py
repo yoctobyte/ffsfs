@@ -67,6 +67,23 @@ MEDIA_SSD = "ssd"
 MEDIA_HDD = "hdd"
 MEDIA_NETWORK = "network"
 
+# Device class is an advisory intent hint (like media). It drives setup-time
+# assumption defaults and is surfaced in the dashboard. Enforcement of job/
+# prefix write-routing is future work (storage policy, project_plan queue #2).
+DEVICE_INTERNAL = "internal"
+DEVICE_USB = "usb"
+DEVICE_SD = "sd"
+DEVICE_OPTICAL = "optical"
+DEVICE_NETWORK = "network"
+DEVICE_CLASSES = {
+    DEVICE_INTERNAL, DEVICE_USB, DEVICE_SD, DEVICE_OPTICAL, DEVICE_NETWORK,
+}
+REMOVABLE_DEVICE_CLASSES = {DEVICE_USB, DEVICE_SD, DEVICE_OPTICAL}
+
+# A backend's "job": general (whole-realm subset per policy) or theme-scoped to
+# a vpath prefix (e.g. "/music"). Recorded as intent; routing enforcement later.
+JOB_GENERAL = "general"
+
 NODE_ROLE_ACCESS_ONLY = "access_only"
 NODE_ROLE_CACHE_LIMITED = "cache_limited"
 NODE_ROLE_SHARED = "shared_storage"
@@ -113,7 +130,8 @@ class Volume:
                  role: str = ROLE_ARCHIVE, created: float = None,
                  mirror: bool = False, media: str = None,
                  max_bytes: int = None, max_file_size: int = None,
-                 reserve_bytes: int = None):
+                 reserve_bytes: int = None, device_class: str = None,
+                 job: str = None, job_prefix: str = None):
         self.path = os.path.abspath(path)
         self.vol_id = vol_id or str(uuid.uuid4())
         self.label = label or os.path.basename(self.path)
@@ -124,6 +142,10 @@ class Volume:
         self.max_bytes = max_bytes
         self.max_file_size = max_file_size
         self.reserve_bytes = reserve_bytes
+        # advisory intent hints (recorded; routing enforcement is future work)
+        self.device_class = device_class
+        self.job = job
+        self.job_prefix = job_prefix
         # liveness cache (non-blocking hot-path reads; monitor keeps it fresh)
         self._live_lock = threading.Lock()
         self._live_status: Optional[str] = None
@@ -159,6 +181,10 @@ class Volume:
             if available - size < int(self.reserve_bytes):
                 return False
         return True
+
+    @property
+    def is_removable(self) -> bool:
+        return self.device_class in REMOVABLE_DEVICE_CLASSES
 
     @property
     def data_path(self) -> str:
@@ -242,6 +268,12 @@ class Volume:
             payload["max_file_size"] = self.max_file_size
         if self.reserve_bytes is not None:
             payload["reserve_bytes"] = self.reserve_bytes
+        if self.device_class is not None:
+            payload["device_class"] = self.device_class
+        if self.job is not None:
+            payload["job"] = self.job
+        if self.job_prefix is not None:
+            payload["job_prefix"] = self.job_prefix
         with open(self.id_file_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
             f.write("\n")
@@ -263,6 +295,12 @@ class Volume:
             data["max_file_size"] = self.max_file_size
         if self.reserve_bytes is not None:
             data["reserve_bytes"] = self.reserve_bytes
+        if self.device_class is not None:
+            data["device_class"] = self.device_class
+        if self.job is not None:
+            data["job"] = self.job
+        if self.job_prefix is not None:
+            data["job_prefix"] = self.job_prefix
         return data
 
     @classmethod
@@ -278,6 +316,9 @@ class Volume:
             max_bytes=data.get("max_bytes"),
             max_file_size=data.get("max_file_size"),
             reserve_bytes=data.get("reserve_bytes"),
+            device_class=data.get("device_class"),
+            job=data.get("job"),
+            job_prefix=data.get("job_prefix"),
         )
 
     @classmethod
@@ -298,6 +339,9 @@ class Volume:
                 max_bytes=data.get("max_bytes"),
                 max_file_size=data.get("max_file_size"),
                 reserve_bytes=data.get("reserve_bytes"),
+                device_class=data.get("device_class"),
+                job=data.get("job"),
+                job_prefix=data.get("job_prefix"),
             )
         except Exception:
             return None

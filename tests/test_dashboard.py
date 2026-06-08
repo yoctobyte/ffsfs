@@ -71,7 +71,8 @@ def test_dashboard_exempt_from_hmac_even_when_auth_on(dash):
 def test_dashboard_volumes_panel_shows_status_without_hanging(tmp_path):
     primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY, media="ssd")
     primary.init()
-    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE, media="hdd")
+    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE, media="hdd",
+                       device_class="usb", job_prefix="/music")
     secondary.init()
     pool = StoragePool(primary=primary, secondaries=[secondary])
     backend = StorageBackend(primary.path, "demo", pool=pool)
@@ -95,6 +96,7 @@ def test_dashboard_volumes_panel_shows_status_without_hanging(tmp_path):
         body = resp.get_data(as_text=True)
         assert "STALLED" in body and "ONLINE" in body
         assert primary.label in body and secondary.label in body
+        assert "usb" in body and "/music" in body  # device class + themed job shown
         assert elapsed < 3.0, "dashboard blocked rendering a stalled volume"
     finally:
         ffspeers._local_backend, ffspeers._REALM = old_backend, old_realm

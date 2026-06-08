@@ -27,6 +27,13 @@ from ffsvolumes import (
     DEFAULT_NODE_AVAILABILITY,
     DEFAULT_NODE_ROLE,
     DEFAULT_NODE_STORAGE_PROFILE,
+    DEVICE_CLASSES,
+    DEVICE_INTERNAL,
+    DEVICE_NETWORK,
+    DEVICE_OPTICAL,
+    DEVICE_SD,
+    DEVICE_USB,
+    JOB_GENERAL,
     MEDIA_HDD,
     MEDIA_NETWORK,
     MEDIA_SSD,
@@ -39,6 +46,41 @@ from ffsvolumes import (
 
 SETUP_SCHEMA_VERSION = 1
 ADMIN_HASH_ITERATIONS = 200_000
+
+# Realm collaboration intent. Recorded so future move/rename/conflict tuning can
+# read it; no resolution policy is enforced yet (see
+# agents/cold_archive_design.md + the conflict-policy-deferred note).
+COLLABORATION_SOLO = "solo"        # single curator: last-write-wins + warn
+COLLABORATION_SHARED = "shared"    # multi-writer: surface conflicts (future)
+COLLABORATION_MODES = {COLLABORATION_SOLO, COLLABORATION_SHARED}
+DEFAULT_COLLABORATION = COLLABORATION_SOLO
+
+# Backend assumption defaults by device class. Intent only: max_file_size IS
+# enforced by existing write routing (can_accept_write), but job/prefix
+# preference and "high-prio-small" routing are future work (storage policy).
+_MB = 1024 * 1024
+_BACKEND_ASSUMPTIONS = {
+    # Removable, slow, treated as small-but-important backup unless given a job.
+    DEVICE_USB:      {"media": MEDIA_HDD,     "mirror": True,  "role": ROLE_ARCHIVE, "max_file_size": 64 * _MB},
+    DEVICE_SD:       {"media": MEDIA_HDD,     "mirror": True,  "role": ROLE_ARCHIVE, "max_file_size": 16 * _MB},
+    # Write-once cold archive (sealed-volume concept is future); mirror target.
+    DEVICE_OPTICAL:  {"media": MEDIA_HDD,     "mirror": True,  "role": ROLE_ARCHIVE, "max_file_size": None},
+    # Big workstation disk: bulk replica, no size cap, not a mirror by default.
+    DEVICE_INTERNAL: {"media": MEDIA_HDD,     "mirror": False, "role": ROLE_ARCHIVE, "max_file_size": None},
+    # NAS/dumb networked storage: bulk, mirror.
+    DEVICE_NETWORK:  {"media": MEDIA_NETWORK, "mirror": True,  "role": ROLE_ARCHIVE, "max_file_size": None},
+}
+
+
+def suggest_backend_defaults(device_class: Optional[str]) -> dict:
+    """Return suggested {media, mirror, role, max_file_size} for a device class.
+
+    Pure suggestion — the caller (setup) prefills these and lets the user
+    override. Unknown/None device class yields neutral defaults.
+    """
+    base = {"media": None, "mirror": False, "role": ROLE_ARCHIVE, "max_file_size": None}
+    base.update(_BACKEND_ASSUMPTIONS.get(device_class or "", {}))
+    return base
 
 ONLINE_EXPECTATIONS = {
     "always": {
@@ -175,8 +217,19 @@ def setup_defaults(realm: str, data: Optional[dict] = None) -> dict:
     data.setdefault("sync", {"mode": "lazy", "prefixes": []})
     data.setdefault("online_expectation", "unknown")
     data.setdefault("backend_policy", "minimal")
+    data.setdefault("collaboration", DEFAULT_COLLABORATION)
     _ensure_setup_state(data)
     return data
+
+
+def set_collaboration(realm: str, mode: str) -> None:
+    """Record the realm's collaboration intent (solo|shared). Intent only —
+    no conflict-resolution policy is enforced from it yet."""
+    if mode not in COLLABORATION_MODES:
+        raise ValueError(f"unknown collaboration mode: {mode}")
+    data = setup_defaults(realm, load_realm(realm))
+    data["collaboration"] = mode
+    _save_inactive(realm, data, "collaboration")
 
 
 def create_realm_config(
@@ -217,13 +270,31 @@ def add_backend(
     realm: str,
     path: str,
     label: Optional[str] = None,
-    role: str = ROLE_ARCHIVE,
-    mirror: bool = False,
+    role: Optional[str] = None,
+    mirror: Optional[bool] = None,
     media: Optional[str] = None,
+    device_class: Optional[str] = None,
+    job: Optional[str] = None,
+    job_prefix: Optional[str] = None,
+    max_file_size: Optional[int] = None,
 ) -> Volume:
     data = load_realm(realm)
     if not data:
         raise ValueError(f"realm not configured: {realm}")
+    if device_class is not None and device_class not in DEVICE_CLASSES:
+        raise ValueError(f"unknown device class: {device_class}")
+    # Fill unspecified attributes from device-class assumptions (intent only).
+    sugg = suggest_backend_defaults(device_class)
+    role = role if role is not None else sugg["role"]
+    mirror = sugg["mirror"] if mirror is None else mirror
+    media = media if media is not None else sugg["media"]
+    max_file_size = max_file_size if max_file_size is not None else sugg["max_file_size"]
+    # A themed job overrides the "general" default and scopes the device to a
+    # vpath prefix (recorded; routing enforcement is future work).
+    if job_prefix:
+        job = job or job_prefix
+    else:
+        job = job or JOB_GENERAL
     pool = StoragePool.from_dict(data.get("storage_pool") or StoragePool.single(data.get("base")).to_dict())
     abs_path = os.path.abspath(os.path.expanduser(path))
     if pool.find_by_path(abs_path):
@@ -234,6 +305,10 @@ def add_backend(
         role=role,
         mirror=mirror,
         media=media,
+        max_file_size=max_file_size,
+        device_class=device_class,
+        job=job,
+        job_prefix=job_prefix or None,
     )
     vol.init()
     pool.add_secondary(vol)
@@ -531,6 +606,46 @@ def _yes_no(msg: str, default: bool = False) -> bool:
     return value in ("y", "yes", "1", "true")
 
 
+def prompt_collaboration(realm: str) -> None:
+    """Ask the realm's collaboration intent (recorded, not enforced yet)."""
+    data = load_realm(realm) or {}
+    current = data.get("collaboration", DEFAULT_COLLABORATION)
+    print("Collaboration intent (how this realm is used):")
+    print("  solo   - single curator; last-write-wins, conflicts only warned")
+    print("  shared - multiple writers; conflicts surfaced (resolution is future)")
+    mode = _prompt("Collaboration (solo/shared)", current).lower()
+    if mode not in COLLABORATION_MODES:
+        print(f"Unknown; keeping '{current}'.")
+        mode = current
+    set_collaboration(realm, mode)
+
+
+def _prompt_backend_details(realm: str, path: str, label: str):
+    """Ask device class, apply assumption defaults (overridable), optional themed
+    job; then register the backend. Returns the created Volume."""
+    dc = _prompt("Device class (internal/usb/sd/optical/network)", DEVICE_INTERNAL).lower()
+    if dc not in DEVICE_CLASSES:
+        print("Unknown device class; using 'internal'.")
+        dc = DEVICE_INTERNAL
+    sugg = suggest_backend_defaults(dc)
+    cap = sugg["max_file_size"]
+    cap_txt = f"{cap // (1024 * 1024)} MiB" if cap else "unlimited"
+    removable = dc in ("usb", "sd", "optical")
+    print(f"  assumptions for {dc}: mirror={sugg['mirror']}, "
+          f"media={sugg['media'] or '-'}, max file size={cap_txt}"
+          f"{', removable' if removable else ''}")
+    job_prefix = None
+    if _yes_no("Assign a themed job (e.g. 'music only')? Otherwise general backup", False):
+        job_prefix = _prompt("Theme vpath prefix (e.g. /music)").strip() or None
+    media = _prompt("Media hint (ssd/hdd/network/blank)", sugg["media"] or "")
+    if media not in ("", MEDIA_SSD, MEDIA_HDD, MEDIA_NETWORK):
+        print("Unknown media hint; leaving blank.")
+        media = ""
+    mirror = _yes_no("Mirror committed writes to this backend?", sugg["mirror"])
+    return add_backend(realm, path, label=label, media=media or None,
+                       mirror=mirror, device_class=dc, job_prefix=job_prefix)
+
+
 def _choose_realm() -> Optional[str]:
     realms = list_realms()
     if realms:
@@ -579,17 +694,15 @@ def wizard_create_or_edit(realm: str) -> None:
     prompt_backend_policy(realm)
 
     print()
+    prompt_collaboration(realm)
+
+    print()
     print_device_summary()
     while _yes_no("Add a secondary backend?", False):
         path = _prompt("Backend folder")
         label = _prompt("Label", os.path.basename(path.rstrip("/")) or "backend")
-        media = _prompt("Media hint (ssd/hdd/network/blank)", "")
-        if media not in ("", MEDIA_SSD, MEDIA_HDD, MEDIA_NETWORK):
-            print("Unknown media hint; leaving blank.")
-            media = ""
-        mirror = _yes_no("Mirror committed writes to this backend?", False)
         try:
-            vol = add_backend(realm, path, label=label, mirror=mirror, media=media or None)
+            vol = _prompt_backend_details(realm, path, label)
             print(f"Added backend {vol.label}: {vol.path}")
         except Exception as e:
             print(f"Could not add backend: {e}")
@@ -671,13 +784,8 @@ def prompt_add_backend(realm: str) -> None:
     if not path:
         return
     label = _prompt("Label", os.path.basename(path.rstrip("/")) or "backend")
-    media = _prompt("Media hint (ssd/hdd/network/blank)", "")
-    if media not in ("", MEDIA_SSD, MEDIA_HDD, MEDIA_NETWORK):
-        print("Unknown media hint; leaving blank.")
-        media = ""
-    mirror = _yes_no("Mirror committed writes to this backend?", False)
     try:
-        vol = add_backend(realm, path, label=label, mirror=mirror, media=media or None)
+        vol = _prompt_backend_details(realm, path, label)
         print(f"Added backend {vol.label}: {vol.path}")
     except Exception as e:
         print(f"Could not add backend: {e}")
@@ -828,6 +936,7 @@ def edit_realm_menu(realm: str) -> None:
         print("8) Set bandwidth/rate limits")
         print("9) Validate")
         print("10) Activate")
+        print("11) Set collaboration intent (solo/shared)")
         print("0) Back")
         choice = _prompt("Choice", "9")
         if choice == "1":
@@ -854,6 +963,8 @@ def edit_realm_menu(realm: str) -> None:
                 print("Activated.")
             else:
                 print("Not activated.")
+        elif choice == "11":
+            prompt_collaboration(realm)
         elif choice == "0":
             return
         else:

@@ -1552,16 +1552,30 @@ def _collect_volumes():
                 st = os.statvfs(p)
                 return (st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize)
             cap = _guarded_value(_cap, timeout=2.0)
+        job = getattr(vol, "job", None) or "—"
+        if getattr(vol, "job_prefix", None):
+            job = f"{vol.job_prefix}"
         out.append({
             "label": vol.label,
             "role": vol.role,
             "media": vol.media or "—",
+            "device": getattr(vol, "device_class", None) or "—",
+            "job": job,
             "mirror": bool(getattr(vol, "mirror", False)),
             "path": vol.path,
             "status": status,
             "capacity": cap,
         })
     return out
+
+
+def _realm_collaboration():
+    """Best-effort read of the realm's collaboration intent for display. Returns
+    None if it cannot be loaded (e.g. config not on the standard path)."""
+    def _load():
+        from ffsctl import _load_realm_config
+        return (_load_realm_config(_REALM) or {}).get("collaboration")
+    return _guarded_value(_load, timeout=1.0)
 
 
 def _collect_peers():
@@ -1606,12 +1620,13 @@ def dashboard():
             cap = "—"
         vol_rows.append(
             f"<tr><td>{e(v['label'])}</td><td>{e(v['role'])}</td>"
-            f"<td>{e(v['media'])}</td><td>{'yes' if v['mirror'] else 'no'}</td>"
+            f"<td>{e(v['device'])}</td><td>{e(v['media'])}</td>"
+            f"<td>{e(v['job'])}</td><td>{'yes' if v['mirror'] else 'no'}</td>"
             f"<td class='{_status_class(v['status'])}'>{v['status']}</td>"
             f"<td>{cap}</td><td><code>{e(v['path'])}</code></td></tr>"
         )
     vol_html = "\n".join(vol_rows) or \
-        "<tr><td colspan='7'><em>No volumes (single-store mode).</em></td></tr>"
+        "<tr><td colspan='9'><em>No volumes (single-store mode).</em></td></tr>"
 
     if sync is None:
         sync_html = "<p><em>Sync worker not registered.</em></p>"
@@ -1643,6 +1658,8 @@ def dashboard():
 <tbody>{c_rows}</tbody></table>"""
 
     auth_on = _request_verifier is not None
+    collab = _realm_collaboration()
+    collab_html = f" · collaboration {e(str(collab))}" if collab else ""
     html = f"""<!doctype html>
 <meta charset="utf-8"><title>FFSFS Dashboard</title>
 <style>{_DASHBOARD_CSS}</style>
@@ -1654,7 +1671,7 @@ def dashboard():
   · port {e(str(_actual_flask_port))}
   · HMAC auth {'<span class="ok">on</span>' if auth_on else '<span class="warn">off</span>'}
   · unknown peers {'trusted' if TRUST_UNKNOWN_PEER else 'not trusted'}
-  · notify scope {e(NOTIFY_SCOPE)}
+  · notify scope {e(NOTIFY_SCOPE)}{collab_html}
 </div>
 
 <h2>Peers</h2>
@@ -1662,8 +1679,8 @@ def dashboard():
 <tbody>{peer_rows}</tbody></table>
 
 <h2>Volumes</h2>
-<table><thead><tr><th>Label</th><th>Role</th><th>Media</th><th>Mirror</th>
-<th>Status</th><th>Capacity</th><th>Path</th></tr></thead>
+<table><thead><tr><th>Label</th><th>Role</th><th>Device</th><th>Media</th>
+<th>Job</th><th>Mirror</th><th>Status</th><th>Capacity</th><th>Path</th></tr></thead>
 <tbody>{vol_html}</tbody></table>
 
 <h2>Sync</h2>
