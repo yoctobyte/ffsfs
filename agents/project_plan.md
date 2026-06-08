@@ -489,6 +489,11 @@ Deliverable:
    - Disk rotation UX around mirror volumes.
 3. Add VM scenarios for cross-directory moves, conflict writes,
    restart-during-fetch, offline disk swap, and broader sync policy coverage.
+   - DONE 2026-06-08: `cross-dir-move` (content-hash local move reconstruction,
+     no re-download, moved marker at source), `conflict-write` (divergent-hash
+     detection + `.ffsfs-conflicts.json` persistence), `restart-during-fetch`
+     (source-down clean failure + backoff + recovery, v1 integrity preserved).
+     `offline-volume` already existed. Remaining: broader sync-policy coverage.
 4. Peer trust/security hardening and secure sockets for wider deployments.
    - Implement realm secret generation/storage.
    - Add HMAC request signing and nonce/timestamp replay checks.
