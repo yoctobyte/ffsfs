@@ -17,7 +17,9 @@ from ffsutils import (
     NULL_HASH,
     normalize_vpath,
     is_hidden_mode,
+    base32_crockford,
 )
+import hashlib
 from ffsratelimit import RateLimits
 
 import unicodedata
@@ -352,6 +354,27 @@ def _safe_file_abspath(vpath: str) -> str:
             return full
     return os.path.abspath(os.path.join(roots[0], clean))
 
+
+def _content_hash_matches(local_path: str, expected_hash: Optional[str]) -> bool:
+    """
+    Verify that the bytes at local_path match the content_hash embedded in the
+    committed filename. This authenticates fetched content (HMAC signs requests,
+    not response bodies) and also catches truncated/corrupted transfers.
+
+    Supports legacy 64-hex SHA256 and the current truncated Crockford-Base32
+    form. NULL_HASH (delete/temp markers) carries no content to verify.
+    """
+    if not expected_hash or expected_hash == NULL_HASH:
+        return True
+    h = hashlib.sha256()
+    with open(local_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    if len(expected_hash) == 64 and all(c in "0123456789abcdef" for c in expected_hash):
+        return h.hexdigest() == expected_hash
+    full = base32_crockford(int.from_bytes(h.digest(), "big"))
+    return full[:len(expected_hash)] == expected_hash
+
 #helper for heading dir contents
 def _local_head_for(vpath: str) -> Optional[Dict[str, Any]]:
     """
@@ -503,6 +526,10 @@ def _get_node_name() -> str:
     return os.environ.get("FFSFS_NODE_NAME") or os.environ.get("FFSFS_HOSTNAME") or socket.gethostname()
 
 app = Flask(__name__)
+# Peer API is pull-based: all request bodies are small (notify JSON, add form).
+# File content is served via GET /get-file responses, which this limit does not
+# affect. Cap request bodies to guard against memory-exhaustion DoS.
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 _AUTH_EXEMPT_PATHS = {"/healthz"}
 
@@ -1099,6 +1126,18 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False,
                 limits.net_bg.consume(len(chunk))
                 limits.disk_bg.consume(len(chunk))
                 f.write(chunk)
+
+        parsed_best = parse_versioned_filename(best_name)
+        expected_hash = parsed_best.get("content_hash") if parsed_best else None
+        if not _content_hash_matches(local_path, expected_hash):
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
+            print(f"[peer] Integrity check FAILED for {best_name} from "
+                  f"{best_peer}: content hash mismatch, discarded")
+            return False
+
         _log(f"[peer] Pulled {best_name} from {best_peer} → {local_path}")
         return local_path
     except Exception as e:

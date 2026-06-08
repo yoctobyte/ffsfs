@@ -9,9 +9,14 @@
       - Two-peer VM scenarios cover delete-tombstone propagation.
       - /notify synthesizes delete tombstones with NULL_HASH (cosmetic; acceptable).
 
-  2. fsync() can silently swallow commit failures.
-      - ffsfs.py:1045
-      - _commit_fh_locked() exceptions are ignored.
+  2. fsync() commit failures — RESOLVED.
+      - FFSFS.fsync (ffsfs.py:1503) calls _commit_fh_locked under the lock and
+        no longer wraps it in a swallowing try/except.
+      - _commit_fh_locked propagates commit_temp errors (e.g. ENOSPC); only the
+        post-commit f.close() is best-effort. FUSE maps the raised error to the
+        caller, so fsync no longer reports false durability.
+      - Background lazy-commit and orphan-temp scans still swallow by design
+        (no caller to surface the error to); they log instead.
 
   3. Peer notify/delete failures are still best-effort and mostly silent.
       - ffsfs.py:1126
@@ -27,10 +32,22 @@
       - Some are acceptable resilience paths, but write/delete/sync/startup paths need logging or propagation.
 
   6. Peer trust/security model — partially addressed.
-      - HMAC per-realm secret authentication is implemented (ffspeer_auth.py).
+      - HMAC per-realm secret authentication is implemented (ffspeer_auth.py),
+        PBKDF2 (600k) for passphrase-derived secrets, compare_digest, bounded
+        nonce cache (10k / 120s), 60s timestamp skew.
       - Unknown peers are not auto-added by default (`trust_unknown_peers=false`).
       - `ffsctl peer` manages `known_peers` and `approved_peers`.
-      - Broader revocation, pending-peer review, and secure transport UX remain open.
+      - Fetched content is now hash-verified against the committed filename's
+        content_hash before being stored (ffspeers._content_hash_matches),
+        catching MITM tampering and truncated/corrupt transfers.
+      - Peer request bodies capped at 16MB (Flask MAX_CONTENT_LENGTH).
+      - Realm config (holds plaintext realm_secret) is written 0600 in a 0700
+        dir (ffsctl._save_realm_config).
+      - Still LAN-scope only: plaintext HTTP, no response-body signing, no
+        per-node identity, no per-file ACLs, discovery is unauthenticated,
+        server binds 0.0.0.0. See README "Security Scope" and
+        public_internet_exposure.md. Broader revocation, pending-peer review,
+        and secure transport UX remain open.
 
   7. Rich background sync policy — base infrastructure done, rich policies open.
       - Background SyncWorker with active-pull and cache eviction is implemented.

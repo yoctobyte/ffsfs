@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import hashlib
 import time
 
 import pytest
@@ -6,8 +7,20 @@ import pytest
 import ffspeers
 from ffsratelimit import RateLimits
 from ffsfs import StorageBackend
-from ffsutils import NULL_HASH, build_versioned_filename, get_suffix_from_path
+from ffsutils import (
+    HASH_BASE32_LEN,
+    NULL_HASH,
+    base32_crockford,
+    build_versioned_filename,
+    get_suffix_from_path,
+)
 from ffsvolumes import ROLE_ARCHIVE, ROLE_PRIMARY, StoragePool, Volume
+
+
+def _ch(data: bytes, length: int = HASH_BASE32_LEN) -> str:
+    """Content hash in the committed Crockford-Base32 form, as ffsfs commits it."""
+    digest = hashlib.sha256(data).digest()
+    return base32_crockford(int.from_bytes(digest, "big"))[:length]
 
 
 @pytest.fixture
@@ -273,6 +286,8 @@ def test_get_newer_or_missing_fetches_newest_across_peers(tmp_path, monkeypatch)
     data_path = tmp_path / "data"
     data_path.mkdir()
 
+    newest_name = f"doc.txt.{_ch(b'newest')}.write.0.200"
+
     class FakeResponse:
         def raise_for_status(self):
             return None
@@ -292,7 +307,7 @@ def test_get_newer_or_missing_fetches_newest_across_peers(tmp_path, monkeypatch)
         ffspeers._known_peers = ["peer-a:8765", "peer-b:8765"]
         ffspeers._peer_cache = {
             "peer-a:8765": {"files": {"doc.txt": [{"name": "doc.txt.AAAAAAAA.write.0.100"}]}},
-            "peer-b:8765": {"files": {"doc.txt": [{"name": "doc.txt.BBBBBBBB.write.0.200"}]}},
+            "peer-b:8765": {"files": {"doc.txt": [{"name": newest_name}]}},
         }
         ffspeers._REALM = "test"
         monkeypatch.setattr(ffspeers.requests, "get", fake_get)
@@ -300,9 +315,51 @@ def test_get_newer_or_missing_fetches_newest_across_peers(tmp_path, monkeypatch)
         local_path = ffspeers.get_newer_or_missing("doc.txt", 0, fetch=True)
 
         assert calls == [("http://peer-b:8765/get-file",
-                          {"realm": "test", "vpath": "doc.txt.BBBBBBBB.write.0.200"}, 90, True)]
-        assert local_path == str(data_path / "doc.txt.BBBBBBBB.write.0.200")
-        assert (data_path / "doc.txt.BBBBBBBB.write.0.200").read_bytes() == b"newest"
+                          {"realm": "test", "vpath": newest_name}, 90, True)]
+        assert local_path == str(data_path / newest_name)
+        assert (data_path / newest_name).read_bytes() == b"newest"
+    finally:
+        ffspeers._local_backend = old_backend
+        ffspeers._known_peers = old_known
+        ffspeers._peer_cache = old_cache
+        ffspeers._REALM = old_realm
+
+
+@pytest.mark.unit
+def test_get_newer_or_missing_discards_corrupted_fetch(tmp_path, monkeypatch):
+    old_backend = ffspeers._local_backend
+    old_known = list(ffspeers._known_peers)
+    old_cache = ffspeers._peer_cache
+    old_realm = ffspeers._REALM
+    data_path = tmp_path / "data"
+    data_path.mkdir()
+
+    # Filename claims the hash of b"good", but the peer serves tampered bytes.
+    name = f"doc.txt.{_ch(b'good content')}.write.0.200"
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            yield b"tampered bytes"
+
+    def fake_get(url, params=None, timeout=None, stream=False):
+        return FakeResponse()
+
+    try:
+        ffspeers._local_backend = SimpleNamespace(data_path=str(data_path))
+        ffspeers._known_peers = ["peer-a:8765"]
+        ffspeers._peer_cache = {
+            "peer-a:8765": {"files": {"doc.txt": [{"name": name}]}},
+        }
+        ffspeers._REALM = "test"
+        monkeypatch.setattr(ffspeers.requests, "get", fake_get)
+
+        result = ffspeers.get_newer_or_missing("doc.txt", 0, fetch=True)
+
+        assert result is False
+        assert not (data_path / name).exists()  # corrupted file removed
     finally:
         ffspeers._local_backend = old_backend
         ffspeers._known_peers = old_known
@@ -326,6 +383,8 @@ def test_get_newer_or_missing_consumes_background_limits(tmp_path, monkeypatch):
         def consume(self, n_bytes):
             self.calls.append(n_bytes)
 
+    versioned = f"doc.txt.{_ch(b'abcdefg')}.write.0.200"
+
     class FakeResponse:
         def raise_for_status(self):
             return None
@@ -345,7 +404,7 @@ def test_get_newer_or_missing_consumes_background_limits(tmp_path, monkeypatch):
         ffspeers._local_backend = SimpleNamespace(data_path=str(data_path))
         ffspeers._known_peers = ["peer-a:8765"]
         ffspeers._peer_cache = {
-            "peer-a:8765": {"files": {"doc.txt": [{"name": "doc.txt.BBBBBBBB.write.0.200"}]}},
+            "peer-a:8765": {"files": {"doc.txt": [{"name": versioned}]}},
         }
         ffspeers._REALM = "test"
         monkeypatch.setattr(ffspeers.requests, "get", fake_get)
@@ -353,8 +412,8 @@ def test_get_newer_or_missing_consumes_background_limits(tmp_path, monkeypatch):
         local_path = ffspeers.get_newer_or_missing(
             "doc.txt", 0, fetch=True, rate_limits=limits)
 
-        assert local_path == str(data_path / "doc.txt.BBBBBBBB.write.0.200")
-        assert (data_path / "doc.txt.BBBBBBBB.write.0.200").read_bytes() == b"abcdefg"
+        assert local_path == str(data_path / versioned)
+        assert (data_path / versioned).read_bytes() == b"abcdefg"
         assert net_bg.calls == [3, 4]
         assert disk_bg.calls == [3, 4]
     finally:

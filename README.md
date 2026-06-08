@@ -7,6 +7,29 @@ logical file under `.ffsfs_data/`.
 This project is still prototype-quality. Test with scratch data first, not
 irreplaceable files.
 
+## Security Scope — Read First
+
+FFSFS is designed and tested for **trusted LAN or private overlay networks
+only**. It is not hardened for hostile networks. Treat the following as hard
+rules, not suggestions:
+
+- **Never expose FFSFS to the public Internet.** Do not port-forward, reverse-
+  proxy, or bind the peer HTTP API to a public IP.
+- **Run experiments in virtual machines.** The VM test harness exists for this
+  reason; prefer it over the workstation.
+- **Run on your own LAN at your own risk.** You are advised to disconnect the
+  testing LAN from the Internet while evaluating FFSFS.
+- The peer transport is plaintext HTTP authenticated by a shared per-realm HMAC
+  secret. There is no transport encryption, no per-node identity, and no
+  response-body signing. Anyone with the realm secret has full read/write
+  access to the whole realm. Anyone on the LAN segment can observe traffic.
+- The realm secret is stored in the realm config file. Protect that file and the
+  host it lives on accordingly.
+
+Public Internet support is explicitly out of scope until the hardening blockers
+in [agents/public_internet_exposure.md](agents/public_internet_exposure.md) are
+addressed.
+
 ## Install Dependencies
 
 FFSFS is intended to run against the system Python and system FUSE libraries.

@@ -256,11 +256,24 @@ def _load_realm_config(realm: str) -> dict:
         return {}
 
 def _save_realm_config(realm: str, data: dict) -> None:
+    # The realm config holds the plaintext realm_secret (the sole HMAC auth
+    # credential). Restrict it to the owner so other local users cannot read it.
     cfg_path = _realm_config_path(realm)
-    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-    with open(cfg_path, "w", encoding="utf-8") as f:
+    cfg_dir = os.path.dirname(cfg_path)
+    os.makedirs(cfg_dir, exist_ok=True)
+    try:
+        os.chmod(cfg_dir, 0o700)
+    except OSError:
+        pass
+    # Create with 0600 from the start to avoid a world-readable window.
+    fd = os.open(cfg_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
+    try:
+        os.chmod(cfg_path, 0o600)  # tighten pre-existing files too
+    except OSError:
+        pass
 
 def cmd_realm(args):
     action = args.action
