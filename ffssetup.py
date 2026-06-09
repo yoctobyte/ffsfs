@@ -552,6 +552,18 @@ def activate_realm(realm: str) -> bool:
     return True
 
 
+def deactivate_realm(realm: str) -> bool:
+    """Mark a realm inactive. launch.sh refuses inactive realms (unless
+    --allow-inactive), so this takes it out of service without deleting config."""
+    data = load_realm(realm)
+    if not data:
+        return False
+    state = _ensure_setup_state(data)
+    state["activated"] = False
+    _save_realm_config(realm, data)
+    return True
+
+
 def discover_devices() -> List[dict]:
     try:
         out = subprocess.check_output(
@@ -580,16 +592,26 @@ def _flatten_mounts(devices: Iterable[dict], parent: str = "") -> List[dict]:
     return rows
 
 
-def print_device_summary() -> None:
+# lsblk TYPEs that are not real storage the user would target. `loop` covers
+# snap/AppImage/flatpak mounts (the usual clutter). Keep disk/part/rom (optical),
+# and lvm/crypt/raid mapper devices.
+_DEVICE_TYPE_SKIP = {"loop"}
+
+
+def print_device_summary(show_all: bool = False) -> None:
     rows = _flatten_mounts(discover_devices())
+    if not show_all:
+        rows = [r for r in rows if (r.get("type") or "") not in _DEVICE_TYPE_SKIP]
     if not rows:
-        print("No mounted block devices found via lsblk.")
+        print("No mounted storage devices found via lsblk.")
         return
     print("Mounted devices:")
     for idx, row in enumerate(rows, start=1):
         model = row.get("model") or ""
         tran = row.get("tran") or ""
         print(f"  {idx}) {row['device']:<16} {row.get('size',''):<8} {tran:<8} {model} -> {row['mountpoint']}")
+    if not show_all:
+        print("  (loop/snap devices hidden; pass --list-devices-all to show them)")
 
 
 def _prompt(msg: str, default: Optional[str] = None) -> str:
@@ -934,9 +956,10 @@ def edit_realm_menu(realm: str) -> None:
         print("6) Manage peers")
         print("7) Set sync preset")
         print("8) Set bandwidth/rate limits")
-        print("9) Validate")
-        print("10) Activate")
-        print("11) Set collaboration intent (solo/shared)")
+        print("9) Validate            (check the config is complete and consistent)")
+        print("10) Activate           (mark ready to launch — required before deploy)")
+        print("11) Deactivate         (take out of service; launch.sh refuses it)")
+        print("12) Set collaboration intent (solo/shared)")
         print("0) Back")
         choice = _prompt("Choice", "9")
         if choice == "1":
@@ -960,10 +983,15 @@ def edit_realm_menu(realm: str) -> None:
         elif choice == "10":
             print_issues(validate_realm(realm))
             if activate_realm(realm):
-                print("Activated.")
+                print("Activated. launch.sh will now run this realm.")
             else:
-                print("Not activated.")
+                print("Not activated — fix the errors above first.")
         elif choice == "11":
+            if deactivate_realm(realm):
+                print("Deactivated. launch.sh refuses it unless --allow-inactive.")
+            else:
+                print("Could not deactivate (realm not found).")
+        elif choice == "12":
             prompt_collaboration(realm)
         elif choice == "0":
             return
@@ -971,15 +999,41 @@ def edit_realm_menu(realm: str) -> None:
             print("Invalid choice")
 
 
+def _print_realm_intro() -> None:
+    print("A 'realm' is an isolated FFSFS namespace — a named, self-contained")
+    print("filesystem with its own storage and peer group. Think of it as a")
+    print("separate vault / share / workspace / 'drive'. Peers only sync with")
+    print("each other inside the same realm (same name + shared secret), and you")
+    print("can run several independent realms on one host.")
+    print()
+
+
+def print_realms() -> None:
+    realms = list_realms()
+    if not realms:
+        print("No realms configured yet. Choose 'Create / edit a realm' to make one.")
+        return
+    print("Configured realms:")
+    for name in realms:
+        data = load_realm(name) or {}
+        state = (data.get("setup_state") or {})
+        active = "active" if state.get("activated") else "inactive"
+        mount = data.get("mountpoint", "?")
+        print(f"  - {name:<20} [{active}]  mount: {mount}")
+
+
 def interactive_main(args) -> int:
     print("FFSFS setup")
     print()
+    _print_realm_intro()
     while True:
-        print("1) Create/edit realm")
-        print("2) Show realm")
-        print("3) Validate realm")
-        print("4) Activate realm")
-        print("5) List devices")
+        print("1) Create / edit a realm")
+        print("2) Show a realm's configuration")
+        print("3) List realms")
+        print("4) Validate a realm        (check the config is complete and consistent)")
+        print("5) Activate a realm        (mark ready to launch — required before deploy)")
+        print("6) Deactivate a realm      (take out of service; launch.sh then refuses it)")
+        print("7) List devices            (mounted storage; loop/snap hidden)")
         print("0) Exit")
         choice = _prompt("Choice", "1")
         if choice == "1":
@@ -991,18 +1045,28 @@ def interactive_main(args) -> int:
             if realm:
                 print_realm_summary(realm)
         elif choice == "3":
-            realm = args.realm or _choose_realm()
-            if realm:
-                print_issues(validate_realm(realm))
+            print_realms()
         elif choice == "4":
             realm = args.realm or _choose_realm()
             if realm:
                 print_issues(validate_realm(realm))
-                if activate_realm(realm):
-                    print("Activated.")
-                else:
-                    print("Not activated.")
         elif choice == "5":
+            realm = args.realm or _choose_realm()
+            if realm:
+                print_issues(validate_realm(realm))
+                if activate_realm(realm):
+                    print(f"Activated '{realm}'. launch.sh will now run it.")
+                else:
+                    print("Not activated — fix the errors above first.")
+        elif choice == "6":
+            realm = args.realm or _choose_realm()
+            if realm:
+                if deactivate_realm(realm):
+                    print(f"Deactivated '{realm}'. launch.sh will refuse it "
+                          f"unless --allow-inactive is passed.")
+                else:
+                    print("Could not deactivate (realm not found).")
+        elif choice == "7":
             print_device_summary()
         elif choice == "0":
             return 0
@@ -1016,12 +1080,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--realm", help="realm to edit/check")
     parser.add_argument("--check", action="store_true", help="validate configured realms and exit")
     parser.add_argument("--activate", action="store_true", help="validate and activate --realm")
-    parser.add_argument("--list-devices", action="store_true", help="list mounted devices and exit")
+    parser.add_argument("--deactivate", action="store_true", help="deactivate --realm (take out of service)")
+    parser.add_argument("--list-devices", action="store_true", help="list mounted storage devices and exit")
+    parser.add_argument("--list-devices-all", action="store_true", help="like --list-devices but include loop/snap devices")
+    parser.add_argument("--list-realms", action="store_true", help="list configured realms and exit")
     args = parser.parse_args(argv)
 
-    if args.list_devices:
-        print_device_summary()
+    if args.list_devices or args.list_devices_all:
+        print_device_summary(show_all=args.list_devices_all)
         return 0
+    if args.list_realms:
+        print_realms()
+        return 0
+    if args.deactivate:
+        if not args.realm:
+            print("--deactivate requires --realm", file=sys.stderr)
+            return 2
+        if deactivate_realm(args.realm):
+            print(f"Deactivated '{args.realm}'.")
+            return 0
+        print("Not found.")
+        return 1
     if args.check:
         realms = [args.realm] if args.realm else list_realms()
         if not realms:

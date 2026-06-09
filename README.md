@@ -173,8 +173,12 @@ Run in the background:
 ./launch.sh myrealm --bg
 ```
 
-If exactly one realm is configured, `./launch.sh` can be run without a realm
-argument. With multiple configured realms, pass the realm explicitly.
+`./launch.sh` runs **one realm per invocation** — it does not auto-launch all
+configured realms. If exactly one realm is configured you can omit the name;
+with several, pass the realm explicitly (or start one `launch.sh` per realm).
+A realm must be **activated** in setup first; `launch.sh` refuses inactive
+realms unless `--allow-inactive` is passed. Activate/deactivate from the setup
+app (or `setup.sh --realm <r> --activate` / `--deactivate`).
 
 Useful setup commands:
 
