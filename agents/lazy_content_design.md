@@ -19,25 +19,49 @@ File explorers do two things when browsing a realm:
 So the issue is isolated to **`open()`/`read()` of big remote-only files**, not
 to listing.
 
-## Design: lazy content with range fetch
+## Design: header-prefix partials (preferred — simple and safe)
 
-- **`open()` (read) does not fetch.** It records a lazy handle: vpath + the
-  remote head (size, content hash, source peer/version). The local file may not
-  exist yet, or exists sparse.
-- **`read(offset, size)`** serves locally-present ranges; for a missing range it
-  fetches **only that byte range** from a peer, fills a sparse local file, and
-  serves it. A 4 KB head-read pulls 4 KB.
-- **`/get-file` gains HTTP Range support** (`Range:` request → `206 Partial
-  Content`). It currently streams the whole file.
-- **Present-ranges tracking** per cached version: a small sidecar bitmap/extent
-  list (or rely on sparse-file hole detection). Reads beyond present ranges fetch
-  more; "background sync decides to keep it" fetches the whole file deliberately.
+Chosen approach: a partial cache file holds just a small **header prefix**
+(configurable, e.g. 4 KB / 64 KB / 1 MB). It is **self-delimiting** — the file
+on disk is literally N bytes, and the true logical size comes from `/head`
+metadata. This avoids the sparse-file trap (see below).
+
+- **`/get-file` gains HTTP Range support** (`Range: bytes=0-N` → `206`). It
+  currently streams the whole file.
+- **`open()` (read) of a big remote-only file** fetches only the first N bytes
+  into a *partial* cache file, marked partial with its true size recorded
+  (sidecar marker or a `.partial` naming convention — NOT a committed version).
+- **`getattr` reports the true size** (from metadata), so apps see the real
+  size even when only the prefix is local.
+- **`read(offset, size)`**:
+  - fully within the prefix `[0, N)` → serve from the partial. Covers
+    thumbnailers and MIME/magic sniffers (icon/type) with an N-byte transfer.
+  - reaches at/after N → **promote**: fetch the whole file, replace the partial
+    with the complete version, serve. This is detectable simply as EOF on the
+    partial — no range bookkeeping needed.
+- **Tail readers** (e.g. MP3/ID3 tags live at the *end* of the file) read near
+  `size` → past the prefix → promote to whole. Correct, if unavoidable.
+  Optional future optimization: fetch **head + tail** as two ranges and only
+  promote on a read in the middle.
 - **Size threshold**: small files (< a few MB) keep the current whole-file fetch
-  on open (simpler, avoids per-read overhead); only "big" files go lazy/sparse.
-- **Retention by role**: filled ranges are *cache*. `access_only`/`cache_limited`
-  keep only touched ranges and evict; `replica`/`shared` background sync still
-  fetches whole files on purpose. Two clean paths: interactive browse = partial/
-  ephemeral; sync = deliberate whole + retained.
+  on open; only "big" files use a partial prefix.
+- **Retention by role**: partials are *cache*. `access_only`/`cache_limited`
+  keep prefixes (and evict); a promote on a cache node is still subject to
+  eviction. `replica`/`shared` background sync fetches whole on purpose. Two
+  clean paths: interactive browse = prefix-only/ephemeral; sync = deliberate
+  whole + retained.
+
+Bookkeeping is minimal: per cached file just "is partial + bytes present (N) +
+true size". No range bitmap.
+
+## Alternative: sparse files + range map (NOT preferred)
+
+ext4 supports sparse files, but a sparse file alone is **unsafe**: a read of an
+un-fetched hole returns zeros indistinguishable from real data. To use sparse
+files you MUST track present ranges (a bitmap/extent list) and intercept every
+read against it — exactly the bookkeeping header-prefix partials avoid. Only
+worth it if true random-access partial caching (not just head/tail) becomes a
+requirement. Defer.
 
 ## Open questions / tensions
 
@@ -48,10 +72,14 @@ to listing.
 - **Version pinning.** A partial read must pin one version (filename carries
   hash+ts); if the remote version changes mid-read, invalidate/restart so ranges
   stay consistent.
-- **Range eviction granularity** and the present-ranges store format (sparse
-  file + bitmap vs explicit extent file).
-- **Sparse-file portability** (fine on ext4/xfs; verify elsewhere).
-- **Concurrent readers** of the same lazy file filling overlapping ranges.
+- **Partial marker** format: sidecar file vs `.partial` naming. Must ensure a
+  partial is never mistaken for a committed version, never served to peers, and
+  never counted as "this node has this version".
+- **Promote race**: a read past the prefix triggers a whole fetch; concurrent
+  readers of the same file should share one promote, not stampede.
+- **Eviction**: prefixes and promoted wholes are both cache; integrate with the
+  existing cache-eviction (don't evict a version that is the only local copy a
+  peer relies on).
 
 ## Relationship to existing code
 

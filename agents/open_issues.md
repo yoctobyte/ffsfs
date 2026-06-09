@@ -88,13 +88,16 @@ stopping for features/fixes/logs.
 
 ## Features
 
-- [P2] **Lazy/partial file content (range fetch).** `open()` for read fetches
-  the WHOLE remote file eagerly, so a thumbnailer/MIME-sniffer peeking at a huge
-  remote file transfers it all and caches it even on a lazy/access-only node.
-  Browsing itself is already free (getattr/readdir use head metadata). Fix:
-  defer fetch to `read()` with HTTP Range support + sparse local files +
-  per-range cache/eviction by role; small files keep whole-fetch. Full design in
-  agents/lazy_content_design.md.
+- [P2] **Lazy/partial file content (header-prefix partials).** `open()` for read
+  fetches the WHOLE remote file eagerly, so a thumbnailer/MIME-sniffer peeking at
+  a huge remote file transfers it all and caches it even on a lazy/access-only
+  node. Browsing itself is already free (getattr/readdir use head metadata). Fix:
+  `/get-file` HTTP Range support; `open()` fetches only a small header prefix
+  (4 KB/64 KB/1 MB) into a self-delimiting partial cache file (true size from
+  metadata); a read past the prefix promotes to a whole fetch. Tail readers
+  (e.g. MP3/ID3) promote; optional later head+tail dual-range. Small files keep
+  whole-fetch. Sparse files rejected (need a range map; unsafe without).
+  Full design in agents/lazy_content_design.md.
 
 - [P3] **`autolaunch.sh` — start all active realms (multi-realm supervisor).**
   Today `launch.sh` runs ONE realm per invocation. For a multi-realm host, a
