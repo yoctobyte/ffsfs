@@ -391,6 +391,41 @@ different guest ports. Multi-VM tests are reserved for future stress testing.
 Normal local development should not mount test FUSE filesystems directly on the
 workstation.
 
+## Upgrading & Data Persistence
+
+FFSFS is built so a live node can track the repo and upgrade with just:
+
+```bash
+git pull
+./launch.sh myrealm      # restart; no reconfiguration needed
+```
+
+This works because **configuration and data live outside the git checkout**:
+
+- **Config:** `~/.ffsfs/.storage/<realm>/realm-config.json` (per realm).
+- **Data:** under each backend path you configured (the primary base and any
+  added backends), in the plain, versioned on-disk layout.
+
+`git pull` only updates code; it never touches your config or data. Restart
+re-reads them as-is.
+
+Format stability contract:
+
+- The on-disk layout is **plain and tool-readable** — versioned filenames
+  (`name.<hash>.<mode>.<flags>.<ts>`) in a mirror of your directory tree. A
+  backup is understandable with a file browser, no FFSFS required.
+- The config and on-disk formats evolve **additively**: new fields are optional
+  and defaulted, so a newer FFSFS reads an older config/datastore without
+  reconfiguration. Structural changes go through a versioned migration
+  (`config_version`).
+- A `.ffsfs-volume.id` file marks each backend volume; keep it. Removable disks
+  can be parked cleanly with `backend eject` and brought back with
+  `backend attach` (see Storage Backends).
+
+If you use a virtualenv, re-run `pip install -r requirements.txt` after a pull
+only when dependencies changed; `setup.sh`/`launch.sh` keep using `./.venv`
+automatically.
+
 ## More Detail
 
 - [agents/operator_guide.md](agents/operator_guide.md): operator workflows,

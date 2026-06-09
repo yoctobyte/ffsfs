@@ -271,13 +271,34 @@ _PEER_TRANSPORT_VALUES = {"http", "https"}
 def _parse_bool(value: str) -> bool:
     return str(value).lower() in ("1", "true", "yes", "on")
 
+# On-disk realm-config schema version. The format is intentionally ADDITIVE:
+# new keys are optional and read with .get(...) defaults, so a config written by
+# an older FFSFS keeps working after "git pull + restart" with no reconfig.
+# Bump this and add a branch in _migrate_config only for STRUCTURAL changes
+# (renamed/restructured keys), never for plain new optional fields.
+CONFIG_VERSION = 1
+
+
+def _migrate_config(data: dict) -> dict:
+    """Bring an on-disk config forward in memory. Idempotent; does not rewrite
+    the file. The single home for future structural migrations."""
+    if not data:
+        return data
+    ver = int(data.get("config_version", 0) or 0)
+    # (future: if ver < N: <transform>; ver = N)
+    if ver < CONFIG_VERSION:
+        ver = CONFIG_VERSION
+    data["config_version"] = ver
+    return data
+
+
 def _load_realm_config(realm: str) -> dict:
     cfg_path = _realm_config_path(realm)
     if not os.path.exists(cfg_path):
         return {}
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return _migrate_config(json.load(f))
     except Exception:
         return {}
 

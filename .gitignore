@@ -44,3 +44,7 @@ env/
 # Local-only agent entrypoint pointers. Tracked agent docs live under agents/.
 /AGENTS.md
 /CLAUDE.md
+
+# IDE / tool scratch and one-off generated audit reports
+.qoder/
+agents/audit_*.md
