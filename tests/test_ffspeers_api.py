@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import hashlib
+import os
 import time
 
 import pytest
@@ -453,6 +454,30 @@ def test_notify_delete_with_suffix(peer_client):
     assert "a/b/file2.txt" in peer_files
     tombstone = peer_files["a/b/file2.txt"][0]
     assert f"a/b/file2.txt.{NULL_HASH}.delete.0." in tombstone["name"]
+
+
+@pytest.mark.unit
+def test_node_status_route_returns_local_status(peer_client):
+    """/node-status serves this node's on-disk federated status live, so the
+    dashboard can query peers directly instead of waiting for file-sync."""
+    import json
+    client, data_path = peer_client
+    ndir = data_path / ffspeers.NODE_STATUS_DIR
+    ndir.mkdir()
+    fname = build_versioned_filename(
+        f"{ffspeers.NODE_STATUS_DIR}/borg.json", "A1B2C3D4E5F6G7H8J9K0MNPQRS",
+        "write", timestamp=1781002443, flags=0)
+    # the versioned name carries the subdir; write the leaf into ndir
+    (ndir / os.path.basename(fname)).write_text(json.dumps(
+        {"node": "borg", "realm": "test", "updated": 1781002443, "backends": []}))
+
+    resp = client.get("/node-status", query_string={"realm": "test"})
+    assert resp.status_code == 200
+    nodes = resp.get_json()["nodes"]
+    assert any(n.get("node") == "borg" for n in nodes)
+
+    # wrong realm rejected
+    assert client.get("/node-status", query_string={"realm": "other"}).status_code == 403
 
 
 @pytest.mark.unit

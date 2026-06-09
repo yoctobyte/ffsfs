@@ -225,8 +225,14 @@ def parse_versioned_filename(filename: str) -> Optional[Dict[str, Any]]:
     if not m:
         return None
     out = m.groupdict()
-    # normalize: ensure logical_name keeps its subdirs, without leading ./ 
-    out["logical_name"] = out["logical_name"].lstrip("./")
+    # normalize: drop a leading "./" prefix, but NOT a legitimate leading dot
+    # (e.g. ".ffsfs-nodes/..."). str.lstrip("./") treats "./" as a character
+    # SET and would strip the dot off a dotfile/dir, renaming ".ffsfs-nodes"
+    # to "ffsfs-nodes" — breaking the reserved-dir hide and peer path matching.
+    ln = out["logical_name"]
+    while ln.startswith("./"):
+        ln = ln[2:]
+    out["logical_name"] = ln.lstrip("/")
     try:
         out["flags"] = int(out["flags"])
         out["timestamp"] = int(out["timestamp"])

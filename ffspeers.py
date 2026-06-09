@@ -2082,11 +2082,51 @@ def _collect_federated_nodes():
     return nodes
 
 
+@app.route("/node-status", methods=["GET"])
+def node_status():
+    """Live federated status this node can vouch for (its own, plus any peer
+    status it has already synced). The dashboard queries peers here directly so
+    the federated view does not depend on the multi-hop file-sync landing first.
+    HMAC-authenticated like every other peer route."""
+    realm = request.args.get("realm", "")
+    if realm != _REALM:
+        return jsonify({"error": "realm mismatch"}), 403
+    return jsonify({"nodes": _collect_federated_nodes()})
+
+
+def _federated_nodes_live(timeout: float = 3.0) -> list:
+    """Local node status merged with each known peer's live /node-status, keyed
+    by node name, newest 'updated' wins. Independent of file-sync state."""
+    by_name: Dict[str, dict] = {}
+
+    def _merge(lst):
+        for n in lst or []:
+            if not isinstance(n, dict):
+                continue
+            name = str(n.get("node", "")).strip()
+            if not name:
+                continue
+            cur = by_name.get(name)
+            if cur is None or int(n.get("updated", 0) or 0) > int(cur.get("updated", 0) or 0):
+                by_name[name] = n
+
+    _merge(_collect_federated_nodes())
+    for peer in list(_known_peers):
+        try:
+            r = _authed_get(_peer_url(peer, "/node-status"), "/node-status",
+                            {"realm": _REALM}, timeout=timeout)
+            if r.ok:
+                _merge((r.json() or {}).get("nodes"))
+        except Exception as ex:
+            _log(f"[peer] /node-status fetch failed from {peer}: {ex}")
+    return list(by_name.values())
+
+
 @app.route("/dashboard/federated", methods=["GET"])
 def dashboard_federated():
     e = _esc.escape
     now = time.time()
-    nodes = _collect_federated_nodes()
+    nodes = _federated_nodes_live()
     # "up" if it republished recently (status cadence is ~5 min; allow 15).
     up_window = 900
 
