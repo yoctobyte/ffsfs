@@ -7,6 +7,23 @@ logical file under `.ffsfs_data/`.
 This project is still prototype-quality. Test with scratch data first, not
 irreplaceable files.
 
+## Quick Install (Ubuntu)
+
+Impatient path for a typical Ubuntu 24.04+ box. **LAN-only — read the Security
+Scope below first.** If anything here misbehaves, use the detailed steps under
+[Install](#install).
+
+```bash
+sudo apt update
+sudo apt install -y git python3-fusepy libfuse2t64 python3-flask python3-requests fuse3
+git clone https://github.com/yoctobyte/ffsfs.git
+cd ffsfs
+./setup.sh                 # interactive: creates a realm (offers a venv, default yes)
+./launch.sh <your-realm>   # use the realm name you chose in setup
+```
+
+On older Ubuntu, if `libfuse2t64` is not found, use `libfuse2` instead.
+
 ## Security Scope — Read First
 
 FFSFS is designed and tested for **trusted LAN or private overlay networks
