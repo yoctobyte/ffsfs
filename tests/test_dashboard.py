@@ -52,6 +52,23 @@ def test_dashboard_config_emits_cli_with_realm(dash):
 
 
 @pytest.mark.unit
+def test_favicon_is_quiet_204(dash):
+    # browsers auto-request favicon; must not 403/auth-spam
+    resp = dash.get("/favicon.ico")
+    assert resp.status_code == 204
+
+
+@pytest.mark.unit
+def test_status_is_loopback_ui_not_auth_checked(dash):
+    # /status is a human/CLI page: reachable from loopback even with auth on,
+    # and blocked (not auth-spammed) from non-loopback.
+    ffspeers._request_verifier = object()
+    assert dash.get("/status").status_code == 200
+    blocked = dash.get("/status", environ_overrides={"REMOTE_ADDR": "10.0.0.9"})
+    assert blocked.status_code == 403
+
+
+@pytest.mark.unit
 def test_dashboard_blocked_from_non_loopback(dash):
     resp = dash.get("/dashboard", environ_overrides={"REMOTE_ADDR": "10.0.0.9"})
     assert resp.status_code == 403

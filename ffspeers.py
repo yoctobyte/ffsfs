@@ -545,12 +545,16 @@ app = Flask(__name__)
 # affect. Cap request bodies to guard against memory-exhaustion DoS.
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
-_AUTH_EXEMPT_PATHS = {"/healthz"}
+_AUTH_EXEMPT_PATHS = {"/healthz", "/favicon.ico"}
 # Human-facing UI pages. A browser cannot produce an HMAC request signature, so
 # these are exempt from the peer-API HMAC check and instead gated to localhost.
 # Remote access (session password per agents/project_plan.md) is a TODO; until
-# then the dashboard is reachable only from loopback (or via an SSH tunnel).
-_UI_PATHS = {"/dashboard", "/dashboard/config", "/dashboard/logs"}
+# then these pages are reachable only from loopback (or via an SSH tunnel).
+# /status and /add are local human/CLI pages (ffsctl status queries /status over
+# loopback), so they live here too — this also stops browser probes from
+# spamming the auth log with 403s.
+_UI_PATHS = {"/dashboard", "/dashboard/config", "/dashboard/logs",
+             "/status", "/add"}
 
 
 def _is_loopback_request() -> bool:
@@ -1244,6 +1248,11 @@ def list_virtual_files(prefix: str) -> List[str]:
 @app.route("/healthz", methods=["GET"])
 def healthz():
     return jsonify({"ok": True, "realm": _REALM, "port": _actual_flask_port})
+
+@app.route("/favicon.ico", methods=["GET"])
+def favicon():
+    # Browsers auto-request this; answer quietly so it never hits auth or logs.
+    return ("", 204)
 
 @app.route("/hello", methods=["GET"])
 def hello():
