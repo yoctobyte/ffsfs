@@ -406,10 +406,14 @@ Useful to validate a checkout on another box before deploying. A helper runs
 everything:
 
 ```bash
-./runtests.sh           # compile check + unit tests
-./runtests.sh --vm      # also run the disposable-VM smokes (needs QEMU, below)
-./runtests.sh -k volume # extra args are forwarded to pytest
+./runtests.sh           # ALL tests: compile check + unit + VM smokes
+./runtests.sh --unit    # unit tests only (skip the VM smokes)
+./runtests.sh --unit -k volume   # extra args are forwarded to pytest
 ```
+
+With no arguments it runs the full suite. The VM smokes need QEMU and a base
+image (see below); if those are absent they are reported **SKIPPED** (not
+failed), so the unit suite still runs on a box without virtualization.
 
 Tests do **not** require a virtualenv and can be run before `./setup.sh`. The
 runner uses `./.venv` if present, otherwise system `python3` (override with
@@ -423,7 +427,7 @@ top of the runtime deps:
 ```bash
 sudo apt install -y python3-pytest      # system Python
 # or, inside a virtualenv: pip install -r requirements-dev.txt
-./runtests.sh
+./runtests.sh --unit
 ```
 
 Equivalent without the helper: `python3 -m py_compile *.py && pytest`.
@@ -453,7 +457,7 @@ the suites:
 ```bash
 tools/vm/build-base-image.sh           # one-time; creates .vm/images/...
 
-./runtests.sh --vm                     # unit tests + the VM smoke batch
+./runtests.sh                          # full suite: unit tests + VM smokes
 ```
 
 Or run individual VM suites directly:
