@@ -4,19 +4,20 @@ FFSFS is an experimental distributed, versioned FUSE filesystem. It preserves
 the virtual directory tree on disk and stores committed versions next to each
 logical file under `.ffsfs_data/`.
 
-This project is still prototype-quality. Test with scratch data first, not
-irreplaceable files.
-
-## Quick Install (Ubuntu)
+## Important
 
 > ⚠️ **Do not connect this service to the Internet.** FFSFS is for trusted LAN /
 > private overlay networks only — no public IP, no port-forwarding. See
 > [Security Scope](#security-scope--read-first).
 
-Impatient path for a typical Ubuntu 24.04+ box. If anything here misbehaves, use
-the detailed steps under [Install](#install).
+## Quick Install (Ubuntu)
 
-Install (creates a realm interactively; offers a venv, default yes):
+Please back up your system before playing around with this software.
+Install instructions aim at a typical Ubuntu 24.04+ box. If anything here
+misbehaves, use the detailed steps under [Install](#install).
+
+After install, `setup.sh` offers an interactive (re)configuration tool to create
+a storage realm, and offers to create a venv (recommended).
 
 ```bash
 sudo apt update
