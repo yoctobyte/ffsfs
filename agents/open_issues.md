@@ -81,12 +81,27 @@ stopping for features/fixes/logs.
 
 ## Features
 
-- [P2] **Version retention / pruning (GC).** FFSFS keeps every committed
-  version forever; storage grows with write history and the meta log grows
-  append-only. No automatic pruning yet. Needs a retention policy (keep N / keep
-  for D days / keep latest + tombstones) and a safe GC that never drops a
-  version still referenced by a peer or needed for conflict/move history.
-  Documented as a footprint caveat in the README for now.
+- [P2] **Prune tool — remove stale files (USER-RUN, not automatic).** A manual
+  command (e.g. `ffsctl prune <realm> [...]`) the user invokes to reclaim space.
+  The user owns backups and decides policy — FFSFS never auto-deletes history.
+  Targets:
+  - superseded old versions of a logical file (keep latest, optionally keep
+    N most recent / versions newer than D days);
+  - resolved delete tombstones and `moved` markers past a retention window;
+    orphan temp files.
+  Requirements:
+  - default DRY-RUN: list what would be removed + reclaimed bytes; require an
+    explicit `--apply`/confirm to delete;
+  - per-prefix / per-realm / per-volume scoping;
+  - safety: never drop the newest visible version; never drop a version still
+    needed for conflict/move resolution or known to be the only copy a peer
+    expects; respect peers (don't prune what a peer still references) or clearly
+    document that prune is local-only and peers may re-introduce versions;
+  - works on a plain on-disk tree so a user could also prune by hand.
+  FFSFS keeps every committed version forever today; storage grows with write
+  history and the meta log is append-only (README "Storage footprint"). This
+  tool is the answer; automatic retention policy is a possible later layer on
+  top, off by default.
 
 - [P1] **Storage-policy enforcement (queue #2).** Intent fields now exist
   (device_class, job/job_prefix, collaboration); enforcement does not. Needed:
