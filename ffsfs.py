@@ -1861,6 +1861,15 @@ def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool 
                     peer_trust=cfg.get("peer_trust", "realm_secret"),
                     approved_peers=set(cfg.get("approved_peers") or []),
                 )
+                print(f"[ffsfs] peer auth ENABLED (realm_secret {str(secret)[:8]}…, "
+                      f"peer_trust={cfg.get('peer_trust', 'realm_secret')})")
+            else:
+                print("[ffsfs] WARNING: no realm_secret in this node's config — "
+                      "peer auth is DISABLED.")
+                print("[ffsfs]   This node sends UNSIGNED requests; auth-enabled "
+                      "peers reject them with 403 'missing auth headers'.")
+                print("[ffsfs]   Fix: set the realm secret (same on every host):")
+                print("[ffsfs]     ./setup.sh --realm <realm> --set-realm-secret '<shared phrase>'")
 
             # Add known peers from environment if any
             known_env = os.environ.get("FFSFS_KNOWN_PEERS")
