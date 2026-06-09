@@ -198,6 +198,43 @@ def test_advertise_port_falls_back_to_realm_port_not_8765():
 
 
 @pytest.mark.unit
+def test_prune_drops_never_seen_peer_after_threshold():
+    """A peer that never answered is pruned once failures hit the threshold."""
+    old_kp, old_seen, old_fail = (list(ffspeers._known_peers),
+                                  dict(ffspeers._last_seen), dict(ffspeers._peer_fail))
+    ffspeers._known_peers[:] = ["10.0.0.9:11181"]
+    ffspeers._last_seen.clear()                       # never seen alive
+    ffspeers._peer_fail.clear()
+    ffspeers._peer_fail["10.0.0.9:11181"] = ffspeers.PEER_PRUNE_FAIL_THRESHOLD
+    try:
+        assert ffspeers._prune_dead_unseen_peers() is True
+        assert "10.0.0.9:11181" not in ffspeers._known_peers
+        assert "10.0.0.9:11181" not in ffspeers._peer_fail
+    finally:
+        ffspeers._known_peers[:] = old_kp
+        ffspeers._last_seen.clear(); ffspeers._last_seen.update(old_seen)
+        ffspeers._peer_fail.clear(); ffspeers._peer_fail.update(old_fail)
+
+
+@pytest.mark.unit
+def test_prune_keeps_once_alive_peer_through_outage():
+    """A peer that was once alive (has _last_seen) is kept despite failures."""
+    old_kp, old_seen, old_fail = (list(ffspeers._known_peers),
+                                  dict(ffspeers._last_seen), dict(ffspeers._peer_fail))
+    ffspeers._known_peers[:] = ["10.0.0.8:11181"]
+    ffspeers._last_seen.clear(); ffspeers._last_seen["10.0.0.8:11181"] = 1.0   # seen once
+    ffspeers._peer_fail.clear()
+    ffspeers._peer_fail["10.0.0.8:11181"] = ffspeers.PEER_PRUNE_FAIL_THRESHOLD * 5
+    try:
+        assert ffspeers._prune_dead_unseen_peers() is False
+        assert "10.0.0.8:11181" in ffspeers._known_peers
+    finally:
+        ffspeers._known_peers[:] = old_kp
+        ffspeers._last_seen.clear(); ffspeers._last_seen.update(old_seen)
+        ffspeers._peer_fail.clear(); ffspeers._peer_fail.update(old_fail)
+
+
+@pytest.mark.unit
 def test_list_dir_and_head(peer_client):
     client, data_path = peer_client
     subdir = data_path / "a"

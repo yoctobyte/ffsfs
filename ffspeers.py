@@ -524,6 +524,10 @@ def _peer_id_from_request() -> str:
 
 TIME_TOLERANCE = 5                    # seconds for hello clock skew
 LIVENESS_INTERVAL = 30                # seconds
+# Drop a peer that has NEVER answered after this many consecutive ping
+# failures (≈ threshold × LIVENESS_INTERVAL seconds). Only never-seen entries
+# are pruned; a peer that was once alive is kept through transient outages.
+PEER_PRUNE_FAIL_THRESHOLD = 6
 CONFIG_FILE = _storage_path("peers.conf")
 VERBOSE = True
 TRUST_UNKNOWN_PEER = False
@@ -590,6 +594,7 @@ def _check_auth():
 # Peer state
 _known_peers: List[str] = []
 _last_seen: Dict[str, float] = {}           # "ip[:port]" -> last ping ts
+_peer_fail: Dict[str, int] = {}             # "ip[:port]" -> consecutive ping failures
 _start_ts = time.time()
 _local_backend: Any = None                  # must expose .data_path
 _rate_limits = RateLimits.unlimited()
@@ -1027,8 +1032,12 @@ def ping_all():
             r = _authed_get(url, "/hello", params, timeout=3)
             if r.ok:
                 _last_seen[peer] = time.time()
+                _peer_fail[peer] = 0
                 _log(f"[peer] {peer} is alive")
+            else:
+                _peer_fail[peer] = _peer_fail.get(peer, 0) + 1
         except Exception as e:
+            _peer_fail[peer] = _peer_fail.get(peer, 0) + 1
             _log(f"[peer] ERROR pinging {peer}: {e}")
 
 
@@ -2378,6 +2387,31 @@ def head():
 
 # -------------------- Background workers --------------------
 
+def _prune_dead_unseen_peers() -> bool:
+    """Drop peers that have NEVER answered after PEER_PRUNE_FAIL_THRESHOLD
+    consecutive failures (wrong manual IP, decommissioned host, stale endpoint
+    no longer superseded by _upsert_peer). A peer that was once alive keeps a
+    _last_seen timestamp and is NEVER pruned, so transient outages are tolerated.
+
+    Returns True if the peer list changed (caller persists)."""
+    changed = False
+    with _peers_lock:
+        for peer in list(_known_peers):
+            never_seen = not _last_seen.get(peer, 0)
+            if never_seen and _peer_fail.get(peer, 0) >= PEER_PRUNE_FAIL_THRESHOLD:
+                _known_peers.remove(peer)
+                _last_seen.pop(peer, None)
+                _peer_fail.pop(peer, None)
+                _peer_cache.pop(peer, None)
+                _log(f"[peer] Pruned dead peer (never responded): {peer}")
+                changed = True
+        # Drop orphan counters for peers no longer in the list
+        for d in (_peer_fail, _last_seen):
+            for k in [k for k in d if k not in _known_peers]:
+                d.pop(k, None)
+    return changed
+
+
 def check_peer_liveness():
     while True:
         try:
@@ -2387,6 +2421,11 @@ def check_peer_liveness():
                 last = _last_seen.get(peer, 0)
                 if last and now - last > LIVENESS_INTERVAL * 2:
                     print(f"[peer] WARNING: {peer} inactive for {int(now - last)}s")
+            if _prune_dead_unseen_peers():
+                try:
+                    save_config()
+                except Exception as e:
+                    print(f"[peer] save_config after prune failed: {e}")
         except Exception as e:
             print(f"[peer] Liveness loop error: {e}")
         time.sleep(LIVENESS_INTERVAL)
