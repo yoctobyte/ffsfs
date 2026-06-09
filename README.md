@@ -13,16 +13,21 @@ Impatient path for a typical Ubuntu 24.04+ box. **LAN-only — read the Security
 Scope below first.** If anything here misbehaves, use the detailed steps under
 [Install](#install).
 
+Install (creates a realm interactively; offers a venv, default yes):
+
 ```bash
 sudo apt update
 sudo apt install -y git python3-fusepy libfuse2t64 python3-flask python3-requests fuse3
 git clone https://github.com/yoctobyte/ffsfs.git
 cd ffsfs
-./setup.sh                 # interactive: creates a realm (offers a venv, default yes)
-./launch.sh <your-realm>   # use the realm name you chose in setup
+./setup.sh
 ```
 
-On older Ubuntu, if `libfuse2t64` is not found, use `libfuse2` instead.
+Then run it, using the realm name you chose during setup:
+
+```bash
+./launch.sh <your-realm>
+```
 
 ## Security Scope — Read First
 
