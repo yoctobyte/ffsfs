@@ -1,0 +1,15 @@
+# FFSFS Python dependencies.
+#
+# Default install path is SYSTEM packages (see README): the FUSE pieces are OS
+# packages, not pip-only. This file makes the dependency set explicit and lets
+# you use a virtualenv when you prefer one — fusepy is pure Python (a ctypes
+# wrapper) and works in a venv; libfuse itself stays a system package
+# (libfuse2t64/libfuse2, and optionally fuse3 for fusermount3).
+#
+#   python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+#
+# launch.sh / setup.sh auto-use ./.venv if present, else system python3.
+
+flask
+requests
+fusepy

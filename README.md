@@ -72,6 +72,24 @@ print("fusepy API available")
 PY
 ```
 
+### Optional: virtualenv
+
+A virtualenv is not required and the system-package path above is the simplest.
+But FFSFS is venv-compatible — `fusepy` is pure Python and works in a venv;
+only the FUSE C library (`libfuse2t64`/`libfuse2`, plus optional `fuse3`) must
+be a system package. If you prefer an isolated, pinnable environment:
+
+```bash
+sudo apt install libfuse2t64 fuse3   # system FUSE library only
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt      # flask, requests, fusepy
+```
+
+`setup.sh` and `launch.sh` automatically use `./.venv` if it exists (or an
+active `$VIRTUAL_ENV`), otherwise they fall back to system `python3`. Override
+with `FFSFS_PYTHON=/path/to/python`.
+
 ## Quick Start
 
 The recommended user path is:
@@ -198,6 +216,21 @@ Remove a backend from config without deleting files on disk:
 python3 ffsctl.py backend remove myrealm backup-a
 ```
 
+Park a backend for clean removal (e.g. a rotated USB/archive disk) without
+unregistering it — it receives no new writes, stays in the config, and catches
+up missed writes when re-attached:
+
+```bash
+python3 ffsctl.py backend eject  myrealm backup-a    # park; safe to unplug
+python3 ffsctl.py backend attach myrealm backup-a    # un-park after re-plugging
+# helper equivalents:
+./configure.sh eject-backend  myrealm backup-a
+./configure.sh attach-backend myrealm backup-a
+```
+
+A running service applies eject/attach on its next restart. `backend list`
+shows a parked volume as `[ONLINE/PARKED]`.
+
 Backend option summary:
 
 - `--id <label>`: human label; remove can use UUID, label, or path.
@@ -209,6 +242,11 @@ Backend option summary:
 - `--max-file-size <bytes>`: do not place files larger than this on the backend.
 - `--max-bytes <bytes>`: do not place files if backend usage would exceed this.
 - `--reserve-bytes <bytes>`: keep this much free space on the backend.
+
+Even without `--reserve-bytes`, every volume keeps a default free-space floor
+(256 MiB, set via `FFSFS_VOL_MIN_FREE_BYTES`) so a drive is never filled to the
+brim; zero-byte markers (deletes/move hints) bypass it. Writes prefer the online
+volume with the most free space, so small or near-full drives are spared.
 
 Writes start on the current staging target, usually the primary. At commit time
 FFSFS knows the final file size and chooses an eligible final backend using the

@@ -59,6 +59,11 @@ Recommended setup and launch flow:
 ./launch.sh myrealm
 ```
 
+Interpreter: `setup.sh`/`launch.sh` use system `python3` by default, but
+auto-use a project `./.venv` (or an active `$VIRTUAL_ENV`) if present, or an
+explicit `FFSFS_PYTHON`. See the README "Optional: virtualenv" section and
+`requirements.txt`.
+
 **Using a Configuration File:**
 ```bash
 python3 ffsfs.py --config ~/.ffsfs/myrealm.json
@@ -79,6 +84,21 @@ This automatically mounts at `~/myrealm` and stores data at `~/.myrealm/myrealm`
 To check the status of the local node and its connected peers, use `ffsctl.py`:
 ```bash
 python3 ffsctl.py status --port 18765
+```
+
+### Web Dashboard
+A running node serves human-facing pages on its peer port (localhost-only; use
+an SSH tunnel for remote):
+
+- `/dashboard` — peers, network summary, storage volumes (with ONLINE/OFFLINE/
+  STALLED/PARKED status and free space), and sync status (failed paths,
+  conflicts).
+- `/dashboard/config` — applies peer-add live; shows copy-paste `ffsctl`/
+  `configure.sh` commands for other changes.
+- `/dashboard/logs` — recent in-process events with level filtering.
+
+```bash
+ssh -L 8765:localhost:<peer-port> user@node   # then open http://localhost:8765/dashboard
 ```
 
 ### Setup App
@@ -346,11 +366,16 @@ New writes start as a temporary file on the current staging target:
    path and lets the filesystem operation succeed or fail normally.
 
 When the file is committed, FFSFS knows the final size. It then chooses the
-final storage target using `max_file_size`, `max_bytes`, and `reserve_bytes`.
-If the staging target is not eligible but another online backend is eligible,
-FFSFS copies the completed file into the eligible backend and removes the temp
-from the staging backend. If no online backend accepts the file size, the commit
-fails with a disk-space style error.
+final storage target among eligible online volumes, checking `max_file_size`,
+`max_bytes`, `reserve_bytes`, and a default free-space floor
+(`FFSFS_VOL_MIN_FREE_BYTES`, 256 MiB) so no drive is filled to the brim
+(zero-byte markers bypass the floor). Among eligible volumes it prefers the one
+with the **most free space**, so small or near-full drives are spared and writes
+land where there is headroom (ties keep primary-first). Parked (ejected) volumes
+are never chosen. If the staging target is not eligible but another online
+backend is, FFSFS copies the completed file into the eligible backend and removes
+the temp from the staging backend. If no online backend accepts the file, the
+commit fails with a disk-space style error.
 
 After the committed version exists on the final target, FFSFS copies that
 version to every online backend marked `mirror: true`, except the volume that
@@ -431,6 +456,23 @@ python3 ffsctl.py backend remove personal archive-a
 
 Removing a backend only detaches it from the realm config. It does not delete
 files from the backend path.
+
+#### Parking a Backend (clean eject for rotation)
+
+To take a removable disk offline cleanly while keeping it registered for next
+time — the rotating-USB/archive workflow — park it instead of removing it:
+
+```bash
+python3 ffsctl.py backend eject  personal archive-a   # park; safe to unplug
+python3 ffsctl.py backend attach personal archive-a   # un-park after re-plugging
+```
+
+A parked (`ejected`) backend stays in the config but receives no new writes;
+missed writes are queued as pending replication and catch up after `attach`
+once the volume is online again. `backend list` shows it as `[ONLINE/PARKED]`.
+A running service applies eject/attach on its next restart. This is for the
+*same* physical disk; rotating between *different* disks (distinct volume IDs)
+is separate, still-evolving work.
 
 #### Configuration Schema
 

@@ -14,6 +14,16 @@ FFSFS="$SCRIPT_DIR/ffsfs.py"
 FFSCTL="$SCRIPT_DIR/ffsctl.py"
 CONFIG_BASE="$HOME/.ffsfs/.storage"
 
+# Interpreter: explicit override, else project .venv, else active venv, else
+# system python3. No .venv present => behaves exactly as before.
+resolve_python() {
+    if [ -n "${FFSFS_PYTHON:-}" ]; then echo "$FFSFS_PYTHON"; return; fi
+    if [ -x "$SCRIPT_DIR/.venv/bin/python3" ]; then echo "$SCRIPT_DIR/.venv/bin/python3"; return; fi
+    if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python3" ]; then echo "$VIRTUAL_ENV/bin/python3"; return; fi
+    echo "python3"
+}
+PYBIN="$(resolve_python)"
+
 usage() {
     echo "Usage: $0 <realm> [--bg] [--allow-inactive]"
     echo ""
@@ -94,7 +104,7 @@ validate_field() {
     local key="$1"
     local label="$2"
     local val
-    val="$(python3 -c "
+    val="$($PYBIN -c "
 import json, sys
 with open('$CONFIG_FILE') as f:
     d = json.load(f)
@@ -110,14 +120,14 @@ print(v if v else '')
 MOUNTPOINT="$(validate_field "mountpoint" "mountpoint")"
 
 # Storage: either storage_pool or base must be set
-HAS_POOL="$(python3 -c "
+HAS_POOL="$($PYBIN -c "
 import json
 with open('$CONFIG_FILE') as f:
     d = json.load(f)
 print('yes' if d.get('storage_pool') else '')
 " 2>/dev/null)"
 
-HAS_BASE="$(python3 -c "
+HAS_BASE="$($PYBIN -c "
 import json
 with open('$CONFIG_FILE') as f:
     d = json.load(f)
@@ -129,7 +139,7 @@ if [ -z "$HAS_POOL" ] && [ -z "$HAS_BASE" ]; then
     die "no storage configured for realm '$REALM'. Run: ./setup.sh --realm $REALM"
 fi
 
-IS_ACTIVE="$(python3 -c "
+IS_ACTIVE="$($PYBIN -c "
 import json
 with open('$CONFIG_FILE') as f:
     d = json.load(f)
@@ -158,4 +168,4 @@ else
 fi
 echo ""
 
-exec python3 "$FFSFS" "$MOUNTPOINT" --config "$CONFIG_FILE" $BG_FLAG
+exec "$PYBIN" "$FFSFS" "$MOUNTPOINT" --config "$CONFIG_FILE" $BG_FLAG

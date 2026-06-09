@@ -40,6 +40,21 @@ stopping for features/fixes/logs.
 
 ## Infrastructure / robustness
 
+- [P3] **virtualenv path (groundwork DONE).** System Python stays the default.
+  `requirements.txt` added; `setup.sh`/`launch.sh` auto-use `./.venv` or active
+  `$VIRTUAL_ENV` (or `FFSFS_PYTHON`), else system `python3`. fusepy works in a
+  venv; only libfuse must be a system package. TRIGGER to actually require a
+  venv: the first dependency that is not a clean OS package or needs pinning
+  (e.g. a richer web stack, a crypto lib for the HTTPS work, cloud/SDK backends,
+  watchdog). Until then, system Python is fine. A future systemd unit should
+  reference the resolved interpreter path explicitly.
+- [P3] **HTTPS at setup (rainy-afternoon).** http/https/both option. Deferred:
+  moderate overhaul (self-signed cert lifecycle, server SSL context, client TLS,
+  peer-url scheme, dual-listener "both"), low value on trusted LAN (HMAC already
+  authenticates). Keep-alive Session groundwork already landed. Remaining:
+  the HTTPS option itself + server-side keep-alive tuning + an overhead
+  benchmark (connection-setup cost, esp. once TLS handshakes are involved).
+
 - [P1] **VM runner leaks VMs on interruption.** A suspended/interrupted run
   leaves an orphan qemu holding port 2222; the next run boots, passes in-guest
   units, then hangs forever on SSH. Fix: reap stale `ffsfs-vm-*` qemu before
