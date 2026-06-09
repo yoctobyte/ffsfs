@@ -571,7 +571,10 @@ def _check_auth():
         return None
     body = request.get_data()
     query_params = dict(request.args)
-    headers = dict(request.headers)
+    # Pass the case-INSENSITIVE headers object: WSGI/werkzeug title-cases header
+    # names (X-Ffsfs-Realm), so dict(request.headers).get("X-FFSFS-Realm") would
+    # miss them and wrongly report "missing auth headers".
+    headers = request.headers
     ok, reason = _request_verifier.verify(
         request.method, request.path, query_params, body, headers)
     if not ok:

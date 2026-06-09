@@ -124,6 +124,27 @@ def test_ping_all_uses_realm_port_for_host_only_peer(peer_client, monkeypatch):
 
 
 @pytest.mark.unit
+def test_signed_request_passes_auth_over_http(peer_client):
+    # Regression: real HTTP headers are title-cased by WSGI (X-Ffsfs-Realm), so
+    # the verifier must look them up case-insensitively. A correctly-signed
+    # request must NOT be rejected as "missing auth headers".
+    from ffspeer_auth import RequestVerifier, sign_request
+    client, _ = peer_client
+    secret = "ab" * 32
+    old = ffspeers._request_verifier
+    ffspeers._request_verifier = RequestVerifier(realm="test", realm_secret=secret)
+    try:
+        params = {"realm": "test", "prefix": ""}
+        hdrs = sign_request(secret, "GET", "/list-files", params, b"", "test", "nodeA")
+        resp = client.get("/list-files", query_string=params, headers=hdrs)
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        # and an unsigned request is still rejected
+        assert client.get("/list-files", query_string=params).status_code == 403
+    finally:
+        ffspeers._request_verifier = old
+
+
+@pytest.mark.unit
 def test_peer_url_bare_host_uses_realm_port():
     from ffsutils import default_port_for_realm
     old = ffspeers._REALM
