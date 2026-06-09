@@ -151,6 +151,15 @@ if [ -z "$IS_ACTIVE" ] && [ -z "$ALLOW_INACTIVE" ]; then
     die "realm '$REALM' has not been activated by setup. Run: ./setup.sh --realm $REALM --activate (or pass --allow-inactive)."
 fi
 
+# Configured peer port (for the dashboard URL). If busy at startup, FFSFS picks
+# the next free port and logs it; this is the configured value.
+PORT="$($PYBIN -c "
+import json
+with open('$CONFIG_FILE') as f:
+    d = json.load(f)
+print(d.get('port') or '')
+" 2>/dev/null)"
+
 # Ensure mountpoint directory exists
 if [ ! -d "$MOUNTPOINT" ]; then
     echo "Creating mountpoint directory: $MOUNTPOINT"
@@ -161,6 +170,9 @@ echo "Launching FFSFS..."
 echo "  realm:      $REALM"
 echo "  config:     $CONFIG_FILE"
 echo "  mountpoint: $MOUNTPOINT"
+if [ -n "$PORT" ]; then
+    echo "  dashboard:  http://localhost:$PORT/dashboard   (localhost only)"
+fi
 if [ -n "$BG_FLAG" ]; then
     echo "  mode:       background"
 else
