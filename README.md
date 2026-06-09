@@ -348,14 +348,16 @@ peer-scaling hardening; see
 
 ## Dashboard
 
-A running peer node serves two human-facing web pages on its peer port:
+A running peer node serves three human-facing web pages on its peer port:
 
-- `/dashboard` — read-only overview: known peers, sync status (failed paths and
-  conflicts), storage volumes with live status (ONLINE / OFFLINE / **STALLED**)
-  and free space, plus realm/auth metadata.
+- `/dashboard` — read-only overview: known peers, a network summary, sync status
+  (failed paths and conflicts), storage volumes with live status (ONLINE /
+  OFFLINE / **STALLED** / **PARKED**) and free space, plus realm/auth metadata.
 - `/dashboard/config` — applies peer-add immediately; for everything else
   (backends, roles, sync policy, rate limits) it shows the exact
   `ffsctl`/`configure.sh` command to copy, run, and then restart the service.
+- `/dashboard/logs` — recent in-process events (peer activity, auth rejections,
+  sync/mirror failures) with level filtering.
 
 ```text
 http://localhost:<peer-port>/dashboard
