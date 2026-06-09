@@ -171,7 +171,8 @@ echo "  realm:      $REALM"
 echo "  config:     $CONFIG_FILE"
 echo "  mountpoint: $MOUNTPOINT"
 if [ -n "$PORT" ]; then
-    echo "  dashboard:  http://localhost:$PORT/dashboard   (localhost only)"
+    echo "  dashboard:  http://localhost:$PORT/dashboard"
+    echo "              (localhost only — open from this machine or an SSH tunnel)"
 fi
 if [ -n "$BG_FLAG" ]; then
     echo "  mode:       background"

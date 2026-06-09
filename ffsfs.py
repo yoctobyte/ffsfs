@@ -1768,7 +1768,16 @@ def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool 
     except Exception as e:
         print(f"[ffsfs] peer server start failed: {e}")
     
-    FUSE(fs, mountpoint, foreground=foreground, nothreads=False)
+    if foreground:
+        print(f"[ffsfs] Mounted '{realm or fs.realm}' at {mountpoint}. "
+              f"Press Ctrl-C to unmount and stop.")
+    try:
+        FUSE(fs, mountpoint, foreground=foreground, nothreads=False)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if foreground:
+            print("\n[ffsfs] Shutting down — unmounting and stopping peer server...")
 
 
 def load_config_file(path: str) -> dict:
