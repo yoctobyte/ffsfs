@@ -103,6 +103,26 @@ def test_dashboard_volumes_panel_shows_status_without_hanging(tmp_path):
 
 
 @pytest.mark.unit
+def test_dashboard_network_and_peer_overview(dash, monkeypatch):
+    import time as _t
+    old_seen = dict(ffspeers._last_seen)
+    old_cache = ffspeers._peer_cache
+    ffspeers._last_seen["127.0.0.1:18766"] = _t.time() - 5
+    ffspeers._peer_cache = {"127.0.0.1:18766": {"files": {"a.txt": [], "b.txt": []}}}
+    try:
+        body = dash.get("/dashboard").get_data(as_text=True)
+        assert "Network" in body
+        assert "bind" in body and "autodiscovery" in body
+        assert "Cached files" in body
+        assert "5s ago" in body            # relative last-seen
+        assert ">2<" in body or "2" in body  # cached file count for the peer
+    finally:
+        ffspeers._last_seen.clear()
+        ffspeers._last_seen.update(old_seen)
+        ffspeers._peer_cache = old_cache
+
+
+@pytest.mark.unit
 def test_config_add_peer_applies_live(dash, monkeypatch):
     monkeypatch.setattr(ffspeers, "save_config", lambda: None)
     resp = dash.post("/dashboard/config",

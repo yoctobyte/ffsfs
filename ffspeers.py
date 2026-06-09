@@ -1585,24 +1585,56 @@ def _realm_collaboration():
     return _guarded_value(_load, timeout=1.0)
 
 
+def _fmt_ago(seconds) -> str:
+    if seconds is None:
+        return "never"
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s ago"
+    if s < 3600:
+        return f"{s // 60}m ago"
+    if s < 86400:
+        return f"{s // 3600}h ago"
+    return f"{s // 86400}d ago"
+
+
 def _collect_peers():
     now = time.time()
     rows = []
     for peer in _known_peers:
         last = _last_seen.get(peer, 0)
+        ago = (now - last) if last else None
+        pc = _peer_cache.get(peer) or {}
+        files = len(pc.get("files") or {})
         rows.append({
             "peer": peer,
             "last": (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last))
                      if last else "—"),
+            "ago": _fmt_ago(ago),
             "active": bool(last and (now - last) < LIVENESS_INTERVAL * 2),
+            "files": files,
         })
     return rows
+
+
+def _network_summary():
+    verifier = _request_verifier
+    return {
+        "bind": f"{PEER_BIND_HOST}:{_actual_flask_port or PEER_PORT}",
+        "autodiscover": bool(AUTO_DISCOVER),
+        "trust_unknown": bool(TRUST_UNKNOWN_PEER),
+        "manual_approval": bool(getattr(verifier, "manual_approval", False)),
+        "approved_count": len(getattr(verifier, "approved_peers", set()) or set()),
+        "peer_count": len(_known_peers),
+        "active_count": sum(1 for p in _collect_peers() if p["active"]),
+    }
 
 
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
     e = _esc.escape
     peers = _collect_peers()
+    net = _network_summary()
     volumes = _collect_volumes()
     sync = None
     if _sync_worker is not None:
@@ -1612,11 +1644,12 @@ def dashboard():
             sync = {"error": str(exc)}
 
     peer_rows = "\n".join(
-        f"<tr><td>{e(p['peer'])}</td><td>{p['last']}</td>"
+        f"<tr><td>{e(p['peer'])}</td><td>{p['last']}</td><td>{e(p['ago'])}</td>"
+        f"<td>{p['files']}</td>"
         f"<td class='{'ok' if p['active'] else 'warn'}'>"
         f"{'active' if p['active'] else 'stale'}</td></tr>"
         for p in peers
-    ) or "<tr><td colspan='3'><em>No peers known.</em></td></tr>"
+    ) or "<tr><td colspan='5'><em>No peers known.</em></td></tr>"
 
     vol_rows = []
     for v in volumes:
@@ -1681,8 +1714,18 @@ def dashboard():
   · notify scope {e(NOTIFY_SCOPE)}{collab_html}
 </div>
 
+<h2>Network</h2>
+<div class="meta">
+  bind <strong>{e(net['bind'])}</strong>
+  · autodiscovery {'<span class="ok">on</span>' if net['autodiscover'] else 'off'}
+  · peers {net['peer_count']} ({net['active_count']} active)
+  · peer approval {'manual' if net['manual_approval'] else 'automatic'}
+  {f"· approved nodes {net['approved_count']}" if net['manual_approval'] else ''}
+</div>
+
 <h2>Peers</h2>
-<table><thead><tr><th>Peer</th><th>Last seen</th><th>State</th></tr></thead>
+<table><thead><tr><th>Peer</th><th>Last seen</th><th>Ago</th>
+<th>Cached files</th><th>State</th></tr></thead>
 <tbody>{peer_rows}</tbody></table>
 
 <h2>Volumes</h2>

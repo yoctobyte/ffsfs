@@ -25,7 +25,10 @@ stopping for features/fixes/logs.
    into peer events, auth rejections, fetch integrity failures, and sync/mirror
    failures. REMAINING: the broad sweep of `except Exception: pass` -> granular
    catch + log across all core paths (large/diffuse; do opportunistically).
-5. **Network/peer overview in dashboard** — richer than the current peers table.
+5. **Network/peer overview in dashboard** — DONE: a Network panel (bind
+   host:port, autodiscovery, peer/active counts, manual-vs-automatic approval,
+   approved-node count) and an enriched peers table (relative "ago", cached
+   file count per peer, active/stale state).
 6. **HTTPS at setup** — http/https/both option. Minor. Measure VM overhead,
    especially connection setup (we likely do not use keep-alive — check).
 
