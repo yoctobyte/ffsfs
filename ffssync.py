@@ -30,6 +30,7 @@ from ffsvolumes import (
     ROLE_CACHE,
 )
 from ffsutils import is_hidden_mode, parse_versioned_filename
+import ffslog
 
 
 SYNC_MODE_LAZY = "lazy"
@@ -241,7 +242,7 @@ class SyncWorker:
             except Exception as e:
                 failed += 1
                 self._record_failure(vpath, str(e))
-                print(f"[ffsfs] sync fetch failed for {vpath}: {e}")
+                ffslog.warn(f"sync fetch failed for {vpath}: {e}", source="sync")
 
         for vpath, (tomb_ts, _tomb_name) in remote_tombstones.items():
             local_ts = self._local_latest_ts(vpath)

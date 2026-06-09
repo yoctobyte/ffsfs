@@ -21,6 +21,7 @@ from ffsutils import (
 )
 import hashlib
 from ffsratelimit import RateLimits
+import ffslog
 
 import unicodedata
 import html as _esc
@@ -537,7 +538,7 @@ _AUTH_EXEMPT_PATHS = {"/healthz"}
 # these are exempt from the peer-API HMAC check and instead gated to localhost.
 # Remote access (session password per agents/project_plan.md) is a TODO; until
 # then the dashboard is reachable only from loopback (or via an SSH tunnel).
-_UI_PATHS = {"/dashboard", "/dashboard/config"}
+_UI_PATHS = {"/dashboard", "/dashboard/config", "/dashboard/logs"}
 
 
 def _is_loopback_request() -> bool:
@@ -562,6 +563,8 @@ def _check_auth():
     ok, reason = _request_verifier.verify(
         request.method, request.path, query_params, body, headers)
     if not ok:
+        ffslog.warn(f"auth rejected from {request.remote_addr}: {reason} "
+                    f"({request.method} {request.path})", source="auth")
         return jsonify({"error": f"auth failed: {reason}"}), 403
 
 # Peer state
@@ -824,8 +827,9 @@ def _wants_html() -> bool:
 
 
 def _log(msg: str) -> None:
-    if VERBOSE:
-        print(msg)
+    # Record to the shared ring (for the dashboard) without double-printing;
+    # honor VERBOSE for the stdout echo only.
+    ffslog.record("info", msg, source="peer", echo=VERBOSE)
 
 def _normalize_remote_addr(addr: str) -> str:
     try:
@@ -1151,8 +1155,9 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False,
                 os.remove(local_path)
             except OSError:
                 pass
-            print(f"[peer] Integrity check FAILED for {best_name} from "
-                  f"{best_peer}: content hash mismatch, discarded")
+            ffslog.warn(f"integrity check FAILED for {best_name} from "
+                        f"{best_peer}: content hash mismatch, discarded",
+                        source="sync")
             return False
 
         _log(f"[peer] Pulled {best_name} from {best_peer} → {local_path}")
@@ -1667,7 +1672,7 @@ def dashboard():
 <style>{_DASHBOARD_CSS}</style>
 <h1>FFSFS Dashboard</h1>
 <nav><a href="/dashboard">Overview</a><a href="/dashboard/config">Configuration</a>
-     <a href="/status?html=1">Legacy status</a></nav>
+     <a href="/dashboard/logs">Logs</a><a href="/status?html=1">Legacy status</a></nav>
 <div class="meta">
   <strong>{e(_get_node_name())}</strong> · realm <strong>{e(str(_REALM))}</strong>
   · port {e(str(_actual_flask_port))}
@@ -1757,6 +1762,42 @@ def dashboard_config():
 <h2>Configuration commands</h2>
 <p class="meta">Replace placeholders (LABEL, HOST, paths) before running.</p>
 {cmd_html}
+"""
+    return make_response(html, 200)
+
+
+@app.route("/dashboard/logs", methods=["GET"])
+def dashboard_logs():
+    e = _esc.escape
+    min_level = (request.args.get("level") or "").lower()
+    if min_level not in ("debug", "info", "warn", "error"):
+        min_level = None
+    entries = ffslog.recent(limit=300, min_level=min_level)
+
+    rows = "\n".join(
+        f"<tr class='{e(en['level'])}'>"
+        f"<td>{time.strftime('%H:%M:%S', time.localtime(en['ts']))}</td>"
+        f"<td>{e(en['level'])}</td><td>{e(en.get('source',''))}</td>"
+        f"<td>{e(en['msg'])}</td></tr>"
+        for en in reversed(entries)  # newest first
+    ) or "<tr><td colspan='4'><em>No events recorded yet.</em></td></tr>"
+
+    html = f"""<!doctype html>
+<meta charset="utf-8"><title>FFSFS Logs</title>
+<style>{_DASHBOARD_CSS}
+  tr.warn td {{ background:#fff7e6; }} tr.error td {{ background:#fde8e8; }}
+  td:nth-child(4) {{ font-family:ui-monospace,monospace; }}
+</style>
+<h1>FFSFS Logs</h1>
+<nav><a href="/dashboard">Overview</a><a href="/dashboard/config">Configuration</a>
+     <a href="/dashboard/logs">Logs</a></nav>
+<p class="meta">Recent in-process events (newest first, last {len(entries)} shown).
+  Filter: <a href="/dashboard/logs">all</a> ·
+  <a href="/dashboard/logs?level=info">info+</a> ·
+  <a href="/dashboard/logs?level=warn">warn+</a> ·
+  <a href="/dashboard/logs?level=error">error</a></p>
+<table><thead><tr><th>Time</th><th>Level</th><th>Source</th><th>Message</th></tr></thead>
+<tbody>{rows}</tbody></table>
 """
     return make_response(html, 200)
 

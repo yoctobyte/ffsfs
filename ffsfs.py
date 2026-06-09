@@ -40,6 +40,7 @@ from ffsutils import (
 from ffsvolumes import StoragePool, Volume, load_pool_config
 from ffssync import SyncPolicy, SyncWorker
 from ffsratelimit import RateLimits
+import ffslog
 
 try:
     import ffspeers as peers
@@ -560,7 +561,7 @@ class StorageBackend:
             try:
                 self._copy_version_to_volume(source_path, vol, vpath, final_name)
             except Exception as e:
-                print(f"[ffsfs] mirror replication failed for {vol.label}: {e}")
+                ffslog.warn(f"mirror replication failed for {vol.label}: {e}", source="mirror")
                 pending.append(vol.vol_id)
         self._append_pending_replication(vpath, final_name, size, pending)
 

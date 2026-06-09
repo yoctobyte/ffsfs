@@ -20,8 +20,11 @@ stopping for features/fixes/logs.
    writes queue as pending and catch up on attach. Live service applies it on
    next restart. (Rotating *different* physical disks = separate volume ids =
    the larger rotation UX, still open under queue #2.)
-4. **Exception handling + logs** — replace broad `except Exception: pass` with
-   granular catches + logging; surface a log view in the dashboard.
+4. **Exception handling + logs** — log view DONE: in-process ring buffer
+   (`ffslog.py`) + `/dashboard/logs` page (level filter, newest-first), wired
+   into peer events, auth rejections, fetch integrity failures, and sync/mirror
+   failures. REMAINING: the broad sweep of `except Exception: pass` -> granular
+   catch + log across all core paths (large/diffuse; do opportunistically).
 5. **Network/peer overview in dashboard** — richer than the current peers table.
 6. **HTTPS at setup** — http/https/both option. Minor. Measure VM overhead,
    especially connection setup (we likely do not use keep-alive — check).
