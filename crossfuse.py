@@ -16,12 +16,34 @@ IS_WINDOWS = (sys.platform == "win32")
 
 # ---------- POSIX: re-exporta fusepy ----------
 if not IS_WINDOWS:
-    # fusepy imports as "fuse" upstream, but Debian/Ubuntu package it as
-    # "fusepy" to avoid clashing with the older python-fuse bindings.
-    try:
-        from fuse import FUSE, Operations, FuseOSError as _FuseOSError  # type: ignore
-    except ImportError:
-        from fusepy import FUSE, Operations, FuseOSError as _FuseOSError  # type: ignore
+    # fusepy imports as "fuse" upstream (pip), but Debian/Ubuntu package it as
+    # "fusepy" to avoid clashing with the older python-fuse bindings. Try both.
+    # NOTE: fusepy loads the libfuse C library at import time, so a missing
+    # libfuse raises OSError/EnvironmentError here (NOT ImportError) — catch
+    # broadly so we can give one clear, actionable message either way.
+    FUSE = Operations = _FuseOSError = None
+    _fuse_err = None
+    for _modname in ("fuse", "fusepy"):
+        try:
+            _mod = __import__(_modname)
+            FUSE, Operations, _FuseOSError = _mod.FUSE, _mod.Operations, _mod.FuseOSError
+            _fuse_err = None
+            break
+        except Exception as _e:  # ImportError (module) or OSError (libfuse missing)
+            _fuse_err = _e
+    if FUSE is None:
+        raise ImportError(
+            "FFSFS could not load the FUSE Python binding.\n"
+            f"  underlying error: {_fuse_err!r}\n"
+            "  Fix on Ubuntu/Debian (system Python):\n"
+            "    sudo apt install python3-fusepy libfuse2t64   "
+            "(use libfuse2 on older releases)\n"
+            "  In a virtualenv: the binding goes in the venv but libfuse stays a "
+            "system package:\n"
+            "    pip install fusepy           # provides the 'fuse' module\n"
+            "    sudo apt install libfuse2t64\n"
+            "  Note: the 'python3-fuse' package is a different, incompatible binding."
+        )
     FuseOSError = _FuseOSError  # conserva semantica
 else:
     # ---------- Windows: WinFsp per winfspy ----------
