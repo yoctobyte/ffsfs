@@ -12,14 +12,40 @@ resolve_python() {
     echo "python3"
 }
 
-# Offer to create a project virtualenv on first interactive setup. Default yes:
-# it isolates and pins the pip deps (flask/requests/fusepy) and makes future
-# "git pull + restart" upgrades cleaner. Skipped if a venv/override is already
-# in play, if non-interactive, or if the user opts out.
-maybe_offer_venv() {
+# Install requirements into a venv (idempotent) and verify the key imports.
+# Returns nonzero if deps are still not importable.
+_venv_ensure_deps() {
+    local venv="$1"
+    echo "Ensuring Python dependencies in .venv ..."
+    if ! "$venv/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"; then
+        echo "warning: pip install failed in the venv." >&2
+        return 1
+    fi
+    if ! "$venv/bin/python3" -c "import flask, requests, fuse" 2>/dev/null; then
+        echo "warning: required modules not importable in the venv." >&2
+        echo "  If the missing one is 'fuse', the libfuse C library is a SYSTEM" >&2
+        echo "  package (not pip): sudo apt install libfuse2t64  (or libfuse2)." >&2
+        return 1
+    fi
+    return 0
+}
+
+# Resolve/prepare the Python environment.
+# - Honor FFSFS_PYTHON / active $VIRTUAL_ENV as-is.
+# - If a project .venv exists, ENSURE its deps are present (this is the common
+#   "venv made earlier but empty/partial" trap) — idempotent.
+# - Otherwise offer to create one (default yes) on interactive setup.
+setup_python_env() {
     [ -n "${FFSFS_PYTHON:-}" ] && return 0
     [ -n "${VIRTUAL_ENV:-}" ] && return 0
-    [ -x "$SCRIPT_DIR/.venv/bin/python3" ] && return 0
+
+    if [ -x "$SCRIPT_DIR/.venv/bin/python3" ]; then
+        if ! _venv_ensure_deps "$SCRIPT_DIR/.venv"; then
+            echo "  Fix the venv (or remove .venv to use system python3)." >&2
+        fi
+        return 0
+    fi
+
     [ -t 0 ] || return 0                      # only when interactive
     [ "${FFSFS_NO_VENV:-}" = "1" ] && return 0
 
@@ -35,17 +61,15 @@ maybe_offer_venv() {
         rm -rf "$SCRIPT_DIR/.venv"
         return 0
     fi
-    echo "Installing dependencies (flask, requests, fusepy) ..."
-    if ! "$SCRIPT_DIR/.venv/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"; then
-        echo "warning: pip install failed; falling back to system python3." >&2
-        echo "  (the FUSE C library still comes from system packages: libfuse2t64/libfuse2)" >&2
+    if ! _venv_ensure_deps "$SCRIPT_DIR/.venv"; then
+        echo "warning: venv dependency setup incomplete; falling back to system python3." >&2
         rm -rf "$SCRIPT_DIR/.venv"
         return 0
     fi
     echo "Virtualenv ready. setup.sh and launch.sh will use it automatically."
 }
 
-maybe_offer_venv
+setup_python_env
 PYBIN="$(resolve_python)"
 
 exec "$PYBIN" "$SCRIPT_DIR/ffssetup.py" "$@"
