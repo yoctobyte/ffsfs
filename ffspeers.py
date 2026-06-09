@@ -575,8 +575,13 @@ def _check_auth():
     ok, reason = _request_verifier.verify(
         request.method, request.path, query_params, body, headers)
     if not ok:
+        present = [h for h in ("X-FFSFS-Realm", "X-FFSFS-Node", "X-FFSFS-Timestamp",
+                               "X-FFSFS-Nonce", "X-FFSFS-Signature")
+                   if request.headers.get(h)]
+        ua = request.headers.get("User-Agent", "?")
         ffslog.warn(f"auth rejected from {request.remote_addr}: {reason} "
-                    f"({request.method} {request.path})", source="auth")
+                    f"({request.method} {request.path}); ffsfs headers present="
+                    f"{present or 'NONE'}; ua={ua}", source="auth")
         return jsonify({"error": f"auth failed: {reason}"}), 403
 
 # Peer state
