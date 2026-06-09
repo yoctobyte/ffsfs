@@ -310,7 +310,7 @@ def test_get_newer_or_missing_fetches_newest_across_peers(tmp_path, monkeypatch)
             "peer-b:8765": {"files": {"doc.txt": [{"name": newest_name}]}},
         }
         ffspeers._REALM = "test"
-        monkeypatch.setattr(ffspeers.requests, "get", fake_get)
+        monkeypatch.setattr(ffspeers._session, "get", fake_get)
 
         local_path = ffspeers.get_newer_or_missing("doc.txt", 0, fetch=True)
 
@@ -354,7 +354,7 @@ def test_get_newer_or_missing_discards_corrupted_fetch(tmp_path, monkeypatch):
             "peer-a:8765": {"files": {"doc.txt": [{"name": name}]}},
         }
         ffspeers._REALM = "test"
-        monkeypatch.setattr(ffspeers.requests, "get", fake_get)
+        monkeypatch.setattr(ffspeers._session, "get", fake_get)
 
         result = ffspeers.get_newer_or_missing("doc.txt", 0, fetch=True)
 
@@ -407,7 +407,7 @@ def test_get_newer_or_missing_consumes_background_limits(tmp_path, monkeypatch):
             "peer-a:8765": {"files": {"doc.txt": [{"name": versioned}]}},
         }
         ffspeers._REALM = "test"
-        monkeypatch.setattr(ffspeers.requests, "get", fake_get)
+        monkeypatch.setattr(ffspeers._session, "get", fake_get)
 
         local_path = ffspeers.get_newer_or_missing(
             "doc.txt", 0, fetch=True, rate_limits=limits)

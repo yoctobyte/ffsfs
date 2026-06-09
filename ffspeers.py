@@ -805,11 +805,17 @@ def _signed_headers(method: str, path: str, query_params: dict = None,
                         query_params or {}, body, _REALM, _get_node_name())
 
 
+# Shared session so outgoing peer calls reuse TCP connections (keep-alive +
+# pooling) instead of paying connection setup per request. Matters for chatty
+# sync/notify traffic and is the prerequisite for cheap TLS later.
+_session = requests.Session()
+
+
 def _authed_get(url: str, path: str, params: dict = None, **kwargs) -> "requests.Response":
     hdrs = _signed_headers("GET", path, params or {})
     if hdrs:
         kwargs.setdefault("headers", {}).update(hdrs)
-    return requests.get(url, params=params, **kwargs)
+    return _session.get(url, params=params, **kwargs)
 
 
 def _authed_post(url: str, path: str, json_body=None, **kwargs) -> "requests.Response":
@@ -818,7 +824,7 @@ def _authed_post(url: str, path: str, json_body=None, **kwargs) -> "requests.Res
     hdrs = _signed_headers("POST", path, {}, body)
     if hdrs:
         kwargs.setdefault("headers", {}).update(hdrs)
-    return requests.post(url, json=json_body, **kwargs)
+    return _session.post(url, json=json_body, **kwargs)
 
 def _wants_html() -> bool:
     # Accept-header vel ?html=1 → pagina HTML redditur

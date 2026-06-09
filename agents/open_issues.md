@@ -29,8 +29,14 @@ stopping for features/fixes/logs.
    host:port, autodiscovery, peer/active counts, manual-vs-automatic approval,
    approved-node count) and an enriched peers table (relative "ago", cached
    file count per peer, active/stale state).
-6. **HTTPS at setup** — http/https/both option. Minor. Measure VM overhead,
-   especially connection setup (we likely do not use keep-alive — check).
+6. **HTTPS at setup** — SKIPPED for now (moderate overhaul: self-signed cert
+   lifecycle, server SSL context, client TLS, peer-url scheme, dual-listener
+   "both" mode) with low marginal value on a trusted LAN where HMAC already
+   authenticates and eavesdropping is in accepted scope. DONE the cheap part it
+   pointed at: outgoing peer calls now use a shared requests.Session
+   (keep-alive + connection pooling) so connection setup is not paid per call —
+   also the prerequisite for cheap TLS later. REMAINING: HTTPS option +
+   server-side keep-alive tuning + an actual overhead benchmark.
 
 ## Infrastructure / robustness
 
