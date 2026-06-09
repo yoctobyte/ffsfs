@@ -144,10 +144,7 @@ def config_base() -> str:
     return os.path.expanduser("~/.ffsfs/.storage")
 
 
-def default_port_for_realm(realm: str, floor: int = 10000, span: int = 40000) -> int:
-    digest = hashlib.sha256(realm.encode("utf-8")).digest()
-    value = int.from_bytes(digest[:4], "big")
-    return floor + (value % span)
+from ffsutils import default_port_for_realm  # single source of truth
 
 
 def _cfg_path(realm: str) -> str:

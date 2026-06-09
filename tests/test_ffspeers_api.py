@@ -101,10 +101,11 @@ def test_gossip_seeds_auto_add_unknown_peer_when_enabled(peer_client, monkeypatc
 
 
 @pytest.mark.unit
-def test_ping_all_uses_default_port_for_host_only_peer(peer_client, monkeypatch):
+def test_ping_all_uses_realm_port_for_host_only_peer(peer_client, monkeypatch):
+    # A bare hostname must resolve to the realm-derived port (every same-realm
+    # node lands there), NOT the legacy static PEER_PORT/8765.
+    from ffsutils import default_port_for_realm
     calls = []
-    old_port = ffspeers.PEER_PORT
-    ffspeers.PEER_PORT = 23456
     ffspeers._known_peers = ["host-b.local"]
 
     class FakeResponse:
@@ -115,14 +116,26 @@ def test_ping_all_uses_default_port_for_host_only_peer(peer_client, monkeypatch)
         return FakeResponse()
 
     monkeypatch.setattr(ffspeers, "_authed_get", fake_get)
+    ffspeers.ping_all()
 
-    try:
-        ffspeers.ping_all()
-    finally:
-        ffspeers.PEER_PORT = old_port
-
-    assert calls[0][0] == "http://host-b.local:23456/hello"
+    expected = default_port_for_realm(ffspeers._REALM)
+    assert calls[0][0] == f"http://host-b.local:{expected}/hello"
     assert ffspeers._last_seen["host-b.local"] > 0
+
+
+@pytest.mark.unit
+def test_peer_url_bare_host_uses_realm_port():
+    from ffsutils import default_port_for_realm
+    old = ffspeers._REALM
+    ffspeers._REALM = "myrealm"
+    try:
+        port = default_port_for_realm("myrealm")
+        assert ffspeers._peer_url("host-b", "/hello") == f"http://host-b:{port}/hello"
+        # an explicit port is always honored as-is
+        assert ffspeers._peer_url("host-b:9999", "/x") == "http://host-b:9999/x"
+        assert port != 8765  # not the legacy static default
+    finally:
+        ffspeers._REALM = old
 
 
 @pytest.mark.unit

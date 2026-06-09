@@ -29,6 +29,16 @@ METALOG_FILENAME = ".ffsfs-meta.log"
 # auto-pruned (keep-latest), so they do not accumulate.
 NODE_STATUS_DIR = ".ffsfs-nodes"
 
+
+def default_port_for_realm(realm: str, floor: int = 10000, span: int = 40000) -> int:
+    """Stable peer port derived from the realm name. All hosts in a realm land
+    on the same default port, so a peer added by bare hostname is reachable
+    without specifying a port."""
+    import hashlib
+    digest = hashlib.sha256((realm or "").encode("utf-8")).digest()
+    value = int.from_bytes(digest[:4], "big")
+    return floor + (value % span)
+
 # Token embedded in temporary filenames: any basename that *contains* f".{NULL_HASH}."
 # is treated as an in-progress temp.
 NULL_HASH = "NULL_HASH"

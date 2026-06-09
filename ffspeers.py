@@ -19,6 +19,7 @@ from ffsutils import (
     normalize_vpath,
     is_hidden_mode,
     base32_crockford,
+    default_port_for_realm,
 )
 import hashlib
 from ffsratelimit import RateLimits
@@ -132,9 +133,6 @@ def lazy_list_dir_union(vdir: str) -> Dict[str, List[str]]:
     with _peers_lock:
         peers = list(_known_peers)
     for peer in peers:
-        host, port = _split_host_port(peer)
-        if port is None:
-            continue
         dc = _ensure_dir_cached_from_peer(peer, vdir or "")
         dirs_u.update(dc.get("dirs", []))
         files_u.update(dc.get("files", []))
@@ -193,9 +191,6 @@ def lazy_best_remote_head(vpath: str) -> Optional[Dict[str, Any]]:
     with _peers_lock:
         peers = list(_known_peers)
     for peer in peers:
-        host, port = _split_host_port(peer)
-        if port is None:
-            continue
         ver = _ensure_head_cached_from_peer(peer, vpath)
         if not ver:
             continue
@@ -863,7 +858,11 @@ def _normalize_remote_addr(addr: str) -> str:
 def _peer_url(peer: str, path: str) -> str:
     if ":" in peer and peer.rsplit(":", 1)[-1].isdigit():
         return f"http://{peer}{path}"
-    return f"http://{peer}:{PEER_PORT}{path}"
+    # Bare hostname: use the realm-derived default port (the port every same-realm
+    # node lands on), NOT the legacy static 8765. PEER_PORT is frozen at import
+    # to 8765 unless overridden, so it must not be the fallback here.
+    port = default_port_for_realm(_REALM) if _REALM else PEER_PORT
+    return f"http://{peer}:{port}{path}"
 
 #historic. newer implementation implements dynamic caching
 #def _ensure_peer_cache_entry(peer_id: str) -> Dict[str, Any]:
@@ -972,7 +971,7 @@ def ping_all():
     for peer in peers:
         host, port = _split_host_port(peer)
         if port is None:
-            port = PEER_PORT
+            port = default_port_for_realm(_REALM) if _REALM else PEER_PORT
         try:
             url = f"http://{host}:{port}/hello"
             params = {"realm": _REALM, "ts": time.time(), "port": _actual_flask_port or PEER_PORT}
