@@ -239,6 +239,8 @@ def test_pool_write_target_honors_reserve_bytes(tmp_path, monkeypatch):
         f_frsize = 1
 
     monkeypatch.setattr("ffsvolumes.os.statvfs", lambda path: StatVfs())
+    # isolate explicit reserve_bytes semantics from the global free-space floor
+    monkeypatch.setattr("ffsvolumes.DEFAULT_MIN_FREE_BYTES", 0)
 
     primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY, reserve_bytes=6)
     primary.init()
@@ -248,6 +250,56 @@ def test_pool_write_target_honors_reserve_bytes(tmp_path, monkeypatch):
 
     assert pool.write_target(size=4) is primary
     assert pool.write_target(size=5) is secondary
+
+
+@pytest.mark.unit
+def test_default_free_floor_blocks_substantive_write_but_allows_markers(tmp_path, monkeypatch):
+    class StatVfs:
+        f_bavail = 100  # only 100 bytes free, far below the 256 MiB default floor
+        f_frsize = 1
+    monkeypatch.setattr("ffsvolumes.os.statvfs", lambda path: StatVfs())
+    vol = Volume(str(tmp_path / "tiny"))
+    vol.init()
+    assert vol.can_accept_write(10) is False   # substantive write blocked by floor
+    assert vol.can_accept_write(0) is True      # zero-size marker bypasses the floor
+    assert vol.can_accept_write() is True        # size unknown -> allowed
+
+
+@pytest.mark.unit
+def test_write_target_prefers_volume_with_more_free_space(tmp_path, monkeypatch):
+    free = {}
+
+    def fake_statvfs(path):
+        s = type("S", (), {})()
+        s.f_frsize = 1
+        s.f_bavail = free.get(os.path.abspath(path), 0)
+        return s
+
+    monkeypatch.setattr("ffsvolumes.os.statvfs", fake_statvfs)
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY)
+    primary.init()
+    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE)
+    secondary.init()
+    # both above the 256 MiB floor, but the secondary has far more headroom
+    free[primary.path] = 300 * 1024 * 1024
+    free[secondary.path] = 50 * 1024 * 1024 * 1024
+    pool = StoragePool(primary=primary, secondaries=[secondary])
+    # don't dump onto the smaller primary: route to the roomier secondary
+    assert pool.write_target(size=1024) is secondary
+
+
+@pytest.mark.unit
+def test_write_target_ties_keep_primary_first(tmp_path, monkeypatch):
+    class StatVfs:
+        f_bavail = 10 * 1024 * 1024 * 1024  # equal, plenty
+        f_frsize = 1
+    monkeypatch.setattr("ffsvolumes.os.statvfs", lambda path: StatVfs())
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY)
+    primary.init()
+    secondary = Volume(str(tmp_path / "hdd"), role=ROLE_ARCHIVE)
+    secondary.init()
+    pool = StoragePool(primary=primary, secondaries=[secondary])
+    assert pool.write_target(size=1024) is primary  # equal free -> primary wins
 
 
 @pytest.mark.unit

@@ -9,8 +9,11 @@ Goal: a reasonably complete app so real LAN file-storage testing does not keep
 stopping for features/fixes/logs.
 
 1. **VM runner reliability** — DONE (reap stale VMs + bounded port guard).
-2. **Storage policy: don't fill small drives** — capacity/size-aware write
-   routing. Most important feature. (queue #2)
+2. **Storage policy: don't fill small drives** — capacity/headroom routing DONE
+   (default free-space floor on every volume so no drive fills to the brim;
+   write_target prefers the volume with the most free space, ties keep primary;
+   zero-size markers bypass the floor). REMAINING: job/prefix-aware routing and
+   media/role preference (theme "music only" → only /music lands there).
 3. **Clean "unmount/eject backend"** — take a backend offline cleanly while
    keeping it registered for next sessions (disk-rotation primitive).
 4. **Exception handling + logs** — replace broad `except Exception: pass` with

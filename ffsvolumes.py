@@ -35,6 +35,13 @@ LIVENESS_PROBE_TIMEOUT = float(os.environ.get("FFSFS_VOL_PROBE_TIMEOUT", "5.0"))
 LIVENESS_TTL = float(os.environ.get("FFSFS_VOL_LIVENESS_TTL", "15.0"))
 LIVENESS_STALL_BACKOFF = float(os.environ.get("FFSFS_VOL_STALL_BACKOFF", "30.0"))
 
+# Default free-space floor applied to every volume so a substantive write never
+# fills a drive to the brim (env-overridable). An explicit per-volume
+# reserve_bytes raises the floor but never lowers it. Zero-size markers
+# (tombstones/move hints) bypass the floor so deletes always work on a full disk.
+DEFAULT_MIN_FREE_BYTES = int(os.environ.get(
+    "FFSFS_VOL_MIN_FREE_BYTES", str(256 * 1024 * 1024)))
+
 
 def _probe_with_timeout(fn, timeout: float):
     """Run fn() in a daemon thread; give up after timeout.
@@ -165,6 +172,15 @@ class Volume:
                     pass
         return total
 
+    def free_bytes(self) -> Optional[int]:
+        """Free space available to an unprivileged writer, or None if it cannot
+        be read (e.g. path gone)."""
+        try:
+            st = os.statvfs(self.path)
+            return int(st.f_bavail) * int(st.f_frsize)
+        except OSError:
+            return None
+
     def can_accept_write(self, size: int = None) -> bool:
         if size is None:
             return True
@@ -172,13 +188,15 @@ class Volume:
             return False
         if self.max_bytes is not None and self.used_bytes() + size > int(self.max_bytes):
             return False
-        if self.reserve_bytes is not None:
-            try:
-                st = os.statvfs(self.path)
-                available = int(st.f_bavail) * int(st.f_frsize)
-            except OSError:
+        # Free-space floor: never let a substantive write drop the drive below
+        # its reserve (explicit, but at least DEFAULT_MIN_FREE_BYTES). Zero-size
+        # markers bypass it so deletes/move hints still work on a full disk.
+        if size > 0:
+            reserve = max(int(self.reserve_bytes or 0), DEFAULT_MIN_FREE_BYTES)
+            available = self.free_bytes()
+            if available is None:
                 return False
-            if available - size < int(self.reserve_bytes):
+            if available - size < reserve:
                 return False
         return True
 
@@ -410,15 +428,24 @@ class StoragePool:
         return vol
 
     def write_target(self, size: int = None) -> Optional[Volume]:
-        """Return the best volume for new writes."""
+        """Return the best volume for new writes.
+
+        For sized writes, pick among online volumes that can accept it, then
+        prefer the one with the most free space so large/near-full small drives
+        are spared and writes land where there is headroom. Ties keep the
+        read-target order (primary first), so a single-disk or same-filesystem
+        pool behaves as before.
+        """
         if size is not None:
             candidates = self.read_targets()
             if not candidates and not self.secondaries:
                 candidates = [self.primary]
-            for vol in candidates:
-                if vol.can_accept_write(size):
-                    return vol
-            return None
+            eligible = [v for v in candidates if v.can_accept_write(size)]
+            if not eligible:
+                return None
+            # stable sort: equal free space keeps primary-first ordering
+            eligible.sort(key=lambda v: (v.free_bytes() or 0), reverse=True)
+            return eligible[0]
         if self.primary.is_online():
             return self.primary
         online = self.online_secondaries()
