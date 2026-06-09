@@ -9,9 +9,12 @@ irreplaceable files.
 
 ## Quick Install (Ubuntu)
 
-Impatient path for a typical Ubuntu 24.04+ box. **LAN-only — read the Security
-Scope below first.** If anything here misbehaves, use the detailed steps under
-[Install](#install).
+> ⚠️ **Do not connect this service to the Internet.** FFSFS is for trusted LAN /
+> private overlay networks only — no public IP, no port-forwarding. See
+> [Security Scope](#security-scope--read-first).
+
+Impatient path for a typical Ubuntu 24.04+ box. If anything here misbehaves, use
+the detailed steps under [Install](#install).
 
 Install (creates a realm interactively; offers a venv, default yes):
 
