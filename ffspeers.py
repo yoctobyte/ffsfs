@@ -1197,6 +1197,39 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False,
 
     return False
 
+def sync_node_status_files() -> int:
+    """Pull peers' .ffsfs-nodes/*.json regardless of this node's sync policy, so
+    even lazy/access-only nodes can render the federated view. Returns how many
+    were fetched. Relies on the peer file cache (refreshed independently of
+    policy) to know which status files peers have."""
+    fetched = 0
+    seen = set()
+    for _peer_id, peer_data in list(_peer_cache.items()):
+        files = (peer_data or {}).get("files") or {}
+        for vpath in list(files.keys()):
+            if not (vpath == NODE_STATUS_DIR or vpath.startswith(NODE_STATUS_DIR + "/")):
+                continue
+            if vpath in seen:
+                continue
+            seen.add(vpath)
+            local_ts = 0
+            try:
+                lh = _local_head_for(vpath)
+                if lh:
+                    p = parse_versioned_filename(lh.get("name", ""))
+                    if p:
+                        local_ts = int(p["timestamp"])
+            except Exception:
+                pass
+            try:
+                r = get_newer_or_missing(vpath, local_ts, fetch=True)
+                if r and r is not True:
+                    fetched += 1
+            except Exception:
+                pass
+    return fetched
+
+
 def list_virtual_files(prefix: str) -> List[str]:
     """
     Non-lazy: newest versioned filename per logical vpath under prefix (from global cache).
@@ -1212,6 +1245,9 @@ def list_virtual_files(prefix: str) -> List[str]:
             files = peer_data.get("files") or {}
             for vpath, versions in files.items():
                 if prefix and not vpath.startswith(prefix):
+                    continue
+                # never surface the reserved federated-status dir to listings
+                if vpath == NODE_STATUS_DIR or vpath.startswith(NODE_STATUS_DIR + "/"):
                     continue
                 for entry in versions:
                     name = entry["name"] if isinstance(entry, dict) else str(entry)

@@ -95,6 +95,50 @@ def test_dashboard_federated_page(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_status_dir_excluded_from_remote_listing():
+    # readdir overlays peers.list_virtual_files; reserved status files must not
+    # leak into it (this is the "meta dir visible on the other host" bug).
+    from ffsutils import build_versioned_filename
+    old = ffspeers._peer_cache
+    ffspeers._peer_cache = {
+        "peerA:1": {"files": {
+            "docs/real.txt": [{"name": build_versioned_filename("real.txt", "AAAAAAAA", "write", 100)}],
+            f"{NODE_STATUS_DIR}/peerA.json": [
+                {"name": build_versioned_filename("peerA.json", "BBBBBBBB", "write", 100)}],
+        }},
+    }
+    try:
+        listed = ffspeers.list_virtual_files("")
+        assert any("real.txt" in v for v in listed)
+        assert not any(NODE_STATUS_DIR in v for v in listed)
+    finally:
+        ffspeers._peer_cache = old
+
+
+@pytest.mark.unit
+def test_sync_node_status_files_pulls_regardless_of_policy(monkeypatch):
+    from ffsutils import build_versioned_filename
+    old_cache = ffspeers._peer_cache
+    name = build_versioned_filename("peerA.json", "BBBBBBBB", "write", 200)
+    ffspeers._peer_cache = {
+        "peerA:1": {"files": {
+            f"{NODE_STATUS_DIR}/peerA.json": [{"name": name}],
+            "docs/x.txt": [{"name": build_versioned_filename("x.txt", "CCCCCCCC", "write", 5)}],
+        }},
+    }
+    pulled = []
+    monkeypatch.setattr(ffspeers, "get_newer_or_missing",
+                        lambda vp, ts, fetch=False, **k: pulled.append(vp) or "/tmp/x")
+    monkeypatch.setattr(ffspeers, "_local_head_for", lambda vp: None)
+    try:
+        ffspeers.sync_node_status_files()
+        assert f"{NODE_STATUS_DIR}/peerA.json" in pulled
+        assert "docs/x.txt" not in pulled   # only status files are force-pulled
+    finally:
+        ffspeers._peer_cache = old_cache
+
+
+@pytest.mark.unit
 def test_federated_page_loopback_gated():
     resp = ffspeers.app.test_client().get(
         "/dashboard/federated", environ_overrides={"REMOTE_ADDR": "10.0.0.9"})

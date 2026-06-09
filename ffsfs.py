@@ -1054,6 +1054,13 @@ class FFSFS(Operations):
                 self._prune_node_status()
             except Exception as e:
                 print(f"[ffsfs] node status publish failed: {e}")
+            # Pull peers' status files regardless of sync policy, so even
+            # lazy/access-only nodes show the full federated view.
+            try:
+                if hasattr(peers, "sync_node_status_files"):
+                    peers.sync_node_status_files()
+            except Exception as e:
+                print(f"[ffsfs] node status sync failed: {e}")
             self._stop_evt.wait(NODE_STATUS_INTERVAL_SECS)
 
     def _monitor_open_map(self):
@@ -1437,6 +1444,11 @@ class FFSFS(Operations):
                     if is_hidden_mode(parsed.get("mode")):
                         continue  # don't show deletions as files
                     logical_vpath = parsed["logical_name"]  # e.g. "a/b/file.txt"
+                    # Never surface the reserved federated-status dir to the user,
+                    # even when it arrives via a peer's synced files.
+                    if (logical_vpath == NODE_STATUS_DIR
+                            or logical_vpath.startswith(NODE_STATUS_DIR + "/")):
+                        continue
                     parent = os.path.dirname(logical_vpath)
                     base   = os.path.basename(logical_vpath)
 
