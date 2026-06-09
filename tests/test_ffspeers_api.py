@@ -86,18 +86,36 @@ def test_hello_auto_adds_unknown_peer_when_enabled(peer_client, monkeypatch):
 
 
 @pytest.mark.unit
-def test_gossip_seeds_do_not_auto_add_unknown_peer_by_default(peer_client, monkeypatch):
+def test_gossip_seeds_auto_add_same_realm_by_default(peer_client, monkeypatch):
+    # Autodiscovery on => same-realm peers are joined by default; cross-realm are
+    # discoverable but not joined. (HMAC still gates any data exchange.)
     monkeypatch.setattr(ffspeers, "_save_config_debounced", lambda: None)
-    ffspeers._on_seeds([("test", "10.0.0.2:8765", ffspeers._FSID, 1.0, 1)], ("10.0.0.2", 9999))
-    assert "10.0.0.2:8765" not in ffspeers._known_peers
+    ffspeers._on_seeds([
+        ("test", "10.0.0.2:8765", ffspeers._FSID, 1.0, 1),
+        ("otherrealm", "10.0.0.3:8765", ffspeers._FSID, 1.0, 1),
+    ], ("10.0.0.2", 9999))
+    assert "10.0.0.2:8765" in ffspeers._known_peers       # same realm joined
+    assert "10.0.0.3:8765" not in ffspeers._known_peers   # cross realm not joined
 
 
 @pytest.mark.unit
-def test_gossip_seeds_auto_add_unknown_peer_when_enabled(peer_client, monkeypatch):
-    monkeypatch.setattr(ffspeers, "_save_config_debounced", lambda: None)
-    ffspeers.set_trust_unknown_peers(True)
-    ffspeers._on_seeds([("test", "10.0.0.2:8765", ffspeers._FSID, 1.0, 1)], ("10.0.0.2", 9999))
-    assert "10.0.0.2:8765" in ffspeers._known_peers
+def test_authenticated_hello_auto_adds_peer(peer_client, monkeypatch):
+    # Default trust model: a peer that passes HMAC (proved the realm secret) is
+    # auto-added, with no trust_unknown_peers flag needed.
+    from ffspeer_auth import RequestVerifier, sign_request
+    client, _ = peer_client
+    monkeypatch.setattr(ffspeers, "save_config", lambda *a, **k: None)
+    assert ffspeers.TRUST_UNKNOWN_PEER is False
+    secret = "ab" * 32
+    ffspeers._request_verifier = RequestVerifier(realm="test", realm_secret=secret)
+    try:
+        params = {"realm": "test", "ts": str(time.time()), "port": "19000"}
+        hdrs = sign_request(secret, "GET", "/hello", params, b"", "test", "nodeB")
+        resp = client.get("/hello", query_string=params, headers=hdrs)
+        assert resp.status_code == 200
+        assert any("19000" in p for p in ffspeers._known_peers)
+    finally:
+        ffspeers._request_verifier = None
 
 
 @pytest.mark.unit

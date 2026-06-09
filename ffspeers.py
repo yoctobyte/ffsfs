@@ -705,9 +705,10 @@ def _get_shareable_seeds() -> List[tuple]:
     return seeds
 
 def _on_seeds(seeds: List[tuple], src_addr):
-    """Auto-add only seeds that match our realm (and fsid if strict). Cross-realm stays discoverable, not joined."""
-    if not TRUST_UNKNOWN_PEER:
-        return
+    """Auto-add same-realm peers learned via UDP gossip. Reaching here means
+    autodiscovery is enabled, which is the consent to join same-realm peers; HMAC
+    still gates any actual data exchange, so a spoofed seed can do nothing but
+    sit as a dead entry. Cross-realm seeds stay discoverable, not joined."""
     added = False
     with _peers_lock:
         for realm, peer, fsid, score, seen in seeds:
@@ -813,6 +814,15 @@ def set_trust_unknown_peers(enabled: bool) -> None:
     """Control whether authenticated unknown peers are auto-added to known peers."""
     global TRUST_UNKNOWN_PEER
     TRUST_UNKNOWN_PEER = bool(enabled)
+
+
+def _peer_is_trusted_to_add() -> bool:
+    """Trust model: a peer that AUTHENTICATED (passed HMAC, i.e. proved the realm
+    secret) is trusted by default and auto-added as a known peer — that is what
+    sharing the realm key means. With auth disabled (open testing) fall back to
+    the trust_unknown_peers flag. Manual approval still gates whether a peer is
+    whitelisted for DATA, but the peer is still recorded as known."""
+    return (_request_verifier is not None) or TRUST_UNKNOWN_PEER
 
 
 def _signed_headers(method: str, path: str, query_params: dict = None,
@@ -1349,7 +1359,7 @@ def hello():
     _last_seen[peer_id] = time.time()
 
     # Auto-add unknown peers exactly as they identify (ip:port)
-    if TRUST_UNKNOWN_PEER and peer_id not in _known_peers:
+    if _peer_is_trusted_to_add() and peer_id not in _known_peers:
         _known_peers.append(peer_id)
         try:
             save_config()
@@ -1378,7 +1388,7 @@ def hello():
 
     _last_seen[peer_id] = now
 
-    if TRUST_UNKNOWN_PEER and peer_id not in _known_peers:
+    if _peer_is_trusted_to_add() and peer_id not in _known_peers:
         _log(f"[peer] Auto-adding new peer: {peer_id}")
         _known_peers.append(peer_id)
         try:
@@ -2109,7 +2119,7 @@ def notify():
     peer_id = f"{peer_ip}:{from_port}" if from_port.isdigit() else peer_ip
     _last_seen[peer_id] = time.time()
 
-    if TRUST_UNKNOWN_PEER and peer_id not in _known_peers:
+    if _peer_is_trusted_to_add() and peer_id not in _known_peers:
         _log(f"[peer] Auto-added (via notify): {peer_id}")
         _known_peers.append(peer_id)
         try:
