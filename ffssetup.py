@@ -990,9 +990,16 @@ def prompt_tailscale_seeds(realm: str) -> None:
             except Exception:
                 pass
     data = load_realm(realm)
-    port = _prompt("FFSFS peer port for selected hosts", str(data.get("port") or "8765"))
+    default_port = str(data.get("port") or default_port_for_realm(realm))
+    port = _prompt("Peer port for selected hosts (blank/that value = realm default)",
+                   default_port)
     for host in selected:
-        add_peer(realm, f"{host}:{port}", approved=False)
+        # Store bare host when it's the realm default port, so it stays correct
+        # even if the port scheme changes; otherwise pin the explicit port.
+        if str(port) == str(default_port_for_realm(realm)):
+            add_peer(realm, host, approved=False)
+        else:
+            add_peer(realm, f"{host}:{port}", approved=False)
     print(f"Added {len(selected)} interface seed host(s); duplicates are ignored.")
 
 
