@@ -133,6 +133,14 @@ LIVENESS_MONITOR_INTERVAL_SECS = 10.0
 # How often a node republishes its status JSON into the reserved status dir.
 # Low cadence keeps version churn modest; old versions are pruned each cycle.
 NODE_STATUS_INTERVAL_SECS = float(os.environ.get("FFSFS_NODE_STATUS_INTERVAL", "300"))
+# Header-prefix partial fetch: on the first read-open of a remote-only file at or
+# above the threshold, fetch only a prefix (so thumbnailers/MIME sniffers don't
+# pull a huge file); promote to the whole file if a read goes past the prefix.
+# Partials are per-open temp files in a cache dir — never committed versions, so
+# the version store is never polluted and a browse never retains the whole file.
+# Set FFSFS_PARTIAL_PREFIX_BYTES=0 to disable (always fetch whole).
+PARTIAL_PREFIX_BYTES = int(os.environ.get("FFSFS_PARTIAL_PREFIX_BYTES", str(1024 * 1024)))
+PARTIAL_THRESHOLD_BYTES = int(os.environ.get("FFSFS_PARTIAL_THRESHOLD_BYTES", str(16 * 1024 * 1024)))
 ORPHAN_SCAN_AT_START = True  # enumerate orphan temps on startup but do *not* auto-commit
 
 # For read/write handles
@@ -1513,6 +1521,79 @@ class FFSFS(Operations):
         return result
     
 
+    def _partial_cache_dir(self) -> str:
+        d = os.path.join(self.base, ".ffsfs_cache")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _open_partial(self, vpath: str, rv: dict):
+        """Open a read handle backed by only the file's header prefix (fetched
+        via HTTP Range into a per-open temp). Returns an fh, or None to fall back
+        to a whole fetch."""
+        if not (peers and hasattr(peers, "fetch_file_range")):
+            return None
+        prefix = peers.fetch_file_range(rv["peer"], rv["name"], 0, PARTIAL_PREFIX_BYTES - 1)
+        if not prefix:
+            return None
+        import tempfile
+        fd, ppath = tempfile.mkstemp(dir=self._partial_cache_dir(), suffix=".partial")
+        try:
+            with os.fdopen(fd, "wb") as wf:
+                wf.write(prefix)
+        except Exception:
+            try:
+                os.remove(ppath)
+            except OSError:
+                pass
+            return None
+        f = open(ppath, "rb")
+        fh = self._alloc_fh(f)
+        self.fh_meta[fh] = {
+            "mode": "read", "vpath": vpath, "temp_path": None,
+            "partial": True, "prefix_len": len(prefix),
+            "true_size": int(rv.get("size", 0)), "partial_path": ppath,
+        }
+        ffslog.info(f"partial open {vpath}: prefix {len(prefix)}B of "
+                    f"{rv.get('size')}B", source="partial")
+        return fh
+
+    def _promote_partial(self, fh: int):
+        """A read went past the prefix: fetch the whole file and swap the handle."""
+        meta = self.fh_meta.get(fh)
+        if not meta or not meta.get("partial"):
+            return self.fh_map.get(fh)
+        vpath = meta["vpath"]
+        whole = None
+        if peers and hasattr(peers, "get_newer_or_missing"):
+            try:
+                r = peers.get_newer_or_missing(vpath, 0, fetch=True,
+                                               rate_limits=self.rate_limits)
+                if isinstance(r, str) and os.path.exists(r):
+                    whole = r
+            except Exception:
+                whole = None
+        if not whole:
+            whole = self.backend.pick_latest(vpath)
+        if not whole or not os.path.exists(whole):
+            return self.fh_map.get(fh)
+        newf = open(whole, "rb")
+        oldf = self.fh_map.get(fh)
+        self.fh_map[fh] = newf
+        if oldf:
+            try:
+                oldf.close()
+            except Exception:
+                pass
+        pp = meta.get("partial_path")
+        if pp:
+            try:
+                os.remove(pp)
+            except OSError:
+                pass
+        meta["partial"] = False
+        meta["partial_path"] = None
+        return newf
+
     def open(self, path, flags):
         vpath = normalize_vpath(path)
         mode = "read" if ((flags & os.O_WRONLY) == 0 and (flags & os.O_RDWR) == 0) else "write"
@@ -1541,6 +1622,20 @@ class FFSFS(Operations):
                     local_ts = int(p["timestamp"])
                     if is_hidden_mode(p.get("mode")):
                         final = None
+
+            # No local copy: for a big remote-only file, fetch only a header
+            # prefix (partial) instead of the whole file, so browsing/sniffing
+            # huge remote files is cheap and doesn't retain them.
+            if (not final and peers and PARTIAL_PREFIX_BYTES > 0
+                    and hasattr(peers, "find_remote_version")):
+                try:
+                    rv = peers.find_remote_version(vpath)
+                except Exception:
+                    rv = None
+                if rv and int(rv.get("size", 0)) >= PARTIAL_THRESHOLD_BYTES:
+                    pfh = self._open_partial(vpath, rv)
+                    if pfh is not None:
+                        return pfh
 
             # Try remote if missing *or* a newer version exists remotely
             if peers and hasattr(peers, "get_newer_or_missing"):
@@ -1582,6 +1677,14 @@ class FFSFS(Operations):
         return fh
 
     def read(self, path, size, offset, fh):
+        meta = self.fh_meta.get(fh)
+        if meta and meta.get("partial"):
+            # serve from the prefix if the read stays inside it; otherwise
+            # promote to the whole file (a genuine content read past the header)
+            if offset + size > int(meta.get("prefix_len", 0)):
+                with self._lock:
+                    if self.fh_meta.get(fh, {}).get("partial"):
+                        self._promote_partial(fh)
         f = self.fh_map.get(fh)
         if not f:
             raise FuseOSError(errno.EBADF)
@@ -1623,6 +1726,13 @@ class FFSFS(Operations):
                     try:
                         f.close()
                     except Exception:
+                        pass
+                # remove a leftover partial-prefix temp, if any
+                pp = meta.get("partial_path")
+                if pp:
+                    try:
+                        os.remove(pp)
+                    except OSError:
                         pass
                 self.fh_meta.pop(fh, None)
                 return 0

@@ -1197,6 +1197,29 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False,
 
     return False
 
+def find_remote_version(vpath: str):
+    """Newest non-deleted remote version of vpath as
+    {peer, name, size, timestamp}, or None. Unlike get_remote_head_meta this
+    also returns the source peer and exact versioned filename, for range fetch."""
+    best = None  # (ts, peer, name, size)
+    for peer, cache in _peer_cache.items():
+        for entry in (cache.get("files") or {}).get(vpath, []):
+            name = entry["name"] if isinstance(entry, dict) else str(entry)
+            parsed = parse_versioned_filename(name)
+            if not parsed or parsed["logical_name"] != vpath:
+                continue
+            if is_hidden_mode(parsed.get("mode")):
+                continue
+            ts = int(parsed["timestamp"])
+            if not best or ts > best[0]:
+                size = int(entry.get("size", 0)) if isinstance(entry, dict) else 0
+                best = (ts, peer, name, size)
+    if not best:
+        return None
+    ts, peer, name, size = best
+    return {"peer": peer, "name": name, "size": size, "timestamp": ts}
+
+
 def fetch_file_range(peer: str, vpath: str, start: int, end: int) -> Optional[bytes]:
     """Fetch bytes [start, end] inclusive of a versioned file from a peer via
     HTTP Range. Returns the bytes or None on failure. (Foundation for
