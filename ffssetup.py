@@ -14,6 +14,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -696,8 +697,18 @@ def _choose_realm() -> Optional[str]:
             data = load_realm(realm)
             active = bool((data.get("setup_state") or {}).get("activated"))
             print(f"  {idx}) {realm} {'active' if active else 'inactive'}")
-    realm = _prompt("Realm name")
-    return realm or None
+        sel = _prompt("Enter a number to edit an existing realm, or a new name to create")
+    else:
+        sel = _prompt("New realm name")
+    if not sel:
+        return None
+    if sel.isdigit():
+        i = int(sel)
+        if 1 <= i <= len(realms):
+            return realms[i - 1]
+        print(f"No realm #{i}.")
+        return None
+    return sel
 
 
 def wizard_create_or_edit(realm: str) -> None:
@@ -969,6 +980,88 @@ def prompt_peer_action(realm: str) -> None:
         prompt_tailscale_seeds(realm)
 
 
+def _parse_size(s: str, current: Optional[int]) -> Optional[int]:
+    """Parse a size string. Blank -> keep current; 'none'/'unlimited'/'0' ->
+    None; otherwise an integer with optional K/M/G/T suffix (1024-based)."""
+    s = (s or "").strip().lower()
+    if s == "":
+        return current
+    if s in ("none", "unlimited", "0"):
+        return None
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kmgt]?)i?b?", s)
+    if not m:
+        print("Unrecognized size; keeping current.")
+        return current
+    mult = {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3, "t": 1024 ** 4}
+    return int(float(m.group(1)) * mult[m.group(2)])
+
+
+def prompt_edit_backend(realm: str) -> None:
+    """List the realm's backends and edit one's fields (role, mirror, media,
+    size caps, device class, themed job)."""
+    data = load_realm(realm)
+    if not data:
+        print("Realm not configured.")
+        return
+    pool = StoragePool.from_dict(
+        data.get("storage_pool") or StoragePool.single(data.get("base")).to_dict())
+    vols = pool.all_volumes
+    if not vols:
+        print("No backends configured.")
+        return
+    print("Backends:")
+    for i, v in enumerate(vols, start=1):
+        role = "primary" if v is pool.primary else v.role
+        cap = f"{v.max_file_size}B" if v.max_file_size else "unlimited"
+        print(f"  {i}) {v.label} [{role}] {v.path}")
+        print(f"       mirror={'yes' if v.mirror else 'no'} media={v.media or '-'} "
+              f"device={v.device_class or '-'} max_file_size={cap} "
+              f"job={v.job_prefix or v.job or '-'}")
+    sel = _prompt("Backend number to edit (blank to cancel)")
+    if not sel.isdigit() or not (1 <= int(sel) <= len(vols)):
+        print("Cancelled.")
+        return
+    v = vols[int(sel) - 1]
+    print("(blank = keep current)")
+
+    role_in = _prompt(f"Role archive/cache (current: {v.role})", "")
+    if role_in:
+        v.role = role_in
+    media_in = _prompt(f"Media ssd/hdd/network (current: {v.media or 'none'})", "")
+    if media_in:
+        if media_in in (MEDIA_SSD, MEDIA_HDD, MEDIA_NETWORK):
+            v.media = media_in
+        else:
+            print("Unknown media; keeping.")
+    v.mirror = _yes_no("Mirror committed writes to this backend?", v.mirror)
+    v.max_file_size = _parse_size(
+        _prompt(f"Max file size, e.g. 2G ('none'=unlimited) (current: {v.max_file_size or 'unlimited'})", ""),
+        v.max_file_size)
+    v.max_bytes = _parse_size(
+        _prompt(f"Max total bytes ('none'=unlimited) (current: {v.max_bytes or 'unlimited'})", ""),
+        v.max_bytes)
+    v.reserve_bytes = _parse_size(
+        _prompt(f"Reserve free bytes ('none'=clear) (current: {v.reserve_bytes or 'none'})", ""),
+        v.reserve_bytes)
+    dc_in = _prompt(f"Device class (current: {v.device_class or 'none'})", "")
+    if dc_in:
+        if dc_in in DEVICE_CLASSES:
+            v.device_class = dc_in
+        else:
+            print("Unknown device class; keeping.")
+    job_in = _prompt(f"Themed job prefix e.g. /music ('none'=clear) (current: {v.job_prefix or 'general'})", "")
+    if job_in.lower() == "none":
+        v.job_prefix = None
+        v.job = JOB_GENERAL
+    elif job_in:
+        v.job_prefix = job_in
+        v.job = job_in
+
+    data["storage_pool"] = pool.to_dict()
+    _save_inactive(realm, data, "backends")
+    print(f"Updated backend {v.label}.")
+
+
 def edit_realm_menu(realm: str) -> None:
     if not load_realm(realm):
         wizard_create_or_edit(realm)
@@ -979,18 +1072,19 @@ def edit_realm_menu(realm: str) -> None:
         print()
         print("1) Edit identity/admin password")
         print("2) Set online expectation")
-        print("3) Set backend policy")
-        print("4) Add backend")
-        print("5) Remove backend")
-        print("6) Manage peers")
-        print("7) Set sync preset")
-        print("8) Set bandwidth/rate limits")
-        print("9) Validate            (check the config is complete and consistent)")
-        print("10) Activate           (mark ready to launch — required before deploy)")
-        print("11) Deactivate         (take out of service; launch.sh refuses it)")
-        print("12) Set collaboration intent (solo/shared)")
+        print("3) Set node sync/storage policy   (node role + sync mode, not a single backend)")
+        print("4) Add a backend")
+        print("5) Edit a backend                 (role, mirror, media, size caps, device, job)")
+        print("6) Remove a backend")
+        print("7) Manage peers")
+        print("8) Set sync preset")
+        print("9) Set bandwidth/rate limits")
+        print("10) Validate           (check the config is complete and consistent)")
+        print("11) Activate           (mark ready to launch — required before deploy)")
+        print("12) Deactivate         (take out of service; launch.sh refuses it)")
+        print("13) Set collaboration intent (solo/shared)")
         print("0) Back")
-        choice = _prompt("Choice", "9")
+        choice = _prompt("Choice", "10")
         if choice == "1":
             prompt_identity(realm)
         elif choice == "2":
@@ -1000,27 +1094,29 @@ def edit_realm_menu(realm: str) -> None:
         elif choice == "4":
             prompt_add_backend(realm)
         elif choice == "5":
-            prompt_remove_backend(realm)
+            prompt_edit_backend(realm)
         elif choice == "6":
-            prompt_peer_action(realm)
+            prompt_remove_backend(realm)
         elif choice == "7":
-            prompt_sync_preset(realm)
+            prompt_peer_action(realm)
         elif choice == "8":
-            prompt_bandwidth(realm)
+            prompt_sync_preset(realm)
         elif choice == "9":
-            print_issues(validate_realm(realm))
+            prompt_bandwidth(realm)
         elif choice == "10":
+            print_issues(validate_realm(realm))
+        elif choice == "11":
             print_issues(validate_realm(realm))
             if activate_realm(realm):
                 print("Activated. launch.sh will now run this realm.")
             else:
                 print("Not activated — fix the errors above first.")
-        elif choice == "11":
+        elif choice == "12":
             if deactivate_realm(realm):
                 print("Deactivated. launch.sh refuses it unless --allow-inactive.")
             else:
                 print("Could not deactivate (realm not found).")
-        elif choice == "12":
+        elif choice == "13":
             prompt_collaboration(realm)
         elif choice == "0":
             return

@@ -89,6 +89,46 @@ def test_add_backend_rejects_unknown_device_class(realm, tmp_path):
 
 
 @pytest.mark.unit
+def test_parse_size():
+    assert ffssetup._parse_size("", 999) == 999          # blank keeps current
+    assert ffssetup._parse_size("none", 999) is None      # explicit clear
+    assert ffssetup._parse_size("0", 999) is None
+    assert ffssetup._parse_size("2G", None) == 2 * 1024 ** 3
+    assert ffssetup._parse_size("512M", None) == 512 * 1024 ** 2
+    assert ffssetup._parse_size("1024", None) == 1024     # plain bytes
+    assert ffssetup._parse_size("garbage", 7) == 7        # unparseable keeps
+
+
+@pytest.mark.unit
+def test_choose_realm_accepts_number(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ffssetup.create_realm_config("alpha", str(tmp_path / "a-mnt"), str(tmp_path / "a"))
+    ffssetup.create_realm_config("bravo", str(tmp_path / "b-mnt"), str(tmp_path / "b"))
+    realms = ffssetup.list_realms()           # sorted: ['alpha', 'bravo']
+    monkeypatch.setattr(ffssetup, "_prompt", lambda *a, **k: "2")
+    assert ffssetup._choose_realm() == realms[1]
+    monkeypatch.setattr(ffssetup, "_prompt", lambda *a, **k: "newrealm")
+    assert ffssetup._choose_realm() == "newrealm"   # a name still creates
+
+
+@pytest.mark.unit
+def test_edit_backend_persists_changes(realm, tmp_path, monkeypatch):
+    ffssetup.add_backend(realm, str(tmp_path / "ext"), device_class="external")
+    # scripted answers in _prompt call order: pick #2, keep role/media,
+    # set max file size 1G, keep the rest.
+    answers = iter(["2", "", "", "1G", "", "", "", ""])
+    monkeypatch.setattr(ffssetup, "_prompt", lambda *a, **k: next(answers))
+    monkeypatch.setattr(ffssetup, "_yes_no", lambda *a, **k: False)
+    ffssetup.prompt_edit_backend(realm)
+
+    pool = StoragePool.from_dict(ffssetup.load_realm(realm)["storage_pool"])
+    saved = pool.find_by_path(str(tmp_path / "ext"))
+    assert saved is not None
+    assert saved.max_file_size == 1024 ** 3
+    assert saved.mirror is False      # we answered no to the mirror prompt
+
+
+@pytest.mark.unit
 def test_explicit_args_override_assumptions(realm, tmp_path):
     # caller-specified mirror/max_file_size must win over the device assumption
     vol = ffssetup.add_backend(
