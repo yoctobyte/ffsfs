@@ -716,8 +716,7 @@ def _on_seeds(seeds: List[tuple], src_addr):
                 continue
             if STRICT_FSID and fsid != _FSID:
                 continue
-            if peer not in _known_peers:
-                _known_peers.append(peer)
+            if _upsert_peer(peer):
                 added = True
     if added:
         _save_config_debounced()
@@ -923,6 +922,26 @@ def save_config(path: Optional[str] = None) -> None:
         for peer in _known_peers:
             f.write(peer + "\n")
     _log(f"[peer] Saved peers to {p}: {_known_peers}")
+
+def _upsert_peer(peer: str) -> bool:
+    """Add peer, replacing any existing entry for the same host with a different port.
+
+    Returns True if the peer list was modified (added or replaced).
+    Caller must hold _peers_lock if concurrent access is possible.
+    """
+    host, port = _split_host_port(peer)
+    if peer in _known_peers:
+        return False
+    # Remove stale entries for the same host with a different port
+    stale = [p for p in _known_peers if _split_host_port(p)[0] == host and p != peer]
+    for s in stale:
+        _known_peers.remove(s)
+        _last_seen.pop(s, None)
+        _log(f"[peer] Replaced stale endpoint {s} → {peer}")
+    _known_peers.append(peer)
+    if not stale:
+        _log(f"[peer] Added: {peer}")
+    return True
 
 def add(peer: str) -> None:
     if peer not in _known_peers:
@@ -1400,13 +1419,14 @@ def hello():
 
     _last_seen[peer_id] = now
 
-    if _peer_is_trusted_to_add() and peer_id not in _known_peers:
-        _log(f"[peer] Auto-adding new peer: {peer_id}")
-        _known_peers.append(peer_id)
-        try:
-            save_config()
-        except Exception as e:
-            print(f"[peer] Failed to save peer config: {e}")
+    if _peer_is_trusted_to_add():
+        with _peers_lock:
+            if _upsert_peer(peer_id):
+                _log(f"[peer] Auto-adding new peer: {peer_id}")
+                try:
+                    save_config()
+                except Exception as e:
+                    print(f"[peer] Failed to save peer config: {e}")
 
     return jsonify({"status": "ok", "server_time": now, "hostname": _get_node_name()})
 
@@ -2131,13 +2151,14 @@ def notify():
     peer_id = f"{peer_ip}:{from_port}" if from_port.isdigit() else peer_ip
     _last_seen[peer_id] = time.time()
 
-    if _peer_is_trusted_to_add() and peer_id not in _known_peers:
-        _log(f"[peer] Auto-added (via notify): {peer_id}")
-        _known_peers.append(peer_id)
-        try:
-            save_config()
-        except Exception as e:
-            print(f"[peer] Failed to save peer config: {e}")
+    if _peer_is_trusted_to_add():
+        with _peers_lock:
+            if _upsert_peer(peer_id):
+                _log(f"[peer] Auto-added (via notify): {peer_id}")
+                try:
+                    save_config()
+                except Exception as e:
+                    print(f"[peer] Failed to save peer config: {e}")
 
     # respect notification scope
     if not _is_subscribed(vpath):

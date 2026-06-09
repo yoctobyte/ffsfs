@@ -2003,8 +2003,8 @@ def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool 
                 sources.extend(known_env.split(","))
             for kp in sources:
                 kp = str(kp).strip()
-                if kp and kp not in peers._known_peers:
-                    peers._known_peers.append(kp)
+                if kp:
+                    peers._upsert_peer(kp)
             if peers._known_peers:
                 print(f"[ffsfs] known peers: {peers._known_peers}")
             else:
