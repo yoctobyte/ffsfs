@@ -49,6 +49,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
+prepare_vm_launch "$ssh_port"
+
 qemu-system-x86_64 \
     -name "$name" \
     -machine accel=kvm:tcg \

@@ -44,6 +44,62 @@ ssh_opts() {
         -o ConnectTimeout=5
 }
 
+reap_stale_ffsfs_vms() {
+    # Kill leftover ffsfs test VMs from an interrupted/suspended run. Such an
+    # orphan keeps its forwarded SSH/peer ports bound, which otherwise makes the
+    # next run boot, pass its in-guest steps, then hang forever on a port it
+    # cannot bind. Test harness runs one VM set at a time, so a name match is
+    # safe. (Matched on the qemu `-name ffsfs-vm...` argument.)
+    local pids
+    pids="$(pgrep -f 'qemu-system-x86_64.*-name ffsfs-vm' 2>/dev/null || true)"
+    [ -z "$pids" ] && return 0
+    echo "reaping stale ffsfs VM(s): $(echo "$pids" | tr '\n' ' ')" >&2
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    sleep 2
+    pids="$(pgrep -f 'qemu-system-x86_64.*-name ffsfs-vm' 2>/dev/null || true)"
+    # shellcheck disable=SC2086
+    [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
+    return 0
+}
+
+_port_in_use() {
+    # Bash builtin /dev/tcp probe; no extra dependency (ss/lsof may be absent).
+    local port="$1"
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+        exec 3>&- 3<&- 2>/dev/null || true
+        return 0
+    fi
+    return 1
+}
+
+assert_port_free() {
+    # Fail fast (instead of hanging) if a launch port is held; try reaping a
+    # stale ffsfs VM first, then give up with a clear message if something else
+    # owns it.
+    local port="$1"
+    if _port_in_use "$port"; then
+        echo "port $port busy before VM launch; reaping stale ffsfs VMs" >&2
+        reap_stale_ffsfs_vms
+        sleep 1
+        if _port_in_use "$port"; then
+            echo "port $port still in use after reap; aborting (another process holds it)" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+prepare_vm_launch() {
+    # Reap orphans and assert every forwarded host port is free before booting.
+    reap_stale_ffsfs_vms
+    local p
+    for p in "$@"; do
+        assert_port_free "$p" || return 1
+    done
+    return 0
+}
+
 wait_for_ssh() {
     local port="$1"
     local deadline=$((SECONDS + FFSFS_VM_SSH_WAIT_SECS))

@@ -56,6 +56,8 @@ two_peer_boot_and_sync() {
     local seed="$run_dir/$vm_name.seed.iso"
     local pidfile="$run_dir/$vm_name.pid"
 
+    prepare_vm_launch "$ssh_port" "$peer_a_host_port" "$peer_b_host_port"
+
     qemu-img create -f qcow2 -F qcow2 -b "$FFSFS_VM_BASE_IMAGE" "$overlay" >/dev/null
     write_cloud_init_seed "$seed" "$vm_name"
 
