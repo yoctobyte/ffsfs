@@ -28,6 +28,7 @@ from ffsvolumes import (
     DEFAULT_NODE_ROLE,
     DEFAULT_NODE_STORAGE_PROFILE,
     DEVICE_CLASSES,
+    DEVICE_EXTERNAL,
     DEVICE_INTERNAL,
     DEVICE_NETWORK,
     DEVICE_OPTICAL,
@@ -60,7 +61,10 @@ DEFAULT_COLLABORATION = COLLABORATION_SOLO
 # preference and "high-prio-small" routing are future work (storage policy).
 _MB = 1024 * 1024
 _BACKEND_ASSUMPTIONS = {
-    # Removable, slow, treated as small-but-important backup unless given a job.
+    # External HDD/SSD or dock: removable but a FULL-SIZE disk — mirror backup,
+    # NO small-file cap (this is the one for a 2 TB USB drive).
+    DEVICE_EXTERNAL: {"media": MEDIA_HDD,     "mirror": True,  "role": ROLE_ARCHIVE, "max_file_size": None},
+    # Small flash key / SD card: removable, small-but-important backup -> cap.
     DEVICE_USB:      {"media": MEDIA_HDD,     "mirror": True,  "role": ROLE_ARCHIVE, "max_file_size": 64 * _MB},
     DEVICE_SD:       {"media": MEDIA_HDD,     "mirror": True,  "role": ROLE_ARCHIVE, "max_file_size": 16 * _MB},
     # Write-once cold archive (sealed-volume concept is future); mirror target.
@@ -567,7 +571,8 @@ def deactivate_realm(realm: str) -> bool:
 def discover_devices() -> List[dict]:
     try:
         out = subprocess.check_output(
-            ["lsblk", "--json", "-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,TRAN,RM"],
+            ["lsblk", "--json", "-o",
+             "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,TRAN,RM,SERIAL,UUID"],
             text=True,
             stderr=subprocess.DEVNULL,
         )
@@ -609,9 +614,17 @@ def print_device_summary(show_all: bool = False) -> None:
     for idx, row in enumerate(rows, start=1):
         model = row.get("model") or ""
         tran = row.get("tran") or ""
-        print(f"  {idx}) {row['device']:<16} {row.get('size',''):<8} {tran:<8} {model} -> {row['mountpoint']}")
+        # A stable identifier for the physical/filesystem volume — mount points
+        # are NOT reliable across sessions (e.g. an external-disk dock can mount
+        # a different disk at the same path). Prefer fs UUID, else disk serial.
+        ident = row.get("uuid") or row.get("serial") or ""
+        ident_txt = f"  [{ident}]" if ident else ""
+        print(f"  {idx}) {row['device']:<14} {row.get('size',''):<8} {tran:<6} "
+              f"{model} -> {row['mountpoint']}{ident_txt}")
     if not show_all:
         print("  (loop/snap devices hidden; pass --list-devices-all to show them)")
+    print("  Note: mount points can change between sessions; FFSFS identifies a")
+    print("  backend by its .ffsfs-volume.id file, not by mount path.")
 
 
 def _prompt(msg: str, default: Optional[str] = None) -> str:
@@ -645,7 +658,14 @@ def prompt_collaboration(realm: str) -> None:
 def _prompt_backend_details(realm: str, path: str, label: str):
     """Ask device class, apply assumption defaults (overridable), optional themed
     job; then register the backend. Returns the created Volume."""
-    dc = _prompt("Device class (internal/usb/sd/optical/network)", DEVICE_INTERNAL).lower()
+    print("Device class:")
+    print("  internal - built-in disk (no size cap, not removable)")
+    print("  external - USB/eSATA external HDD/SSD or dock (removable, NO size cap)")
+    print("  usb      - small USB flash key (removable, small-file cap)")
+    print("  sd       - SD/microSD card (removable, small-file cap)")
+    print("  optical  - DVD/Blu-ray (removable, write-once archive)")
+    print("  network  - NAS / network share")
+    dc = _prompt("Device class", DEVICE_INTERNAL).lower()
     if dc not in DEVICE_CLASSES:
         print("Unknown device class; using 'internal'.")
         dc = DEVICE_INTERNAL
@@ -685,8 +705,12 @@ def wizard_create_or_edit(realm: str) -> None:
     if not data.get("realm_secret"):
         print()
         print("Realm setup")
+        print("The primary backend holds the realm's metadata and is the default")
+        print("write target. It can be a local folder or a path on an external")
+        print("disk; additional backends (mirrors/archives) can be added after.")
         mount = _prompt("Mountpoint", os.path.expanduser(f"~/{realm}"))
-        base = _prompt("Primary backend folder", os.path.expanduser(f"~/.{realm}/{realm}"))
+        base = _prompt("Primary backend folder (local or external path)",
+                       os.path.expanduser(f"~/.{realm}/{realm}"))
         join = _prompt("Realm passphrase/key (blank = create new secret)", "")
         secret = None
         passphrase = None
@@ -750,9 +774,14 @@ def wizard_create_or_edit(realm: str) -> None:
     print_issues(issues)
     if not any(i.level == "error" for i in issues) and _yes_no("Activate this realm?", True):
         activate_realm(realm)
-        print("Activated.")
+        print()
+        print(f"Activated. You can now launch this realm with:")
+        print(f"    ./launch.sh {realm}")
+        print(f"  (add --bg to run in the background)")
     else:
-        print("Saved as inactive. Re-run setup when ready.")
+        print()
+        print("Saved as inactive. Activate it later in setup, then launch with:")
+        print(f"    ./launch.sh {realm}")
 
 
 def print_issues(issues: List[ValidationIssue]) -> None:

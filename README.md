@@ -199,11 +199,12 @@ Setup also records *intent* so behavior can be tuned later:
   curator (last-write-wins, conflicts only warned); `shared` anticipates
   multiple writers (conflicts surfaced). This is recorded now; richer
   conflict resolution per mode is future work.
-- **Per-backend device class** (`internal`, `usb`, `sd`, `optical`, `network`).
-  Setup suggests sensible defaults per class — for example, removable USB/SD
-  keys default to mirrored backup with a small max file size — and you can
-  assign a themed job (e.g. "music only", scoped to a `/music` prefix). The
-  size cap is enforced today; theme/prefix write-routing is future work.
+- **Per-backend device class** (`internal`, `external`, `usb`, `sd`, `optical`,
+  `network`). Setup suggests sensible defaults per class — a large `external`
+  USB/eSATA disk gets mirrored backup with **no** size cap, while small `usb`/
+  `sd` keys default to a small max file size — and you can assign a themed job
+  (e.g. "music only", scoped to a `/music` prefix). The size cap is enforced
+  today; theme/prefix write-routing is future work.
 
 `setup.sh` saves after each step but marks a realm inactive until activation.
 `launch.sh` refuses inactive setup configs unless `--allow-inactive` is passed.

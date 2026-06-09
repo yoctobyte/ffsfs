@@ -78,14 +78,16 @@ MEDIA_NETWORK = "network"
 # assumption defaults and is surfaced in the dashboard. Enforcement of job/
 # prefix write-routing is future work (storage policy, project_plan queue #2).
 DEVICE_INTERNAL = "internal"
-DEVICE_USB = "usb"
-DEVICE_SD = "sd"
+DEVICE_EXTERNAL = "external"   # USB/eSATA external HDD/SSD or dock: removable, full-size
+DEVICE_USB = "usb"            # small USB flash key
+DEVICE_SD = "sd"             # SD/microSD card
 DEVICE_OPTICAL = "optical"
 DEVICE_NETWORK = "network"
 DEVICE_CLASSES = {
-    DEVICE_INTERNAL, DEVICE_USB, DEVICE_SD, DEVICE_OPTICAL, DEVICE_NETWORK,
+    DEVICE_INTERNAL, DEVICE_EXTERNAL, DEVICE_USB, DEVICE_SD,
+    DEVICE_OPTICAL, DEVICE_NETWORK,
 }
-REMOVABLE_DEVICE_CLASSES = {DEVICE_USB, DEVICE_SD, DEVICE_OPTICAL}
+REMOVABLE_DEVICE_CLASSES = {DEVICE_EXTERNAL, DEVICE_USB, DEVICE_SD, DEVICE_OPTICAL}
 
 # A backend's "job": general (whole-realm subset per policy) or theme-scoped to
 # a vpath prefix (e.g. "/music"). Recorded as intent; routing enforcement later.

@@ -116,8 +116,18 @@ stopping for features/fixes/logs.
   media/role/prefix-aware write-target selection, job/prefix write routing,
   "high-prio-small" preference for removable devices. (`max_file_size` is
   already enforced.)
-- [P2] **Disk rotation UX.** Removable mirror disks (alternating USB/external)
-  as a backup workflow: rotate, catch-up on reattach, operator visibility.
+- [P2] **Disk rotation UX + by-id backend discovery.** Removable mirror disks
+  (alternating USB/external) as a backup workflow: rotate, catch-up on reattach,
+  operator visibility. Two cases beyond the single-disk eject/attach already
+  shipped: (a) rotating *different* physical disks (distinct volume ids) through
+  one slot; (b) the *same* disk reappearing at a *different mount path* (e.g. an
+  external-disk dock) — backends are stored by path, so a path change makes the
+  volume look absent. Fix direction: discover/match backends by
+  `.ffsfs-volume.id` across current mount points instead of by fixed path. Today
+  FFSFS is safe but limited: a wrong disk at a known path is detected via the id
+  file and treated as OFFLINE (never corrupted); a right disk at a new path just
+  isn't found until reconfigured. `setup --list-devices` now shows fs UUID/serial
+  to help identify disks.
 - [P2] **Dashboard remote access.** Currently loopback-only. Add session-
   password auth (separate from realm secret) for remote/tunnel-free use.
 - [P2] **Richer in-process config mutations.** `/dashboard/config` only does

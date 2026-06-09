@@ -39,6 +39,18 @@ def test_suggest_backend_defaults_usb():
 
 
 @pytest.mark.unit
+def test_external_disk_has_no_small_file_cap():
+    # a USB/eSATA external HDD/SSD must NOT get the small-key cap
+    from ffsvolumes import DEVICE_EXTERNAL
+    s = ffssetup.suggest_backend_defaults(DEVICE_EXTERNAL)
+    assert s["max_file_size"] is None
+    assert s["mirror"] is True
+    # external is removable
+    from ffsvolumes import Volume
+    assert Volume(path="/tmp/x", device_class=DEVICE_EXTERNAL).is_removable is True
+
+
+@pytest.mark.unit
 def test_suggest_backend_defaults_unknown_is_neutral():
     s = ffssetup.suggest_backend_defaults(None)
     assert s["mirror"] is False and s["max_file_size"] is None
