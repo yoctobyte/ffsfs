@@ -354,6 +354,38 @@ Unknown peers are not auto-added by default. For loose LAN testing only:
 Peer networking is still prototype-grade and intended for trusted LAN or
 private overlay networks.
 
+### Matching the realm secret across hosts
+
+Every host in a realm must share the **same realm secret**. The simplest way is
+to use the **same realm name and the same passphrase** on each host at setup —
+the secret is derived deterministically from passphrase + realm name. To check
+or align them later:
+
+```bash
+./setup.sh --realm myrealm --show-realm-secret             # print the current secret
+./setup.sh --realm myrealm --set-realm-secret 'shared phrase'   # passphrase (same on every host)
+./setup.sh --realm myrealm --set-realm-secret <64-hex>     # or paste an exact secret
+```
+
+(Also available interactively: setup app → edit realm → "Set realm secret".)
+Restart the service after changing it. A *mismatched* secret shows up as
+`auth failed` (HTTP 403) in `/dashboard/logs`, not as a connection error.
+
+### Troubleshooting "connection refused"
+
+That is a transport problem, not authentication. Check, on the **server** host,
+that the peer server is listening on the LAN (not just localhost) and on which
+port (shown in `launch.sh` output and the dashboard URL):
+
+```bash
+curl -s http://localhost:<port>/healthz     # server alive locally?
+ss -ltn | grep <port>                        # should be 0.0.0.0:<port>, not 127.0.0.1
+```
+
+The peer port is derived from the realm name, so both hosts must use the **same
+realm name**. If the server fell back to a different port (the configured one
+was busy), add the peer with an explicit port: `add-peer myrealm <host>:<port>`.
+
 Do not expose the peer HTTP API directly on a public IP or router port-forward
 yet. Public Internet support needs additional transport, identity, DoS, and
 peer-scaling hardening; see

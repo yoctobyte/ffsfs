@@ -89,6 +89,23 @@ def test_add_backend_rejects_unknown_device_class(realm, tmp_path):
 
 
 @pytest.mark.unit
+def test_set_realm_secret(realm, monkeypatch, tmp_path):
+    import ffspeer_auth
+    before = ffssetup.load_realm(realm)["realm_secret"]
+    # same passphrase + realm derives the SAME secret on every host
+    ffssetup.set_realm_secret(realm, passphrase="team shared phrase")
+    after = ffssetup.load_realm(realm)["realm_secret"]
+    assert after != before
+    assert after == ffspeer_auth.secret_from_passphrase("team shared phrase", realm)
+    # exact hex is taken verbatim; too-short hex rejected
+    hexsec = "ab" * 20
+    ffssetup.set_realm_secret(realm, secret=hexsec)
+    assert ffssetup.load_realm(realm)["realm_secret"] == hexsec
+    with pytest.raises(ValueError):
+        ffssetup.set_realm_secret(realm, secret="abcd")
+
+
+@pytest.mark.unit
 def test_parse_size():
     assert ffssetup._parse_size("", 999) == 999          # blank keeps current
     assert ffssetup._parse_size("none", 999) is None      # explicit clear

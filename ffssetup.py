@@ -271,6 +271,59 @@ def create_realm_config(
     return data
 
 
+def set_realm_secret(realm: str, passphrase: Optional[str] = None,
+                     secret: Optional[str] = None) -> str:
+    """Replace the realm secret. Pass a shared `passphrase` (same on every host
+    in the realm), an exact hex `secret`, or neither to generate a new random
+    one. Keeps the realm active; the running service must restart to pick it up.
+    Returns the new secret."""
+    data = load_realm(realm)
+    if not data:
+        raise ValueError(f"realm not configured: {realm}")
+    if secret and passphrase:
+        raise ValueError("use either secret or passphrase, not both")
+    if secret:
+        bytes.fromhex(secret)
+        if len(secret) < 32:
+            raise ValueError("realm secret must be at least 32 hex chars")
+        new_secret = secret
+    elif passphrase:
+        new_secret = secret_from_passphrase(passphrase, realm)
+    else:
+        new_secret = generate_realm_secret()
+    data["realm_secret"] = new_secret
+    _save_realm_config(realm, data)   # keep activation state
+    return new_secret
+
+
+def prompt_realm_secret(realm: str) -> None:
+    data = load_realm(realm) or {}
+    cur = data.get("realm_secret")
+    print("Realm secret — the shared key every host in this realm must share.")
+    print("Peers with a different secret connect but fail auth (403).")
+    if cur:
+        print(f"  current: {cur[:8]}... ({len(cur)} chars)")
+    print("Enter the SAME passphrase used on the other hosts (it derives the")
+    print("secret deterministically), or paste an exact hex secret, or type")
+    print("'show' to print the full current secret to copy, or blank to keep.")
+    val = _prompt("Passphrase / hex secret / 'show'")
+    if not val:
+        return
+    if val == "show":
+        print(f"  realm_secret = {cur}")
+        return
+    try:
+        is_hex = len(val) >= 32 and all(c in "0123456789abcdefABCDEF" for c in val)
+        if is_hex:
+            set_realm_secret(realm, secret=val)
+        else:
+            set_realm_secret(realm, passphrase=val)
+        print("Realm secret updated. Restart the service for it to take effect,")
+        print("and use the SAME passphrase/secret on every host in this realm.")
+    except Exception as e:
+        print(f"Could not set secret: {e}")
+
+
 def add_backend(
     realm: str,
     path: str,
@@ -1083,6 +1136,7 @@ def edit_realm_menu(realm: str) -> None:
         print("11) Activate           (mark ready to launch — required before deploy)")
         print("12) Deactivate         (take out of service; launch.sh refuses it)")
         print("13) Set collaboration intent (solo/shared)")
+        print("14) Set realm secret   (align/join peers; use same on every host)")
         print("0) Back")
         choice = _prompt("Choice", "10")
         if choice == "1":
@@ -1118,6 +1172,8 @@ def edit_realm_menu(realm: str) -> None:
                 print("Could not deactivate (realm not found).")
         elif choice == "13":
             prompt_collaboration(realm)
+        elif choice == "14":
+            prompt_realm_secret(realm)
         elif choice == "0":
             return
         else:
@@ -1206,6 +1262,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--check", action="store_true", help="validate configured realms and exit")
     parser.add_argument("--activate", action="store_true", help="validate and activate --realm")
     parser.add_argument("--deactivate", action="store_true", help="deactivate --realm (take out of service)")
+    parser.add_argument("--set-realm-secret", metavar="PASSPHRASE_OR_HEX", default=None,
+                        help="set --realm's secret from a shared passphrase or exact hex (same on every host)")
+    parser.add_argument("--show-realm-secret", action="store_true", help="print --realm's current realm secret and exit")
     parser.add_argument("--list-devices", action="store_true", help="list mounted storage devices and exit")
     parser.add_argument("--list-devices-all", action="store_true", help="like --list-devices but include loop/snap devices")
     parser.add_argument("--list-realms", action="store_true", help="list configured realms and exit")
@@ -1217,6 +1276,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.list_realms:
         print_realms()
         return 0
+    if args.show_realm_secret:
+        if not args.realm:
+            print("--show-realm-secret requires --realm", file=sys.stderr)
+            return 2
+        print((load_realm(args.realm) or {}).get("realm_secret") or "")
+        return 0
+    if args.set_realm_secret is not None:
+        if not args.realm:
+            print("--set-realm-secret requires --realm", file=sys.stderr)
+            return 2
+        v = args.set_realm_secret
+        is_hex = len(v) >= 32 and all(c in "0123456789abcdefABCDEF" for c in v)
+        try:
+            set_realm_secret(args.realm, secret=v if is_hex else None,
+                             passphrase=None if is_hex else v)
+            print("Realm secret updated. Restart the service; use the same on every host.")
+            return 0
+        except Exception as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
     if args.deactivate:
         if not args.realm:
             print("--deactivate requires --realm", file=sys.stderr)
