@@ -90,21 +90,12 @@ PY
 
 ### Optional: virtualenv
 
-A virtualenv is not required and the system-package path above is the simplest.
-But FFSFS is venv-compatible — `fusepy` is pure Python and works in a venv;
-only the FUSE C library (`libfuse2t64`/`libfuse2`, plus optional `fuse3`) must
-be a system package. If you prefer an isolated, pinnable environment:
-
-```bash
-sudo apt install libfuse2t64 fuse3   # system FUSE library only
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt      # flask, requests, fusepy
-```
-
-`setup.sh` and `launch.sh` automatically use `./.venv` if it exists (or an
-active `$VIRTUAL_ENV`), otherwise they fall back to system `python3`. Override
-with `FFSFS_PYTHON=/path/to/python`.
+You usually don't set this up yourself: `./setup.sh` offers to create a `.venv`
+and install the Python deps for you (default yes), and `launch.sh`/`setup.sh`
+then use it automatically. The system FUSE library
+(`libfuse2t64`/`libfuse2`) is still an `apt` package either way. See
+[agents/operator_guide.md](agents/operator_guide.md) for manual venv setup and
+the `FFSFS_PYTHON` override.
 
 ## Quick Start
 

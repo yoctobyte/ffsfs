@@ -59,10 +59,22 @@ Recommended setup and launch flow:
 ./launch.sh myrealm
 ```
 
-Interpreter: `setup.sh`/`launch.sh` use system `python3` by default, but
-auto-use a project `./.venv` (or an active `$VIRTUAL_ENV`) if present, or an
-explicit `FFSFS_PYTHON`. See the README "Optional: virtualenv" section and
-`requirements.txt`.
+Interpreter resolution: `setup.sh`/`launch.sh` use `FFSFS_PYTHON` if set, else a
+project `./.venv`, else an active `$VIRTUAL_ENV`, else system `python3`.
+
+`./setup.sh` offers to create the venv and install deps for you (default yes).
+To do it manually instead:
+
+```bash
+sudo apt install libfuse2t64 fuse3   # system FUSE library (always required)
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt      # flask, requests, fusepy
+```
+
+`fusepy` is pure Python and works in a venv; only the FUSE C library must be a
+system package. Set `FFSFS_NO_VENV=1` to skip the setup prompt and use system
+Python.
 
 **Using a Configuration File:**
 ```bash
