@@ -1993,13 +1993,25 @@ def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool 
                 print("[ffsfs]   Fix: set the realm secret (same on every host):")
                 print("[ffsfs]     ./setup.sh --realm <realm> --set-realm-secret '<shared phrase>'")
 
-            # Add known peers from environment if any
+            # Load configured known peers from the realm config DIRECTLY (robust
+            # across short-mode/full-CLI and the state-dir move), plus any
+            # FFSFS_KNOWN_PEERS env override. set_realm() above already loaded the
+            # peers-<realm>.conf list; merge, don't replace.
+            sources = list(cfg.get("known_peers") or [])
             known_env = os.environ.get("FFSFS_KNOWN_PEERS")
             if known_env:
-                for kp in known_env.split(","):
-                    kp = kp.strip()
-                    if kp and kp not in peers._known_peers:
-                        peers._known_peers.append(kp)
+                sources.extend(known_env.split(","))
+            for kp in sources:
+                kp = str(kp).strip()
+                if kp and kp not in peers._known_peers:
+                    peers._known_peers.append(kp)
+            if peers._known_peers:
+                print(f"[ffsfs] known peers: {peers._known_peers}")
+            else:
+                print("[ffsfs] WARNING: no known peers configured for this realm — "
+                      "this node will not pull from anyone.")
+                print("[ffsfs]   Add the other host(s): "
+                      "./configure.sh add-peer <realm> <host>")
 
             port = int(os.environ.get("FFSFS_PEER_PORT", "8765"))
             peers.start_local_peer_server(port)
