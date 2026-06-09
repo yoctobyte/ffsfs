@@ -6,8 +6,25 @@ from argparse import Namespace
 import ffspeers
 from ffsctl import (
     cmd_role, cmd_sync, cmd_ratelimit, cmd_realm, cmd_peer,
-    _realm_config_path, _load_realm_config,
+    _realm_config_path, _load_realm_config, _configure_peer_auth,
 )
+
+
+@pytest.mark.unit
+def test_configure_peer_auth_signs_cli_requests():
+    calls = {}
+
+    class FakePeers:
+        def set_auth_config(self, **kw):
+            calls.update(kw)
+
+    _configure_peer_auth(FakePeers(), {"realm_secret": "ab" * 20,
+                                       "peer_trust": "realm_secret"})
+    assert calls.get("realm_secret") == "ab" * 20  # CLI sync/refresh will sign
+
+    calls.clear()
+    _configure_peer_auth(FakePeers(), {})           # no secret -> no auth setup
+    assert calls == {}
 
 
 def _init_realm(realm, tmp_path, monkeypatch):

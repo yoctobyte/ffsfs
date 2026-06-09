@@ -580,6 +580,19 @@ def cmd_role(args):
     print(f"Set node_role = {args.role}")
 
 
+def _configure_peer_auth(peers_mod, data: dict) -> None:
+    """Load the realm secret into the peer module so CLI-driven peer requests
+    (refresh, sync) are HMAC-signed — otherwise an auth-enabled peer rejects
+    them with 403 'missing auth headers'."""
+    secret = data.get("realm_secret")
+    if secret and hasattr(peers_mod, "set_auth_config"):
+        peers_mod.set_auth_config(
+            realm_secret=secret,
+            peer_trust=data.get("peer_trust", "realm_secret"),
+            approved_peers=set(data.get("approved_peers") or []),
+        )
+
+
 def cmd_sync(args):
     from ffssync import SyncPolicy, SYNC_MODES
     realm = args.realm
@@ -664,6 +677,7 @@ def cmd_sync(args):
         if peers_mod is not None:
             try:
                 peers_mod.set_realm(realm)
+                _configure_peer_auth(peers_mod, data)
                 peers_mod.register_local_backend(backend)
                 if hasattr(peers_mod, "set_rate_limits"):
                     peers_mod.set_rate_limits(rate_limits)
@@ -720,6 +734,7 @@ def cmd_sync(args):
         if peers_mod is not None:
             try:
                 peers_mod.set_realm(realm)
+                _configure_peer_auth(peers_mod, data)
                 for kp in data.get("known_peers", []) or []:
                     kp = str(kp).strip()
                     if kp and kp not in peers_mod._known_peers:
