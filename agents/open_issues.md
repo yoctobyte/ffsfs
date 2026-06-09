@@ -81,6 +81,13 @@ stopping for features/fixes/logs.
 
 ## Features
 
+- [P2] **Version retention / pruning (GC).** FFSFS keeps every committed
+  version forever; storage grows with write history and the meta log grows
+  append-only. No automatic pruning yet. Needs a retention policy (keep N / keep
+  for D days / keep latest + tombstones) and a safe GC that never drops a
+  version still referenced by a peer or needed for conflict/move history.
+  Documented as a footprint caveat in the README for now.
+
 - [P1] **Storage-policy enforcement (queue #2).** Intent fields now exist
   (device_class, job/job_prefix, collaboration); enforcement does not. Needed:
   media/role/prefix-aware write-target selection, job/prefix write routing,

@@ -30,7 +30,23 @@ Public Internet support is explicitly out of scope until the hardening blockers
 in [agents/public_internet_exposure.md](agents/public_internet_exposure.md) are
 addressed.
 
-## Install Dependencies
+## Install
+
+Get the code (run FFSFS straight from the checkout — nothing is written back
+into the repo):
+
+```bash
+git clone https://github.com/yoctobyte/ffsfs.git
+cd ffsfs
+```
+
+To update later:
+
+```bash
+git pull          # then restart: ./launch.sh <realm>
+```
+
+### Dependencies
 
 FFSFS is intended to run against the system Python and system FUSE libraries.
 A virtualenv is usually not needed and can make FUSE setup more confusing,
@@ -431,6 +447,34 @@ Format stability contract:
 If you use a virtualenv, re-run `pip install -r requirements.txt` after a pull
 only when dependencies changed; `setup.sh`/`launch.sh` keep using `./.venv`
 automatically.
+
+### Where FFSFS stores things
+
+| What | Location |
+|------|----------|
+| Realm config (incl. realm secret) | `~/.ffsfs/.storage/<realm>/realm-config.json` |
+| Node state (peers, IDs, gossip, subscriptions) | `~/.ffsfs/.storage/` |
+| Metadata log | `<storage-base>/.ffsfs-meta.log` |
+| File data + all versions | under each backend path, in `.ffsfs_data/` |
+
+The base directory is `~/.ffsfs` by default; override it with `FFSFS_STATE_DIR`.
+
+### Storage footprint — metadata and versions grow
+
+FFSFS is **versioned**: every committed write is kept as a separate version file
+next to the logical file, and deletes/moves are recorded as marker versions.
+Nothing is overwritten in place. This is what makes history and recovery
+possible, but it means:
+
+- Storage use **grows with write history**, not just with current file size. A
+  file edited 100 times keeps 100 versions until you prune.
+- The append-only metadata log (`.ffsfs-meta.log`) and per-directory data grow
+  over time.
+
+For now there is no automatic version pruning/garbage collection — plan disk
+capacity accordingly, and prefer roomy backends for write-heavy realms. Use the
+dashboard's volume panel to watch free space. Version-retention and pruning
+policies are planned future work.
 
 ## More Detail
 
