@@ -176,6 +176,41 @@ stopping for features/fixes/logs.
 - [P3] **Realm access rights.** read-only / read-write / admin, possibly
   per-prefix. Prerequisite for group conflict modes and multi-writer realms.
 
+- [P2] **Stale peer removal / session-ignore.** Beyond auto-prune of
+  never-seen peers (shipped, commit 0039918), the operator needs a way to drop
+  or temporarily suppress a peer *now*: (a) a permanent `forget-peer` that
+  removes it from `known_peers`/`peers-<realm>.conf` (today only via manual file
+  edit); (b) a **session ignore** — suppress a peer for the current process
+  without touching persisted config, so autodiscovery/gossip won't keep
+  re-adding it and it stops being pinged/listed until restart. Expose via CLI
+  and the dashboard. Open question: how session-ignore interacts with
+  auto-rediscovery (must not silently re-add an ignored peer; needs an in-memory
+  denylist checked in `_upsert_peer`/`_on_seeds`).
+
+## Open design questions (discuss before coding)
+
+- **Federated metadata (.ffsfs-nodes/*) — persistence & model unclear.** The
+  per-node status (backends, peers, uptime) is published as a versioned file
+  under the reserved `.ffsfs-nodes/` vpath and synced like any other file, then
+  hidden from readdir. Observed in real two-host testing: the federated view
+  bugged out / went one-directional (notify-scope gate, fixed in 287e0eb; and a
+  stale-code host showed the dir raw). But the operator also notes the status
+  dir "doesn't seem to be a real file/folder in the backend — can't find it,"
+  which suggests the current write/hide/sync path is confusing and possibly
+  fragile. Questions to settle before more code:
+  - Should node-status be a real on-disk versioned file at all, or in-memory /
+    out-of-band metadata exchanged over a dedicated endpoint (not the file-sync
+    machinery)? Mixing it into the file pipeline means it inherits sync policy,
+    versioning, pruning, conflict, and readdir-hide special-cases — each a place
+    it can break.
+  - If it stays a file: where exactly does it land on disk, why is it hard to
+    find, does pruning/versioning interact badly, and is the hide leaking on any
+    path (list-dir vs readdir vs peer overlay)?
+  - Does a clean fix require both hosts on identical updated source + restart?
+    (Likely yes for the current bug; confirm and document the version floor.)
+  - Decide the model first (file-backed vs endpoint-backed status), THEN
+    implement. Leave as notes for now — do not refactor yet.
+
 ## Design / philosophy (deferred concepts, documented)
 
 See `agents/cold_archive_design.md`. Not scheduled; design compass only.
