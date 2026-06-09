@@ -29,7 +29,7 @@ from ffsvolumes import (
     NODE_ROLE_REPLICA,
     ROLE_CACHE,
 )
-from ffsutils import is_hidden_mode, parse_versioned_filename
+from ffsutils import is_hidden_mode, parse_versioned_filename, NODE_STATUS_DIR
 import ffslog
 
 
@@ -192,7 +192,10 @@ class SyncWorker:
         for peer_id, peer_data in list(cache.items()):
             files = (peer_data or {}).get("files") or {}
             for vpath, versions in files.items():
-                if not self.policy.wants(vpath):
+                # Always pull federated node-status files regardless of policy,
+                # so every node (even access-only) can show the full realm view.
+                if not (vpath.startswith(NODE_STATUS_DIR + "/")
+                        or self.policy.wants(vpath)):
                     continue
                 newest_name, newest_ts = self._newest_non_delete(versions)
                 any_name, any_ts = self._newest_any(versions)

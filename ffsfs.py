@@ -27,6 +27,7 @@ from ffsutils import (
     HUMAN_NAME,
     NULL_HASH,               # string token used inside temp filenames
     METALOG_FILENAME,        # e.g., ".ffsfs-meta.log"
+    NODE_STATUS_DIR,         # reserved ".ffsfs-nodes" prefix (federated status)
     base32_crockford,
     normalize_vpath,
     ensure_within_base,
@@ -129,6 +130,9 @@ POOL_SYNC_INTERVAL_SECS = 30.0
 # Refresh volume liveness more often than its cache TTL so the hot path always
 # reads a fresh, non-blocking status and never probes a (possibly hung) device.
 LIVENESS_MONITOR_INTERVAL_SECS = 10.0
+# How often a node republishes its status JSON into the reserved status dir.
+# Low cadence keeps version churn modest; old versions are pruned each cycle.
+NODE_STATUS_INTERVAL_SECS = float(os.environ.get("FFSFS_NODE_STATUS_INTERVAL", "300"))
 ORPHAN_SCAN_AT_START = True  # enumerate orphan temps on startup but do *not* auto-commit
 
 # For read/write handles
@@ -852,6 +856,11 @@ class FFSFS(Operations):
             print(f"[ffsfs] initial liveness probe failed: {e}")
         self._liveness_mon = threading.Thread(target=self._monitor_liveness, daemon=True)
         self._liveness_mon.start()
+        # Publish this node's status into the reserved .ffsfs-nodes/ dir for the
+        # federated dashboard view (synced as normal files; old versions pruned).
+        self._started_ts = time.time()
+        self._status_mon = threading.Thread(target=self._monitor_node_status, daemon=True)
+        self._status_mon.start()
 
         # sync policy + rate limits
         self.sync_policy = sync_policy or SyncPolicy.for_role("cache_limited")
@@ -931,6 +940,10 @@ class FFSFS(Operations):
             self._liveness_mon.join(timeout=2.0)
         except Exception:
             pass
+        try:
+            self._status_mon.join(timeout=2.0)
+        except Exception:
+            pass
 
     def _monitor_pool_sync(self):
         while not self._stop_evt.is_set():
@@ -950,6 +963,98 @@ class FFSFS(Operations):
             except Exception as e:
                 print(f"[ffsfs] liveness refresh failed: {e}")
             self._stop_evt.wait(LIVENESS_MONITOR_INTERVAL_SECS)
+
+    # ---- federated node status -------------------------------------------
+
+    def _node_name(self) -> str:
+        return (os.environ.get("FFSFS_NODE_NAME")
+                or os.environ.get("FFSFS_HOSTNAME")
+                or socket.gethostname())
+
+    def _build_node_status(self) -> dict:
+        now = time.time()
+        backends = []
+        for vol in self.backend.pool.all_volumes:
+            status = vol.liveness()  # cached, non-blocking
+            if getattr(vol, "ejected", False):
+                status = f"{status}/PARKED"
+            free = total = None
+            if vol.liveness() == "ONLINE":
+                try:
+                    st = os.statvfs(vol.path)
+                    total = st.f_blocks * st.f_frsize
+                    free = st.f_bavail * st.f_frsize
+                except OSError:
+                    pass
+            backends.append({
+                "label": vol.label,
+                "role": "primary" if vol is self.backend.pool.primary else vol.role,
+                "device_class": getattr(vol, "device_class", None),
+                "status": status,
+                "free_bytes": free,
+                "total_bytes": total,
+            })
+        peers_known = []
+        try:
+            peers_known = list(getattr(peers, "_known_peers", []) or [])
+        except Exception:
+            pass
+        return {
+            "node": self._node_name(),
+            "realm": self.realm,
+            "updated": int(now),
+            "started": int(self._started_ts),
+            "uptime_secs": int(now - self._started_ts),
+            "backends": backends,
+            "peers_known": peers_known,
+        }
+
+    def _write_node_status(self) -> None:
+        vpath = f"{NODE_STATUS_DIR}/{self._node_name()}.json"
+        payload = json.dumps(self._build_node_status(), indent=2).encode("utf-8")
+        temp = self.backend.create_temp_for(vpath)
+        with open(temp, "wb") as f:
+            f.write(payload)
+        self.backend.commit_temp(vpath, temp, "write")
+
+    def _prune_node_status(self) -> None:
+        """Keep only the newest version of each .ffsfs-nodes/* file (disposable
+        metadata); drop older versions so they never accumulate."""
+        for root in self.backend.data_roots():
+            ndir = os.path.join(root, NODE_STATUS_DIR)
+            if not os.path.isdir(ndir):
+                continue
+            newest = {}  # logical_name -> (ts, path)
+            versions = {}  # logical_name -> [paths]
+            try:
+                with os.scandir(ndir) as it:
+                    for de in it:
+                        parsed = parse_versioned_filename(de.name)
+                        if not parsed:
+                            continue
+                        ln = parsed["logical_name"]
+                        ts = int(parsed["timestamp"])
+                        versions.setdefault(ln, []).append((ts, de.path))
+            except OSError:
+                continue
+            for ln, items in versions.items():
+                items.sort()  # oldest first
+                for ts, path in items[:-1]:  # all but newest
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
+    def _monitor_node_status(self):
+        # Small initial delay so the backend/peer server are up first.
+        self._stop_evt.wait(5)
+        while not self._stop_evt.is_set():
+            try:
+                self._write_node_status()
+                self._prune_node_status()
+            except Exception as e:
+                print(f"[ffsfs] node status publish failed: {e}")
+            self._stop_evt.wait(NODE_STATUS_INTERVAL_SECS)
 
     def _monitor_open_map(self):
         while not self._stop_evt.is_set():
@@ -1278,8 +1383,10 @@ class FFSFS(Operations):
                     for de in it:
                         name = de.name
 
-                        # Show subdirectories
+                        # Show subdirectories (but hide the reserved status dir)
                         if de.is_dir(follow_symlinks=False):
+                            if vpath == "" and name == NODE_STATUS_DIR:
+                                continue
                             dirs.add(name)
                             continue
 

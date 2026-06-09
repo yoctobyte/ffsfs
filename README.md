@@ -353,7 +353,7 @@ peer-scaling hardening; see
 
 ## Dashboard
 
-A running peer node serves three human-facing web pages on its peer port:
+A running peer node serves four human-facing web pages on its peer port:
 
 - `/dashboard` — read-only overview: known peers, a network summary, sync status
   (failed paths and conflicts), storage volumes with live status (ONLINE /
@@ -363,6 +363,10 @@ A running peer node serves three human-facing web pages on its peer port:
   `ffsctl`/`configure.sh` command to copy, run, and then restart the service.
 - `/dashboard/logs` — recent in-process events (peer activity, auth rejections,
   sync/mirror failures) with level filtering.
+- `/dashboard/federated` — a realm-wide view of all nodes (up/down, last update,
+  uptime, each node's backends and free space, peer count). Each node publishes
+  its status as a synced metadata file under a reserved `.ffsfs-nodes/` dir
+  (hidden from your file tree); no extra protocol or ports.
 
 ```text
 http://localhost:<peer-port>/dashboard

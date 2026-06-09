@@ -15,6 +15,7 @@ from ffsutils import (
     parse_versioned_filename,    # returns a dict
     get_suffix_from_path,
     NULL_HASH,
+    NODE_STATUS_DIR,
     normalize_vpath,
     is_hidden_mode,
     base32_crockford,
@@ -554,7 +555,7 @@ _AUTH_EXEMPT_PATHS = {"/healthz", "/favicon.ico"}
 # loopback), so they live here too — this also stops browser probes from
 # spamming the auth log with 403s.
 _UI_PATHS = {"/dashboard", "/dashboard/config", "/dashboard/logs",
-             "/status", "/add"}
+             "/dashboard/federated", "/status", "/add"}
 
 
 def _is_loopback_request() -> bool:
@@ -1732,7 +1733,8 @@ def dashboard():
 <style>{_DASHBOARD_CSS}</style>
 <h1>FFSFS Dashboard</h1>
 <nav><a href="/dashboard">Overview</a><a href="/dashboard/config">Configuration</a>
-     <a href="/dashboard/logs">Logs</a><a href="/status?html=1">Legacy status</a></nav>
+     <a href="/dashboard/logs">Logs</a><a href="/dashboard/federated">Federated</a>
+     <a href="/status?html=1">Legacy status</a></nav>
 <div class="meta">
   <strong>{e(_get_node_name())}</strong> · realm <strong>{e(str(_REALM))}</strong>
   · port {e(str(_actual_flask_port))}
@@ -1815,7 +1817,8 @@ def dashboard_config():
 <meta charset="utf-8"><title>FFSFS Configuration</title>
 <style>{_DASHBOARD_CSS}</style>
 <h1>FFSFS Configuration</h1>
-<nav><a href="/dashboard">Overview</a><a href="/dashboard/config">Configuration</a></nav>
+<nav><a href="/dashboard">Overview</a><a href="/dashboard/config">Configuration</a>
+     <a href="/dashboard/logs">Logs</a><a href="/dashboard/federated">Federated</a></nav>
 <p class="meta">realm <strong>{r}</strong>. Live changes here are limited to peer
    add; other changes edit the on-disk realm config — copy the command, run it,
    then restart the service so it takes effect.</p>
@@ -1860,7 +1863,7 @@ def dashboard_logs():
 </style>
 <h1>FFSFS Logs</h1>
 <nav><a href="/dashboard">Overview</a><a href="/dashboard/config">Configuration</a>
-     <a href="/dashboard/logs">Logs</a></nav>
+     <a href="/dashboard/logs">Logs</a><a href="/dashboard/federated">Federated</a></nav>
 <p class="meta">Recent in-process events (newest first, last {len(entries)} shown).
   Filter: <a href="/dashboard/logs">all</a> ·
   <a href="/dashboard/logs?level=info">info+</a> ·
@@ -1868,6 +1871,96 @@ def dashboard_logs():
   <a href="/dashboard/logs?level=error">error</a></p>
 <table><thead><tr><th>Time</th><th>Level</th><th>Source</th><th>Message</th></tr></thead>
 <tbody>{rows}</tbody></table>
+"""
+    return make_response(html, 200)
+
+
+def _collect_federated_nodes():
+    """Read the latest per-node status JSON from the synced .ffsfs-nodes/ dir."""
+    import json as _json
+    best = {}  # node logical name -> (ts, path)
+    for root in _local_data_roots():
+        ndir = os.path.join(root, NODE_STATUS_DIR)
+        if not os.path.isdir(ndir):
+            continue
+        try:
+            with os.scandir(ndir) as it:
+                for de in it:
+                    parsed = parse_versioned_filename(de.name)
+                    if not parsed or is_hidden_mode(parsed.get("mode")):
+                        continue
+                    ln, ts = parsed["logical_name"], int(parsed["timestamp"])
+                    cur = best.get(ln)
+                    if cur is None or ts > cur[0]:
+                        best[ln] = (ts, de.path)
+        except OSError:
+            continue
+    nodes = []
+    for ln, (ts, path) in best.items():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                nodes.append(_json.load(f))
+        except Exception:
+            continue
+    return nodes
+
+
+@app.route("/dashboard/federated", methods=["GET"])
+def dashboard_federated():
+    e = _esc.escape
+    now = time.time()
+    nodes = _collect_federated_nodes()
+    # "up" if it republished recently (status cadence is ~5 min; allow 15).
+    up_window = 900
+
+    def _dur(secs):
+        secs = int(secs or 0)
+        d, secs = divmod(secs, 86400)
+        h, secs = divmod(secs, 3600)
+        m = secs // 60
+        if d:
+            return f"{d}d {h}h"
+        if h:
+            return f"{h}h {m}m"
+        return f"{m}m"
+
+    rows = []
+    for n in sorted(nodes, key=lambda x: str(x.get("node", ""))):
+        updated = n.get("updated", 0) or 0
+        age = now - updated
+        up = age < up_window
+        seen = (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(updated))
+                if updated else "—")
+        bk = n.get("backends") or []
+        bk_html = "<br>".join(
+            f"{e(str(b.get('label')))} "
+            f"<span class='{_status_class((b.get('status') or '').split('/')[0])}'>"
+            f"{e(str(b.get('status')))}</span> "
+            f"{_fmt_bytes(b.get('free_bytes')) + ' free' if b.get('free_bytes') is not None else ''}"
+            for b in bk
+        ) or "—"
+        rows.append(
+            f"<tr><td>{e(str(n.get('node','?')))}</td>"
+            f"<td class='{'ok' if up else 'bad'}'>{'up' if up else 'down'}</td>"
+            f"<td>{seen}</td><td>{_dur(n.get('uptime_secs'))}</td>"
+            f"<td>{bk_html}</td>"
+            f"<td>{len(n.get('peers_known') or [])}</td></tr>"
+        )
+    body = "\n".join(rows) or \
+        "<tr><td colspan='6'><em>No node status yet (publishes every ~5 min).</em></td></tr>"
+
+    html = f"""<!doctype html>
+<meta charset="utf-8"><title>FFSFS Federated</title>
+<style>{_DASHBOARD_CSS}</style>
+<h1>FFSFS Federated View</h1>
+<nav><a href="/dashboard">Overview</a><a href="/dashboard/config">Configuration</a>
+     <a href="/dashboard/logs">Logs</a><a href="/dashboard/federated">Federated</a></nav>
+<p class="meta">Per-node status shared as synced metadata (the reserved
+   <code>{NODE_STATUS_DIR}/</code> dir). A node shows <strong>down</strong> if it
+   has not republished within {up_window // 60} minutes.</p>
+<table><thead><tr><th>Node</th><th>State</th><th>Last update</th><th>Uptime</th>
+<th>Backends</th><th>Peers</th></tr></thead>
+<tbody>{body}</tbody></table>
 """
     return make_response(html, 200)
 
@@ -2017,8 +2110,10 @@ def list_dir():
                 for de in it:
                     name = de.name
 
-                    # subdirectories
+                    # subdirectories (hide the reserved status dir from humans)
                     if de.is_dir(follow_symlinks=False):
+                        if vdir == "" and name == NODE_STATUS_DIR:
+                            continue
                         dirs.add(name)
                         continue
 

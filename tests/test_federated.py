@@ -1,0 +1,118 @@
+import json
+import os
+from types import SimpleNamespace
+
+import pytest
+
+import ffsfs
+import ffspeers
+from ffsutils import NODE_STATUS_DIR, build_versioned_filename
+
+
+@pytest.fixture
+def fs(tmp_path, monkeypatch):
+    monkeypatch.setattr(ffsfs, "ORPHAN_SCAN_AT_START", False)
+    # FFSFS.__init__ registers a sync worker on the ffspeers module global;
+    # save/restore it so it does not leak into other tests.
+    old_worker = ffspeers._sync_worker
+    instance = ffsfs.FFSFS("/unused-mount", base_path=str(tmp_path), realm="test")
+    try:
+        yield instance
+    finally:
+        ffspeers._sync_worker = old_worker
+
+
+@pytest.mark.unit
+def test_write_node_status_roundtrip(fs):
+    fs._write_node_status()
+    latest = fs.backend.pick_latest(f"{NODE_STATUS_DIR}/{fs._node_name()}.json")
+    assert latest is not None
+    with open(latest) as f:
+        data = json.load(f)
+    assert data["node"] == fs._node_name()
+    assert data["realm"] == "test"
+    assert isinstance(data["backends"], list)
+    assert "uptime_secs" in data
+
+
+@pytest.mark.unit
+def test_prune_node_status_keeps_latest(fs, tmp_path):
+    ndir = os.path.join(ffsfs.data_root(str(tmp_path)), NODE_STATUS_DIR)
+    os.makedirs(ndir, exist_ok=True)
+    for ts in (100, 200, 300):
+        name = build_versioned_filename("nodeA.json", "AAAAAAAA", "write", ts)
+        with open(os.path.join(ndir, name), "w") as f:
+            f.write("{}")
+    fs._prune_node_status()
+    remaining = sorted(os.listdir(ndir))
+    assert len(remaining) == 1
+    assert remaining[0].endswith(".300")
+
+
+@pytest.mark.unit
+def test_collect_federated_nodes(tmp_path, monkeypatch):
+    data_path = tmp_path / "data"
+    ndir = data_path / NODE_STATUS_DIR
+    ndir.mkdir(parents=True)
+    name = build_versioned_filename("peerX.json", "BBBBBBBB", "write", 500)
+    (ndir / name).write_text(json.dumps(
+        {"node": "peerX", "realm": "test", "updated": 500,
+         "uptime_secs": 60, "backends": [], "peers_known": []}))
+
+    old = ffspeers._local_backend
+    ffspeers._local_backend = SimpleNamespace(data_path=str(data_path))
+    try:
+        nodes = ffspeers._collect_federated_nodes()
+        assert any(n["node"] == "peerX" for n in nodes)
+    finally:
+        ffspeers._local_backend = old
+
+
+@pytest.mark.unit
+def test_dashboard_federated_page(tmp_path, monkeypatch):
+    data_path = tmp_path / "data"
+    ndir = data_path / NODE_STATUS_DIR
+    ndir.mkdir(parents=True)
+    import time as _t
+    name = build_versioned_filename("livenode.json", "CCCCCCCC", "write", int(_t.time()))
+    (ndir / name).write_text(json.dumps(
+        {"node": "livenode", "realm": "test", "updated": int(_t.time()),
+         "uptime_secs": 120,
+         "backends": [{"label": "ssd", "status": "ONLINE", "free_bytes": 1024}],
+         "peers_known": ["10.0.0.2:8765"]}))
+
+    old_b, old_r = ffspeers._local_backend, ffspeers._REALM
+    ffspeers._local_backend = SimpleNamespace(data_path=str(data_path))
+    ffspeers._REALM = "test"
+    try:
+        resp = ffspeers.app.test_client().get("/dashboard/federated")
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        assert "livenode" in body and ">up<" in body
+        assert "ssd" in body
+    finally:
+        ffspeers._local_backend, ffspeers._REALM = old_b, old_r
+
+
+@pytest.mark.unit
+def test_federated_page_loopback_gated():
+    resp = ffspeers.app.test_client().get(
+        "/dashboard/federated", environ_overrides={"REMOTE_ADDR": "10.0.0.9"})
+    assert resp.status_code == 403
+
+
+@pytest.mark.unit
+def test_status_dir_hidden_from_list_dir(tmp_path):
+    data_path = tmp_path / "data"
+    (data_path / NODE_STATUS_DIR).mkdir(parents=True)
+    (data_path / "docs").mkdir()
+    old_b, old_r = ffspeers._local_backend, ffspeers._REALM
+    ffspeers._local_backend = SimpleNamespace(data_path=str(data_path))
+    ffspeers._REALM = "test"
+    try:
+        resp = ffspeers.app.test_client().get("/list-dir", query_string={"realm": "test", "dir": ""})
+        dirs = resp.get_json().get("dirs", [])
+        assert "docs" in dirs
+        assert NODE_STATUS_DIR not in dirs   # reserved dir hidden
+    finally:
+        ffspeers._local_backend, ffspeers._REALM = old_b, old_r

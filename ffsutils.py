@@ -23,6 +23,12 @@ DATA_DIR = ".ffsfs_data"
 # Name of the simple append-only metadata log (lives at <base>/<METALOG_FILENAME>)
 METALOG_FILENAME = ".ffsfs-meta.log"
 
+# Reserved virtual directory holding per-node status JSON (federated view).
+# Each node writes ".ffsfs-nodes/<node>.json"; these sync like normal files but
+# are hidden from user-facing listings. Disposable metadata — old versions are
+# auto-pruned (keep-latest), so they do not accumulate.
+NODE_STATUS_DIR = ".ffsfs-nodes"
+
 # Token embedded in temporary filenames: any basename that *contains* f".{NULL_HASH}."
 # is treated as an in-progress temp.
 NULL_HASH = "NULL_HASH"
