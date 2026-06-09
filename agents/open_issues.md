@@ -81,12 +81,13 @@ stopping for features/fixes/logs.
 
 ## Features
 
-- [P3] **Launch all active realms (multi-realm supervisor).** Today `launch.sh`
-  runs ONE realm per invocation. For a multi-realm host, a `launch-all` /
+- [P3] **`autolaunch.sh` — start all active realms (multi-realm supervisor).**
+  Today `launch.sh` runs ONE realm per invocation. For a multi-realm host, a
   supervisor that starts every *activated* realm (each its own FUSE mount + peer
-  port) and stops them together would be convenient. Needs per-realm pid/log
-  management and clean shutdown. (Operator currently runs one `launch.sh` per
-  realm.)
+  port) and stops them together would be convenient. Name it `autolaunch.sh`
+  (NOT `launch-*`) so shell tab-completion of `launch` stays unambiguous. Needs
+  per-realm pid/log management and clean shutdown. (Operator currently runs one
+  `launch.sh` per realm.)
 
 - [P2] **Prune tool — remove stale files (USER-RUN, not automatic).** A manual
   command (e.g. `ffsctl prune <realm> [...]`) the user invokes to reclaim space.
