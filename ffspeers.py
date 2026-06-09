@@ -688,7 +688,7 @@ def _save_config_debounced():
 
 def _get_local_endpoints() -> List[str]:
     """Announce where our HTTP peer API is reachable (ip:port)."""
-    port = _actual_flask_port or PEER_PORT
+    port = _advertise_port()
     return [f"{ip}:{port}" for ip in _my_ips()]
 
 def _get_shareable_seeds() -> List[tuple]:
@@ -873,6 +873,18 @@ def _normalize_remote_addr(addr: str) -> str:
     except Exception:
         return addr
 
+def _advertise_port() -> int:
+    """Port to advertise to peers (hello/notify query, gossip endpoints).
+
+    Prefer the actual bound port. Before the HTTP server thread has bound,
+    _actual_flask_port is still None; fall back to the realm-derived port (the
+    deterministic port every same-realm node binds), NOT the legacy static 8765.
+    Using 8765 here made peers record us at a dead :8765 endpoint during the
+    startup race before the real port was known."""
+    if _actual_flask_port:
+        return _actual_flask_port
+    return default_port_for_realm(_REALM) if _REALM else PEER_PORT
+
 def _peer_url(peer: str, path: str) -> str:
     if ":" in peer and peer.rsplit(":", 1)[-1].isdigit():
         return f"http://{peer}{path}"
@@ -992,7 +1004,7 @@ def ping_all():
             port = default_port_for_realm(_REALM) if _REALM else PEER_PORT
         try:
             url = f"http://{host}:{port}/hello"
-            params = {"realm": _REALM, "ts": time.time(), "port": _actual_flask_port or PEER_PORT}
+            params = {"realm": _REALM, "ts": time.time(), "port": _advertise_port()}
             r = _authed_get(url, "/hello", params, timeout=3)
             if r.ok:
                 _last_seen[peer] = time.time()
@@ -1019,7 +1031,7 @@ def notify_commit(vpath: str, fullpath: str) -> None:
     #payload = {"realm": _REALM, "event": "commit", "vpath": vpath, "suffix": suffix}
     payload = {"realm": _REALM, "event": "commit", "vpath": vpath, "suffix": suffix,
                "size": size, "mtime": mtime,
-               "from_port": (_actual_flask_port or PEER_PORT)}    
+               "from_port": (_advertise_port())}    
     for peer in list(_known_peers):
         try:
             r = _authed_post(_peer_url(peer, "/notify"), "/notify", payload, timeout=12)
@@ -1037,7 +1049,7 @@ def notify_commit_safe(vpath: str, final_name: str, size: int, mtime: int) -> No
     #payload = {"realm": _REALM, "event": "commit", "vpath": vpath, "suffix": suffix}
     payload = {"realm": _REALM, "event": "commit", "vpath": vpath, "suffix": suffix,
                "size": size, "mtime": mtime,
-               "from_port": (_actual_flask_port or PEER_PORT)}    
+               "from_port": (_advertise_port())}    
     
     for peer in list(_known_peers):
         try:
@@ -1056,7 +1068,7 @@ def notify_delete(vpath: str, suffix: str = "") -> None:
     if not _known_peers:
         return
     payload = {"realm": _REALM, "event": "delete", "vpath": vpath,
-               "from_port": (_actual_flask_port or PEER_PORT)}
+               "from_port": (_advertise_port())}
     if suffix:
         payload["suffix"] = suffix
     for peer in list(_known_peers):
@@ -1084,7 +1096,7 @@ def notify_move_safe(old_v: str, new_v: str, mtime: float) -> None:
         return
     payload = {"realm": _REALM, "event": "move", "vpath": old_v,
                "dest_vpath": new_v, "mtime": int(mtime),
-               "from_port": (_actual_flask_port or PEER_PORT)}
+               "from_port": (_advertise_port())}
     for peer in list(_known_peers):
         try:
             _authed_post(_peer_url(peer, "/notify"), "/notify", payload, timeout=12)
@@ -1109,7 +1121,7 @@ def notify_modify(vpath: str, path: str) -> None:
     #           "size": size, "mtime": mtime}
     payload = {"realm": _REALM, "event": "modify", "vpath": vpath, "suffix": suffix,
                "size": size, "mtime": mtime,
-               "from_port": (_actual_flask_port or PEER_PORT)}
+               "from_port": (_advertise_port())}
     
     for peer in list(_known_peers):
         try:
@@ -1597,7 +1609,7 @@ def add_page():
                 try:
                     # conamur statim pulsare
                     now = time.time()
-                    port = _actual_flask_port or PEER_PORT
+                    port = _advertise_port()
                     params = {"realm": _REALM, "ts": now, "port": port}
                     _authed_get(_peer_url(peer, "/hello"), "/hello", params, timeout=5)
                 except Exception:
@@ -1784,7 +1796,7 @@ def _collect_peers():
 def _network_summary():
     verifier = _request_verifier
     return {
-        "bind": f"{PEER_BIND_HOST}:{_actual_flask_port or PEER_PORT}",
+        "bind": f"{PEER_BIND_HOST}:{_advertise_port()}",
         "autodiscover": bool(AUTO_DISCOVER),
         "trust_unknown": bool(TRUST_UNKNOWN_PEER),
         "manual_approval": bool(getattr(verifier, "manual_approval", False)),
@@ -2502,6 +2514,15 @@ def start_local_peer_server(port: int = PEER_PORT) -> None:
     global _actual_flask_port, _server_thread
     if _server_thread and _server_thread.is_alive():
         return  # already running
+
+    # Advertise the intended port immediately. The server thread binds
+    # asynchronously and confirms via _set_actual_port; without this, the
+    # ping_all()/autodiscovery below run before the bind and would advertise the
+    # legacy fallback, making peers record us at a dead endpoint. The caller
+    # already picked a free port, so this optimistic value is what we bind. (A
+    # port=0 "auto" caller gets corrected once the real port is known.)
+    if port:
+        _actual_flask_port = int(port)
 
     def _run():
         nonlocal port

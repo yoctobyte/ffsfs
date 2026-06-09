@@ -178,6 +178,26 @@ def test_peer_url_bare_host_uses_realm_port():
 
 
 @pytest.mark.unit
+def test_advertise_port_falls_back_to_realm_port_not_8765():
+    """Before the HTTP server binds, _actual_flask_port is None. The advertised
+    port (sent as &port= in /hello and from_port in /notify) must be the
+    realm-derived port, not the legacy static 8765 — otherwise peers record us
+    at a dead :8765 endpoint during the startup race."""
+    from ffsutils import default_port_for_realm
+    old_realm, old_port = ffspeers._REALM, ffspeers._actual_flask_port
+    ffspeers._REALM = "myrealm"
+    try:
+        ffspeers._actual_flask_port = None
+        assert ffspeers._advertise_port() == default_port_for_realm("myrealm")
+        assert ffspeers._advertise_port() != 8765
+        # once bound, the actual port wins
+        ffspeers._actual_flask_port = 12345
+        assert ffspeers._advertise_port() == 12345
+    finally:
+        ffspeers._REALM, ffspeers._actual_flask_port = old_realm, old_port
+
+
+@pytest.mark.unit
 def test_list_dir_and_head(peer_client):
     client, data_path = peer_client
     subdir = data_path / "a"
