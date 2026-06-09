@@ -1,0 +1,4 @@
+# Test/development dependencies (not needed at runtime).
+# Only required to run the unit suite inside a virtualenv; with system Python
+# use the OS package instead: sudo apt install python3-pytest
+pytest

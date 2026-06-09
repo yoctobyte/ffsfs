@@ -402,18 +402,31 @@ fusermount3 -u -z <mountpoint>
 
 ## Running the Tests
 
-Useful to validate a checkout on another box before deploying.
+Useful to validate a checkout on another box before deploying. A helper runs
+everything:
+
+```bash
+./runtests.sh           # compile check + unit tests
+./runtests.sh --vm      # also run the disposable-VM smokes (needs QEMU, below)
+./runtests.sh -k volume # extra args are forwarded to pytest
+```
+
+Tests do **not** require a virtualenv and can be run before `./setup.sh`. The
+runner uses `./.venv` if present, otherwise system `python3` (override with
+`FFSFS_PYTHON`).
 
 ### Unit tests (fast, safe, no FUSE)
 
-Only needs `python3-pytest` on top of the runtime deps. They never mount FUSE
-and are safe to run anywhere:
+These never mount FUSE and are safe to run anywhere. They only need `pytest` on
+top of the runtime deps:
 
 ```bash
-sudo apt install -y python3-pytest
-python3 -m py_compile *.py
-pytest
+sudo apt install -y python3-pytest      # system Python
+# or, inside a virtualenv: pip install -r requirements-dev.txt
+./runtests.sh
 ```
+
+Equivalent without the helper: `python3 -m py_compile *.py && pytest`.
 
 ### VM tests (FUSE + peer networking, disposable QEMU guests)
 
@@ -440,6 +453,12 @@ the suites:
 ```bash
 tools/vm/build-base-image.sh           # one-time; creates .vm/images/...
 
+./runtests.sh --vm                     # unit tests + the VM smoke batch
+```
+
+Or run individual VM suites directly:
+
+```bash
 tools/vm/run-single-vm-smoke.sh        # FUSE mount/read/write/delete
 tools/vm/run-single-vm-pool-smoke.sh   # multi-backend pool
 tools/vm/run-two-peer-scenario.sh smoke   # core peer scenarios
