@@ -88,6 +88,17 @@ stopping for features/fixes/logs.
 
 ## Features
 
+- [P2] **Manual-approval "pending peers" (known but not whitelisted).** Today
+  with peer_trust=manual, an unapproved peer is 403'd at verify() and never
+  recorded, so the operator can't see/approve it. Make an authenticated-but-
+  unapproved peer KNOWN-and-PENDING: record it (visible in dashboard/CLI) and
+  let the operator approve it, without exchanging data until approved. (Default
+  trust-authenticated auto-add already shipped; this is the paranoid path.)
+- [P3] **Harden autodiscovery joins.** UDP gossip seeds are currently joined by
+  default (same realm) though the seed itself is unauthenticated; HMAC gates
+  data so it's safe, but a hardening step is to require an HMAC-verified hello
+  before adding a gossip-learned peer, and to add per-node identity.
+
 - [P2] **Lazy/partial file content (header-prefix partials).** `open()` for read
   fetches the WHOLE remote file eagerly, so a thumbnailer/MIME-sniffer peeking at
   a huge remote file transfers it all and caches it even on a lazy/access-only
