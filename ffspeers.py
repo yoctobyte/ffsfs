@@ -2169,8 +2169,16 @@ def notify():
                 except Exception as e:
                     print(f"[peer] Failed to save peer config: {e}")
 
+    # Federated node-status (.ffsfs-nodes/*) always syncs, regardless of this
+    # node's notify scope or sync policy — it is how the network view is built
+    # (see sync_node_status_files). Without this exemption, a node with a
+    # restricted scope silently drops a peer's status notify and never caches
+    # it, so the federated view becomes one-directional.
+    _is_node_status = (vpath == NODE_STATUS_DIR
+                       or vpath.startswith(NODE_STATUS_DIR + "/"))
+
     # respect notification scope
-    if not _is_subscribed(vpath):
+    if not _is_node_status and not _is_subscribed(vpath):
         # silently accept (so senders don't retry), but don't cache/update
         return jsonify({"ok": True, "ignored": True, "scope": NOTIFY_SCOPE}), 200
 

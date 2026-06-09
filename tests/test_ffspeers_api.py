@@ -456,6 +456,33 @@ def test_notify_delete_with_suffix(peer_client):
 
 
 @pytest.mark.unit
+def test_notify_node_status_bypasses_subscription_scope(peer_client, monkeypatch):
+    """Under restricted notify scope a non-subscribed file is ignored, but a
+    federated node-status (.ffsfs-nodes/*) notify is always cached — otherwise
+    the federated view becomes one-directional."""
+    client, _ = peer_client
+    ffspeers._peer_cache.clear()
+    monkeypatch.setattr(ffspeers, "NOTIFY_SCOPE", "subscribed")
+    monkeypatch.setattr(ffspeers, "_subscribed_prefixes", set())  # subscribe to nothing
+    peer_id = "127.0.0.1:1234"
+
+    # a normal, non-subscribed file is ignored
+    resp = client.post("/notify", json={
+        "realm": "test", "event": "commit", "vpath": "docs/readme.txt",
+        "suffix": "AAAAAAAA.write.0.111", "size": 3, "mtime": 111, "from_port": "1234"})
+    assert resp.status_code == 200 and resp.get_json().get("ignored") is True
+    assert ffspeers._peer_cache.get(peer_id, {}).get("files", {}).get("docs/readme.txt") is None
+
+    # a node-status file is cached despite the scope
+    nspath = f"{ffspeers.NODE_STATUS_DIR}/nodeB.json"
+    resp = client.post("/notify", json={
+        "realm": "test", "event": "commit", "vpath": nspath,
+        "suffix": "BBBBBBBB.write.0.222", "size": 9, "mtime": 222, "from_port": "1234"})
+    assert resp.status_code == 200 and not resp.get_json().get("ignored")
+    assert nspath in ffspeers._peer_cache[peer_id]["files"]
+
+
+@pytest.mark.unit
 def test_get_newer_or_missing_fetches_newest_across_peers(tmp_path, monkeypatch):
     old_backend = ffspeers._local_backend
     old_known = list(ffspeers._known_peers)
