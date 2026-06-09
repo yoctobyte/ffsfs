@@ -138,7 +138,7 @@ class Volume:
                  mirror: bool = False, media: str = None,
                  max_bytes: int = None, max_file_size: int = None,
                  reserve_bytes: int = None, device_class: str = None,
-                 job: str = None, job_prefix: str = None):
+                 job: str = None, job_prefix: str = None, ejected: bool = False):
         self.path = os.path.abspath(path)
         self.vol_id = vol_id or str(uuid.uuid4())
         self.label = label or os.path.basename(self.path)
@@ -153,6 +153,10 @@ class Volume:
         self.device_class = device_class
         self.job = job
         self.job_prefix = job_prefix
+        # parked for clean removal: stays registered, receives no live writes;
+        # missed writes are queued and catch up when un-ejected + online again.
+        # Config-side only (not written to the disk's id file).
+        self.ejected = bool(ejected)
         # liveness cache (non-blocking hot-path reads; monitor keeps it fresh)
         self._live_lock = threading.Lock()
         self._live_status: Optional[str] = None
@@ -319,6 +323,8 @@ class Volume:
             data["job"] = self.job
         if self.job_prefix is not None:
             data["job_prefix"] = self.job_prefix
+        if self.ejected:
+            data["ejected"] = True
         return data
 
     @classmethod
@@ -337,6 +343,7 @@ class Volume:
             device_class=data.get("device_class"),
             job=data.get("job"),
             job_prefix=data.get("job_prefix"),
+            ejected=data.get("ejected", False),
         )
 
     @classmethod
@@ -440,7 +447,8 @@ class StoragePool:
             candidates = self.read_targets()
             if not candidates and not self.secondaries:
                 candidates = [self.primary]
-            eligible = [v for v in candidates if v.can_accept_write(size)]
+            eligible = [v for v in candidates
+                        if not v.ejected and v.can_accept_write(size)]
             if not eligible:
                 return None
             # stable sort: equal free space keeps primary-first ordering
@@ -462,8 +470,10 @@ class StoragePool:
         return result
 
     def mirror_targets(self) -> List[Volume]:
-        """Return online volumes configured for mirror-on-write replication."""
-        return [v for v in self.all_volumes if v.mirror and v.is_online()]
+        """Return online volumes configured for mirror-on-write replication
+        (excludes parked/ejected volumes)."""
+        return [v for v in self.all_volumes
+                if v.mirror and not v.ejected and v.is_online()]
 
     def configured_mirrors(self) -> List[Volume]:
         """Return all volumes configured as mirrors, including offline ones."""

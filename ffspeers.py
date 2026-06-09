@@ -1555,6 +1555,8 @@ def _collect_volumes():
         job = getattr(vol, "job", None) or "—"
         if getattr(vol, "job_prefix", None):
             job = f"{vol.job_prefix}"
+        if getattr(vol, "ejected", False):
+            status = f"{status}/PARKED"
         out.append({
             "label": vol.label,
             "role": vol.role,

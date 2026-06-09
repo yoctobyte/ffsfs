@@ -61,6 +61,8 @@ usage() {
     echo "      [--max-file-size <n>] [--reserve-bytes <n>]"
     echo "  remove-backend <realm> <id_or_label_or_path> Remove storage backend"
     echo "  list-backends <realm>               List storage backends"
+    echo "  eject-backend <realm> <id_or_label_or_path>  Park a backend for safe removal (stays registered)"
+    echo "  attach-backend <realm> <id_or_label_or_path> Un-park a re-attached backend"
     echo ""
     echo "Config keys: mountpoint, base, port, bind_host, node_name,"
     echo "             autodiscover, known_peers, approved_peers,"
@@ -202,6 +204,20 @@ cmd_list_backends() {
     local realm="${1:-}"
     require_arg "$realm" "realm name required"
     python3 "$FFSCTL" backend list "$realm"
+}
+
+cmd_eject_backend() {
+    local realm="${1:-}" target="${2:-}"
+    require_arg "$realm" "realm name required"
+    require_arg "$target" "volume ID, label, or path required"
+    python3 "$FFSCTL" backend eject "$realm" "$target"
+}
+
+cmd_attach_backend() {
+    local realm="${1:-}" target="${2:-}"
+    require_arg "$realm" "realm name required"
+    require_arg "$target" "volume ID, label, or path required"
+    python3 "$FFSCTL" backend attach "$realm" "$target"
 }
 
 # ---- interactive menu ----
@@ -361,5 +377,7 @@ case "${1:-}" in
     add-backend)    shift; cmd_add_backend "$@" ;;
     remove-backend) shift; cmd_remove_backend "$@" ;;
     list-backends)  shift; cmd_list_backends "$@" ;;
+    eject-backend)  shift; cmd_eject_backend "$@" ;;
+    attach-backend) shift; cmd_attach_backend "$@" ;;
     *) die "unknown command: $1 (try --help)" ;;
 esac

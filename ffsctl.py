@@ -152,6 +152,8 @@ def cmd_backend(args):
         print()
         for vol in pool.all_volumes:
             status = vol.status()
+            if vol.ejected:
+                status += "/PARKED"
             role = "PRIMARY" if vol is pool.primary else vol.role
             print(f"  [{status}] {vol.label}")
             print(f"          id:   {vol.vol_id}")
@@ -228,6 +230,30 @@ def cmd_backend(args):
         print(f"Registered backend: {vol.label} ({vol.vol_id})")
         print(f"  path: {vol.path}")
         print(f"  role: {vol.role}")
+
+    elif action in ("eject", "attach"):
+        pool, cfg = _load_or_create_pool(realm)
+        target = args.id_or_path or args.path
+        if not target:
+            print("volume ID, label, or path required")
+            return
+        vol = pool.find_by_id(target) or pool.find_by_path(target) or pool.find_by_label(target)
+        if not vol:
+            print(f"Not found in pool: {target}")
+            return
+        if vol is pool.primary:
+            print("Cannot eject the primary volume")
+            return
+        vol.ejected = (action == "eject")
+        save_pool_config(cfg, pool, realm=realm)
+        if action == "eject":
+            print(f"Ejected (parked) backend: {vol.label} ({vol.vol_id})")
+            print("  Stays registered; receives no new writes. Safe to unplug.")
+            print("  Missed writes are queued and catch up after 'backend attach'.")
+            print("  A running service applies this on its next restart.")
+        else:
+            print(f"Attached (un-parked) backend: {vol.label} ({vol.vol_id})")
+            print("  Receives writes again; pending replication catches up when online.")
 
 # --------------------- realm commands -------------------------
 
@@ -844,10 +870,10 @@ def main():
     srestart.set_defaults(func=cmd_restart)
 
     sb = sub.add_parser("backend", help="manage storage backends")
-    sb.add_argument("action", choices=["list", "add", "remove", "register"])
+    sb.add_argument("action", choices=["list", "add", "remove", "register", "eject", "attach"])
     sb.add_argument("realm", help="realm name")
     sb.add_argument("path", nargs="?", help="backend path (for add/register)")
-    sb.add_argument("id_or_path", nargs="?", help="volume ID, label, or path (for remove)")
+    sb.add_argument("id_or_path", nargs="?", help="volume ID, label, or path (for remove/eject/attach)")
     sb.add_argument("--id", default=None, help="label for the new backend")
     sb.add_argument("--role", default=None, help="backend role (archive, cache)")
     sb.add_argument("--mirror", action="store_true", help="replicate committed writes to this backend")

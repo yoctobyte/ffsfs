@@ -553,7 +553,8 @@ class StorageBackend:
         for vol in self.pool.configured_mirrors():
             if source_vol and vol.vol_id == source_vol.vol_id:
                 continue
-            if not vol.is_online():
+            # Parked (ejected) or offline: defer — queue and catch up later.
+            if vol.ejected or not vol.is_online():
                 pending.append(vol.vol_id)
                 continue
             try:
@@ -579,7 +580,8 @@ class StorageBackend:
                 vol = self.pool.find_by_id(vol_id)
                 if not vol or not vol.mirror:
                     continue
-                if not vol.is_online():
+                # Parked (ejected) or offline: keep queued, don't copy yet.
+                if vol.ejected or not vol.is_online():
                     still_pending.append(vol_id)
                     continue
                 dest = self._version_path_for_volume(vol, vpath, final_name)

@@ -303,6 +303,31 @@ def test_write_target_ties_keep_primary_first(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_ejected_volume_roundtrips_in_config(tmp_path):
+    vol = Volume(str(tmp_path / "usb"), role=ROLE_ARCHIVE, ejected=True)
+    restored = Volume.from_dict(vol.to_dict())
+    assert restored.ejected is True
+    # default stays false and is omitted from config
+    assert "ejected" not in Volume(str(tmp_path / "x")).to_dict()
+
+
+@pytest.mark.unit
+def test_ejected_volume_excluded_from_routing(tmp_path, monkeypatch):
+    class StatVfs:
+        f_bavail = 10 * 1024 * 1024 * 1024
+        f_frsize = 1
+    monkeypatch.setattr("ffsvolumes.os.statvfs", lambda path: StatVfs())
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY)
+    primary.init()
+    mirror = Volume(str(tmp_path / "usb"), role=ROLE_ARCHIVE, mirror=True, ejected=True)
+    mirror.init()
+    pool = StoragePool(primary=primary, secondaries=[mirror])
+    # parked volume is not a write target nor a mirror target
+    assert pool.write_target(size=1024) is primary
+    assert mirror not in pool.mirror_targets()
+
+
+@pytest.mark.unit
 def test_pool_write_target_returns_none_when_no_volume_accepts_size(tmp_path):
     primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY, max_file_size=4)
     primary.init()

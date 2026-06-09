@@ -14,8 +14,12 @@ stopping for features/fixes/logs.
    write_target prefers the volume with the most free space, ties keep primary;
    zero-size markers bypass the floor). REMAINING: job/prefix-aware routing and
    media/role preference (theme "music only" → only /music lands there).
-3. **Clean "unmount/eject backend"** — take a backend offline cleanly while
-   keeping it registered for next sessions (disk-rotation primitive).
+3. **Clean "unmount/eject backend"** — DONE. `ffsctl backend eject|attach`
+   (and `configure.sh eject-backend|attach-backend`): parks a backend
+   (`ejected` flag) so it stays registered but receives no live writes; missed
+   writes queue as pending and catch up on attach. Live service applies it on
+   next restart. (Rotating *different* physical disks = separate volume ids =
+   the larger rotation UX, still open under queue #2.)
 4. **Exception handling + logs** — replace broad `except Exception: pass` with
    granular catches + logging; surface a log view in the dashboard.
 5. **Network/peer overview in dashboard** — richer than the current peers table.

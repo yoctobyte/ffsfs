@@ -202,6 +202,36 @@ def test_backend_records_pending_and_catches_up_reconnected_mirror(tmp_path):
 
 
 @pytest.mark.unit
+def test_ejected_mirror_defers_then_catches_up_on_attach(tmp_path):
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY)
+    primary.init()
+    mirror = Volume(str(tmp_path / "usb"), role=ROLE_ARCHIVE, mirror=True)
+    mirror.init()
+    pool = StoragePool(primary=primary, secondaries=[mirror])
+    backend = StorageBackend(primary.path, "test", pool=pool)
+
+    # Park the mirror (clean eject): online but should receive no live writes.
+    mirror.ejected = True
+    temp = backend.create_temp_for("docs/file.txt")
+    with open(temp, "wb") as f:
+        f.write(b"parked-write")
+    final = backend.commit_temp("docs/file.txt", temp, "write")
+
+    mirrored = os.path.join(mirror.data_path, "docs", os.path.basename(final))
+    assert not os.path.exists(mirrored), "write reached a parked mirror"
+    assert backend._pending_entries()[0]["targets"] == [mirror.vol_id]
+
+    # Catch-up must skip while parked, even though the volume is online.
+    assert backend.sync_pending_replication()["copied"] == 0
+    assert not os.path.exists(mirrored)
+
+    # Un-park (attach): now it catches up.
+    mirror.ejected = False
+    assert backend.sync_pending_replication() == {"copied": 1, "pending": 0}
+    assert open(mirrored, "rb").read() == b"parked-write"
+
+
+@pytest.mark.unit
 def test_backend_routes_final_commit_by_max_file_size(tmp_path):
     primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY, max_file_size=4)
     primary.init()
