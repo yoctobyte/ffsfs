@@ -33,6 +33,18 @@ _REALM = MAGIC_REALM
 
 AUTO_DISCOVER = os.environ.get("FFSFS_AUTODISCOVER", "1").strip().lower() not in ("0", "false", "off")
 
+# All node-local runtime state (peers.conf, instance.id, storage.id, gossip
+# seeds, subscriptions) lives under one fixed state dir — NOT the current working
+# directory — so running straight from the git checkout never writes state into
+# the repo, and state is stable regardless of where the process is launched.
+# Defaults to ~/.ffsfs/.storage, matching where realm configs already live.
+_STATE_DIR = os.environ.get("FFSFS_STATE_DIR", os.path.expanduser("~/.ffsfs"))
+_STORAGE_DIR = os.path.join(_STATE_DIR, ".storage")
+
+
+def _storage_path(name: str) -> str:
+    return os.path.join(_STORAGE_DIR, name)
+
 
 # Cross-realm gossip is fine, but only auto-join our own realm+fsid
 STRICT_FSID = True
@@ -249,7 +261,7 @@ def _recent_error(kind: str, peer: str, key: str, backoff: float) -> bool:
 #subscriptions
 # ---- Notification scope (all | subscribed) ----
 NOTIFY_SCOPE = os.environ.get("FFSFS_NOTIFY_SCOPE", "all").strip().lower()  # default: "all" , options: subscribed
-SUBSCRIPTIONS_FILE = ".storage/subscriptions.txt"
+SUBSCRIPTIONS_FILE = _storage_path("subscriptions.txt")
 _subscribed_prefixes = set()
 
 def _load_subscriptions():
@@ -516,7 +528,7 @@ def _peer_id_from_request() -> str:
 
 TIME_TOLERANCE = 5                    # seconds for hello clock skew
 LIVENESS_INTERVAL = 30                # seconds
-CONFIG_FILE = ".storage/peers.conf"
+CONFIG_FILE = _storage_path("peers.conf")
 VERBOSE = True
 TRUST_UNKNOWN_PEER = False
 FILECACHE_REFRESH_INTERVAL = 600      # seconds
@@ -603,7 +615,7 @@ _INSTANCE_ID = None
 _FSID = "unknown"
 
 def _ensure_storage_dir():
-    os.makedirs(".storage", exist_ok=True)
+    os.makedirs(_STORAGE_DIR, exist_ok=True)
 
 def _read_or_create(path: str, make) -> str:
     try:
@@ -622,7 +634,7 @@ def _init_instance_id():
     if _INSTANCE_ID:
         return
     import uuid
-    _INSTANCE_ID = _read_or_create(".storage/instance.id", lambda: uuid.uuid4())
+    _INSTANCE_ID = _read_or_create(_storage_path("instance.id"), lambda: uuid.uuid4())
 
 def _update_fsid_from_backend():
     """Derive a stable fsid for this storage; persist it so parallel clusters don't collide."""
@@ -632,7 +644,7 @@ def _update_fsid_from_backend():
         if not base:
             return
         import hashlib, os as _os
-        fsid_path = ".storage/storage.id"
+        fsid_path = _storage_path("storage.id")
         def _make():
             st = _os.stat(base)
             key = f"{_os.path.abspath(base)}|{getattr(st,'st_dev',0)}|{getattr(st,'st_ino',0)}"
@@ -723,7 +735,7 @@ def _maybe_start_autodiscovery():
         get_shareable_seeds=_get_shareable_seeds,
         on_seeds=_on_seeds,
         cross_realm=True,
-        persist_path=".storage/ffsgossip-seeds.json",
+        persist_path=_storage_path("ffsgossip-seeds.json"),
     )
     _gossip_agent.start()
     _log(f"[peer] Autodiscovery started (realm={_REALM}, fsid={_FSID}, instance={_INSTANCE_ID})")
@@ -758,8 +770,8 @@ def set_realm(realm: Optional[str]) -> None:
     global _REALM
     if realm:
         _REALM = realm
-        # keep peer lists separate per realm (e.g. .storage/peers-TEST2.conf)
-        cfg = os.path.join(".storage", f"peers-{_REALM}.conf")
+        # keep peer lists separate per realm (e.g. ~/.ffsfs/.storage/peers-TEST2.conf)
+        cfg = _storage_path(f"peers-{_REALM}.conf")
         load_config(cfg)        
         global _config_path
         _config_path = cfg

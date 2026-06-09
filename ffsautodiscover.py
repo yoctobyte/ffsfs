@@ -57,7 +57,12 @@ ROT_RANGE = 40000                # + (epoch//ROTATE_SEC) % ROT_RANGE  → ≤ 50
 # ---------- Defaults ----------
 DEFAULT_MAX_RETURN = 5000        # semen maximum in RESP/CHUNK (molle)
 SEEDS_PER_REALM_IN_ANN = 3       # parvum genus in ANN
-DISCOVERY_PERSIST = ".storage/ffsgossip-seeds.json"  # locus memoriae
+# Persist under the fixed state dir (not CWD) so running from a git checkout
+# never writes into the repo. ffspeers passes an explicit path; this is the
+# standalone fallback.
+DISCOVERY_PERSIST = os.path.join(
+    os.environ.get("FFSFS_STATE_DIR", os.path.expanduser("~/.ffsfs")),
+    ".storage", "ffsgossip-seeds.json")  # locus memoriae
 CROSS_REALM_GOSSIP = True        # per defaltum verum
 
 # ---------- Typing ----------

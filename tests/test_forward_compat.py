@@ -46,6 +46,25 @@ def test_setup_defaults_backfills_new_keys_for_old_config(tmp_path, monkeypatch)
 
 
 @pytest.mark.unit
+def test_node_state_paths_live_outside_cwd():
+    """Guard against state leaking into the working tree (e.g. the git checkout)
+    when FFSFS is run straight from the repo."""
+    import ffspeers
+    cwd = os.getcwd()
+    paths = [
+        ffspeers.CONFIG_FILE,
+        ffspeers.SUBSCRIPTIONS_FILE,
+        ffspeers._storage_path("instance.id"),
+        ffspeers._storage_path("storage.id"),
+        ffspeers._storage_path("ffsgossip-seeds.json"),
+    ]
+    for p in paths:
+        assert os.path.isabs(p), f"state path not absolute: {p}"
+        assert not p.startswith(cwd + os.sep), f"state path under cwd: {p}"
+        assert ".storage" in p
+
+
+@pytest.mark.unit
 def test_migrate_config_is_idempotent():
     data = {"realm": "x", "config_version": ffsctl.CONFIG_VERSION}
     once = ffsctl._migrate_config(dict(data))

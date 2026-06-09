@@ -400,14 +400,20 @@ git pull
 ./launch.sh myrealm      # restart; no reconfiguration needed
 ```
 
-This works because **configuration and data live outside the git checkout**:
+This works because **all state lives outside the git checkout**, so you can run
+FFSFS straight from the working repo without polluting it:
 
 - **Config:** `~/.ffsfs/.storage/<realm>/realm-config.json` (per realm).
+- **Node state:** peer list, instance/storage IDs, gossip seeds, and
+  subscriptions live under `~/.ffsfs/.storage/` too (override the base with
+  `FFSFS_STATE_DIR`). These are never written into the current directory.
 - **Data:** under each backend path you configured (the primary base and any
   added backends), in the plain, versioned on-disk layout.
 
-`git pull` only updates code; it never touches your config or data. Restart
-re-reads them as-is.
+`git pull` only updates code; it never touches your config, node state, or data,
+and nothing runtime is written into the repo. Restart re-reads everything as-is.
+(Belt and suspenders: any incidental runtime artifact is also covered by
+`.gitignore`.)
 
 Format stability contract:
 
