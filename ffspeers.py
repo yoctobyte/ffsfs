@@ -1197,6 +1197,28 @@ def get_newer_or_missing(vpath: str, local_timestamp: int, fetch: bool = False,
 
     return False
 
+def fetch_file_range(peer: str, vpath: str, start: int, end: int) -> Optional[bytes]:
+    """Fetch bytes [start, end] inclusive of a versioned file from a peer via
+    HTTP Range. Returns the bytes or None on failure. (Foundation for
+    header-prefix / partial content fetch.)"""
+    url = _peer_url(peer, "/get-file")
+    params = {"realm": _REALM, "vpath": vpath}
+    try:
+        r = _authed_get(url, "/get-file", params,
+                        headers={"Range": f"bytes={start}-{end}"},
+                        timeout=30, stream=True)
+        if r.status_code not in (200, 206):
+            return None
+        buf = bytearray()
+        for chunk in r.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                buf.extend(chunk)
+        return bytes(buf)
+    except Exception as e:
+        print(f"[peer] range fetch failed for {vpath} [{start}-{end}] from {peer}: {e}")
+        return None
+
+
 def sync_node_status_files() -> int:
     """Pull peers' .ffsfs-nodes/*.json regardless of this node's sync policy, so
     even lazy/access-only nodes can render the federated view. Returns how many
@@ -1374,6 +1396,44 @@ def get_file():
 
     if not os.path.exists(real_path):
         return jsonify({"error": "not found"}), 404
+
+    # --- HTTP Range support (for header-prefix / partial fetches) ---
+    range_header = request.headers.get("Range", "")
+    if range_header.startswith("bytes="):
+        try:
+            spec = range_header.split("=", 1)[1].split(",")[0].strip()
+            start_s, end_s = spec.split("-", 1)
+            fsize = os.path.getsize(real_path)
+            start = int(start_s) if start_s else 0
+            end = int(end_s) if end_s else fsize - 1
+            end = min(end, fsize - 1)
+            if start < 0 or start > end:
+                return Response(status=416,
+                                headers={"Content-Range": f"bytes */{fsize}"})
+            length = end - start + 1
+
+            def gen_range():
+                with open(real_path, "rb") as f:
+                    f.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = f.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        _rate_limits.disk_fg.consume(len(chunk))
+                        _rate_limits.net_fg.consume(len(chunk))
+                        remaining -= len(chunk)
+                        yield chunk
+
+            resp = Response(stream_with_context(gen_range()), status=206,
+                            mimetype="application/octet-stream")
+            resp.headers["Content-Type"] = "application/octet-stream"
+            resp.headers["Content-Length"] = str(length)
+            resp.headers["Content-Range"] = f"bytes {start}-{end}/{fsize}"
+            resp.headers["Accept-Ranges"] = "bytes"
+            return resp
+        except (ValueError, OSError):
+            pass  # malformed Range -> fall through to whole-file response
 
     try:
         filesize = os.path.getsize(real_path)

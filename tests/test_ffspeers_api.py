@@ -177,6 +177,75 @@ def test_list_dir_and_head(peer_client):
 
 
 @pytest.mark.unit
+def test_get_file_range_returns_206_partial(peer_client):
+    client, data_path = peer_client
+    name = build_versioned_filename("file.txt", "A1B2C3D4", "write", 123)
+    (data_path / name).write_bytes(b"0123456789")
+
+    resp = client.get("/get-file", query_string={"realm": "test", "vpath": name},
+                      headers={"Range": "bytes=0-3"})
+    assert resp.status_code == 206
+    assert resp.data == b"0123"
+    assert resp.headers["Content-Range"] == "bytes 0-3/10"
+    assert resp.headers["Content-Length"] == "4"
+
+    # mid-range
+    resp = client.get("/get-file", query_string={"realm": "test", "vpath": name},
+                      headers={"Range": "bytes=4-6"})
+    assert resp.status_code == 206 and resp.data == b"456"
+
+    # open-ended suffix (to EOF), clamped
+    resp = client.get("/get-file", query_string={"realm": "test", "vpath": name},
+                      headers={"Range": "bytes=7-999"})
+    assert resp.status_code == 206 and resp.data == b"789"
+    assert resp.headers["Content-Range"] == "bytes 7-9/10"
+
+
+@pytest.mark.unit
+def test_get_file_range_unsatisfiable_416(peer_client):
+    client, data_path = peer_client
+    name = build_versioned_filename("file.txt", "A1B2C3D4", "write", 123)
+    (data_path / name).write_bytes(b"012")
+    resp = client.get("/get-file", query_string={"realm": "test", "vpath": name},
+                      headers={"Range": "bytes=9-12"})
+    assert resp.status_code == 416
+
+
+@pytest.mark.unit
+def test_get_file_no_range_still_whole(peer_client):
+    client, data_path = peer_client
+    name = build_versioned_filename("file.txt", "A1B2C3D4", "write", 123)
+    (data_path / name).write_bytes(b"0123456789")
+    resp = client.get("/get-file", query_string={"realm": "test", "vpath": name})
+    assert resp.status_code == 200 and resp.data == b"0123456789"
+
+
+@pytest.mark.unit
+def test_fetch_file_range_helper(peer_client, monkeypatch):
+    client, data_path = peer_client
+    name = build_versioned_filename("file.txt", "A1B2C3D4", "write", 123)
+    (data_path / name).write_bytes(b"HELLO-WORLD")
+    ffspeers._REALM = "test"
+
+    # route the helper's HTTP call through the in-process test client
+    class Resp:
+        def __init__(self, r):
+            self.status_code = r.status_code
+            self._data = r.data
+        def iter_content(self, chunk_size=65536):
+            yield self._data
+
+    def fake_authed_get(url, path, params=None, headers=None, **kwargs):
+        return Resp(client.get("/get-file", query_string=params, headers=headers or {}))
+
+    monkeypatch.setattr(ffspeers, "_authed_get", fake_authed_get)
+    out = ffspeers.fetch_file_range("peer", name, 0, 4)
+    assert out == b"HELLO"
+    out = ffspeers.fetch_file_range("peer", name, 6, 10)
+    assert out == b"WORLD"
+
+
+@pytest.mark.unit
 def test_get_file_rejects_realm_mismatch(peer_client):
     client, _ = peer_client
     resp = client.get("/get-file", query_string={"realm": "other", "vpath": "file.txt.A1B2C3D4.write.0.1"})
