@@ -400,28 +400,55 @@ or:
 fusermount3 -u -z <mountpoint>
 ```
 
-## Verification
+## Running the Tests
 
-Run the local baseline before trusting a checkout or after changing code. These
-tests do not mount FUSE on the workstation:
+Useful to validate a checkout on another box before deploying.
+
+### Unit tests (fast, safe, no FUSE)
+
+Only needs `python3-pytest` on top of the runtime deps. They never mount FUSE
+and are safe to run anywhere:
 
 ```bash
+sudo apt install -y python3-pytest
 python3 -m py_compile *.py
 pytest
 ```
 
-Run VM verification before trusting FUSE behavior, peer networking, or release
-candidate changes. VM tests use disposable QEMU guests:
+### VM tests (FUSE + peer networking, disposable QEMU guests)
+
+FUSE and peer behavior are verified inside throwaway VMs, never on the
+workstation. Install the virtualization tooling:
 
 ```bash
-tools/vm/run-single-vm-smoke.sh
-tools/vm/run-single-vm-pool-smoke.sh
-tools/vm/run-two-peer-scenario.sh smoke
-tools/vm/run-two-peer-scenario.sh all
+sudo apt install -y qemu-system-x86 qemu-utils cloud-image-utils \
+                    openssh-client rsync curl
+```
+
+KVM acceleration is optional but much faster than the TCG fallback. If
+`/dev/kvm` exists and your user can access it (usually: be in the `kvm` group,
+with virtualization enabled in the BIOS), the runner uses it automatically:
+
+```bash
+ls -l /dev/kvm                 # present => KVM available
+sudo adduser "$USER" kvm       # then log out/in if you were not already a member
+```
+
+Build the base image once (downloads an Ubuntu cloud image, ~minutes), then run
+the suites:
+
+```bash
+tools/vm/build-base-image.sh           # one-time; creates .vm/images/...
+
+tools/vm/run-single-vm-smoke.sh        # FUSE mount/read/write/delete
+tools/vm/run-single-vm-pool-smoke.sh   # multi-backend pool
+tools/vm/run-two-peer-scenario.sh smoke   # core peer scenarios
+tools/vm/run-two-peer-scenario.sh all     # every two-peer scenario
 ```
 
 The two-peer runner boots one disposable VM and starts two peer processes on
-different guest ports. Multi-VM tests are reserved for future stress testing.
+different guest ports. The base image and per-run overlays live under `.vm/`
+(gitignored). Multi-VM tests are reserved for future stress testing.
 
 Normal local development should not mount test FUSE filesystems directly on the
 workstation.
