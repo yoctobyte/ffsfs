@@ -62,19 +62,21 @@ Recommended setup and launch flow:
 Interpreter resolution: `setup.sh`/`launch.sh` use `FFSFS_PYTHON` if set, else a
 project `./.venv`, else an active `$VIRTUAL_ENV`, else system `python3`.
 
-`./setup.sh` offers to create the venv and install deps for you (default yes).
-To do it manually instead:
+A venv is optional — system packages work without one. `./setup.sh` offers to
+create the venv and install deps for you (default yes). To do it manually:
 
 ```bash
-sudo apt install libfuse2t64 fuse3   # system FUSE library (always required)
+# python3-venv is required to build a venv; libfuse is always a system package
+sudo apt install python3-venv libfuse2t64 fuse3
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt      # flask, requests, fusepy
 ```
 
-`fusepy` is pure Python and works in a venv; only the FUSE C library must be a
-system package. Set `FFSFS_NO_VENV=1` to skip the setup prompt and use system
-Python.
+`fusepy` is pure Python and works in a venv; only the FUSE C library
+(`libfuse2t64`/`libfuse2`) must be a system package. If `python3-venv` is
+missing, `python3 -m venv` fails and setup falls back to system Python. Set
+`FFSFS_NO_VENV=1` to skip the venv prompt entirely.
 
 **Using a Configuration File:**
 ```bash

@@ -58,6 +58,8 @@ setup_python_env() {
     echo "Creating virtualenv at $SCRIPT_DIR/.venv ..."
     if ! python3 -m venv "$SCRIPT_DIR/.venv"; then
         echo "warning: venv creation failed; falling back to system python3." >&2
+        echo "  (the venv option needs the 'python3-venv' apt package:" >&2
+        echo "     sudo apt install python3-venv)" >&2
         rm -rf "$SCRIPT_DIR/.venv"
         return 0
     fi

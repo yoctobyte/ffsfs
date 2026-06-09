@@ -116,12 +116,20 @@ PY
 
 ### Optional: virtualenv
 
-You usually don't set this up yourself: `./setup.sh` offers to create a `.venv`
-and install the Python deps for you (default yes), and `launch.sh`/`setup.sh`
-then use it automatically. The system FUSE library
-(`libfuse2t64`/`libfuse2`) is still an `apt` package either way. See
-[agents/operator_guide.md](agents/operator_guide.md) for manual venv setup and
-the `FFSFS_PYTHON` override.
+A virtualenv is **optional** — the Quick Install above uses system packages and
+works as-is (no venv needed). If you want one, `./setup.sh` offers to create a
+`.venv` and install the Python deps for you (default yes), and
+`launch.sh`/`setup.sh` then use it automatically.
+
+The venv option needs the `python3-venv` apt package, and the FUSE C library
+(`libfuse2t64`/`libfuse2`) is always a system package — it cannot live in a venv:
+
+```bash
+sudo apt install python3-venv libfuse2t64
+```
+
+See [agents/operator_guide.md](agents/operator_guide.md) for manual venv setup
+and the `FFSFS_PYTHON` override.
 
 ## Quick Start
 
