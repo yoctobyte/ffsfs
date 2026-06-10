@@ -189,6 +189,30 @@ stopping for features/fixes/logs.
   auto-rediscovery (must not silently re-add an ignored peer; needs an in-memory
   denylist checked in `_upsert_peer`/`_on_seeds`).
 
+- [P2] **Auto-redundancy (replication factor, beyond blind mirror).** Today the
+  only model is full mirror (RF = N nodes); does not scale as data grows. Add a
+  per-file *target RF* maintained across distinct nodes, defaulted from a cheap
+  importance heuristic (size is an inverse proxy for importance; type/extension
+  refines it — photos/source small+important, ISOs/models huge+regenerable),
+  overridable per-prefix/per-realm. Node roles so small nodes opt out of the
+  bookkeeping yet still donate storage / accept backup hints
+  (coordinator / donor / cache-only). Approximate world map (holdings summary +
+  bloom in node-status, OR-set keyed by content hash — no master). Availability-
+  vs-durability weighting + on-demand/cold tier. **Founding invariant: adding
+  copies = automatic/safe; reducing copies = manual/conservative** (guard the
+  simultaneous-delete race — confirm-before-rely, margin/hysteresis, serialized
+  drops, never last copy). Observability (dashboard replica-count / world-map /
+  at-risk stats) is a prerequisite before any automatic reduction. Phase it:
+  static class setting first, placement later, guarded reduction last. Full
+  design in `agents/redundancy_design.md`. Discuss before coding.
+
+- [P3] **Fixed-port portal — DONE.** `ffsportal.py`: stdlib, loopback-only
+  landing page on a fixed easy-to-remember port (0xF5F5 = 62965) that lists
+  configured realms and links to each live dashboard, so the realm-derived (and
+  busy-fallback) dashboard port no longer has to be guessed — useful especially
+  when FFSFS runs as a systemd service. Nodes now write `runtime.json`
+  (actual bound port + pid) under their realm state dir for the portal to read.
+
 ## Open design questions (discuss before coding)
 
 - **Federated metadata (.ffsfs-nodes/*) — persistence & model unclear.** The
