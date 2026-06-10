@@ -403,6 +403,72 @@ tools" invariant**. Recommendation: keep plain replication for the readable /
 important tier; reserve EC — if ever — only for the huge cold tier where the
 plain-file invariant matters least. Note it; do not build it.
 
+## 11. Phase 2 — availability-weighted placement (detailed design)
+
+Phase 2 stays **add-only** (reduction remains Phase 3). It refines *what counts
+as enough copies* (§5) and *where new copies should land*, on top of the
+shipped Phase 1 machinery. Everything reuses existing config: the
+`node_availability` tier (`always_online` / `intermittent` / `on_demand`,
+ffsvolumes) and the node-status world map.
+
+### 11.1 Tier advertisement
+
+`set_node_profile` gains the availability tier; node-status advertises it next
+to `node_role` / `storage_profile`. Nodes also advertise a **`host_id`** (hashed
+machine-id, hostname fallback) — the Phase 2 failure domain. Old statuses
+without these fields degrade to defaults (`intermittent`, unknown host =
+assumed-distinct domain) so mixed fleets keep working.
+
+### 11.2 Counting — expected-available vs durable copies (decides Q8/Q9)
+
+Raw copy count lies (§5). Per §5's policy shape, a placement is healthy when
+BOTH hold:
+
+- **availability floor**: ≥1 confirmed copy on an *online, always_online* node.
+- **durability target**: ≥N copies counting (a) every holder confirmed online
+  this sweep, plus (b) **at most one** offline `on_demand` holder whose copy
+  was confirmed recently (within `redundancy.offline_grace`, default 7 days).
+
+Rationale for (b): refusing to count a sleeping NAS at all would re-replicate
+on every nap (churn); counting more than one offline copy, or counting them
+forever, trusts an unverifiable state — the asymmetry law says when uncertain,
+lean to extra copies. One graced cold slot matches "≥RF total, one of which may
+live on an on-demand/cold node". `intermittent` nodes count only while online.
+Confirm history lives in the placement worker (in-memory; a restart forgets it
+and over-replicates briefly — the safe direction).
+
+Owner election stays Phase 1 (lowest *online* confirmed holder) — offline
+holders cannot drive repairs.
+
+### 11.3 Donor selection v2 — tier + failure domain
+
+When under the **availability floor**, the needed copy must land on an
+`always_online` donor; pure durability shortfall accepts any durable donor.
+Diversity upgrades from "distinct node" to "distinct `host_id`": donors in a
+failure domain already holding a copy are deprioritized — but if no
+domain-distinct donor exists, the copy is still placed (add-only: a same-host
+extra copy beats staying under target) and the sweep flags `domain_conflict`.
+Tie-breaks unchanged (most free space).
+
+### 11.4 At-risk surfacing (§7)
+
+Sweep stats gain an `at_risk` list (capped): paths failing the availability
+floor, paths under durability even after counting the graced cold slot, and
+paths whose only copies sit on currently-offline nodes. Dashboard shows it,
+plus per-node tier in the world map.
+
+### 11.5 Explicitly NOT in Phase 2
+
+- Observed-uptime scoring (rolling `_last_seen` windows) — the *configured*
+  tier + live confirm is enough until real fleets prove otherwise; revisit
+  with data.
+- Per-physical-disk domains inside one node (local pool mirroring already
+  handles intra-node redundancy; cross-node placement treats the node's host
+  as the domain).
+- Waking on-demand nodes to repair (cold-archive workflow, see
+  `cold_archive_design.md`).
+- Any reduction.
+
 ## Invariants / tensions to keep in view
 
 - Plain-file readability → favor replication over EC for the important tier.
