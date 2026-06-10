@@ -148,3 +148,34 @@ def test_config_add_peer_applies_live(dash, monkeypatch):
     assert resp.status_code == 200
     assert "Added peer" in resp.get_data(as_text=True)
     assert "127.0.0.1:19000" in ffspeers._known_peers
+
+
+@pytest.mark.unit
+def test_dashboard_shows_placement_sweep_and_world_map(dash, monkeypatch):
+    class FakeWorker:
+        def status(self):
+            return {
+                "running": True,
+                "interval_secs": 300,
+                "last_sweep": {"at": int(time.time()), "checked": 5, "under": 1,
+                               "over": 0, "hints_sent": 1, "hints_failed": 0,
+                               "peers_asked": 1, "peers_answered": 1},
+                "recent": [{"at": int(time.time()), "vpath": "docs/a.txt",
+                            "hash": "C" * 16, "donor": "zz-peer-instance",
+                            "ok": True, "result": "pulled"}],
+            }
+    monkeypatch.setattr(ffspeers, "_placement_worker", FakeWorker())
+    monkeypatch.setattr(ffspeers, "_collect_federated_nodes", lambda: [
+        {"node": "peerX", "storage_profile": "bulk_storage",
+         "node_role": "replica_storage",
+         "holdings": {"node_id": "zz-peer-instance", "count": 123}},
+    ])
+    resp = dash.get("/dashboard")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "add-only placement" in body
+    assert "Recent placement" in body
+    assert "docs/a.txt" in body
+    assert "World map" in body
+    assert "123" in body
+    assert "bulk_storage" in body

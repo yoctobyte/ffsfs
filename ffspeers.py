@@ -1881,6 +1881,68 @@ def _realm_redundancy():
     return _guarded_value(_load, timeout=1.0)
 
 
+def _placement_panel_html(e) -> str:
+    """Phase 1 placement view for the dashboard Redundancy panel: last sweep
+    stats, the approximate world map (per-node advertised holdings), and the
+    recent placement log. Empty string when there is nothing to show."""
+    parts = []
+    w = _placement_worker
+    if w is not None:
+        try:
+            st = w.status()
+        except Exception:
+            st = {}
+        last = st.get("last_sweep") or {}
+        if last:
+            if "skipped" in last:
+                sweep = f"last sweep: {e(str(last['skipped']))}"
+            else:
+                sweep = (f"last sweep: checked {last.get('checked', 0)}"
+                         f" · under {last.get('under', 0)}"
+                         f" · over {last.get('over', 0)}"
+                         f" · hints {last.get('hints_sent', 0)}"
+                         f" (+{last.get('hints_failed', 0)} failed)"
+                         f" · peers {last.get('peers_answered', 0)}"
+                         f"/{last.get('peers_asked', 0)}")
+            parts.append(f"<div class=\"meta\">{sweep}</div>")
+        recent = st.get("recent") or []
+        if recent:
+            rows = "\n".join(
+                f"<tr><td>{e(_fmt_ago(time.time() - r.get('at', 0)))}</td>"
+                f"<td><code>{e(str(r.get('vpath')))}</code></td>"
+                f"<td><code>{e(str(r.get('donor'))[:12])}</code></td>"
+                f"<td>{e(str(r.get('result')))}</td></tr>"
+                for r in list(recent)[-10:][::-1])
+            parts.append(
+                "<h3>Recent placement</h3>"
+                "<table><thead><tr><th>When</th><th>Path</th><th>Donor</th>"
+                f"<th>Result</th></tr></thead><tbody>{rows}</tbody></table>")
+    # approximate world map from synced node statuses (count is self-reported;
+    # bloom is only a hint — see design §9.3)
+    try:
+        statuses = _collect_federated_nodes() or []
+    except Exception:
+        statuses = []
+    world_rows = []
+    for s in sorted(statuses, key=lambda x: str(x.get("node", ""))):
+        h = s.get("holdings") or {}
+        if not h:
+            continue
+        world_rows.append(
+            f"<tr><td>{e(str(s.get('node')))}</td>"
+            f"<td><code>{e(str(h.get('node_id'))[:12])}</code></td>"
+            f"<td>{e(str(h.get('count', '?')))}</td>"
+            f"<td>{e(str(s.get('storage_profile') or '?'))}</td>"
+            f"<td>{e(str(s.get('node_role') or '?'))}</td></tr>")
+    if world_rows:
+        parts.append(
+            "<h3>World map (self-reported holdings)</h3>"
+            "<table><thead><tr><th>Node</th><th>Instance</th><th>Current files"
+            "</th><th>Storage profile</th><th>Role</th></tr></thead>"
+            f"<tbody>{''.join(world_rows)}</tbody></table>")
+    return "\n".join(parts)
+
+
 def _fmt_ago(seconds) -> str:
     if seconds is None:
         return "never"
@@ -2002,11 +2064,17 @@ def dashboard():
             f"<tr><td><code>{e(p or '(root)')}</code></td><td>{e(c)}</td></tr>"
             for p, c in ov.items()
         ) or "<tr><td colspan='2'><em>none</em></td></tr>"
+        w = _placement_worker
+        enforcing = bool(w and w.status().get("running"))
+        mode_note = ("add-only placement <span class=\"ok\">active</span> (Phase 1)"
+                     if enforcing else
+                     "advisory — placement not running on this node")
         red_html = f"""
 <p>default class: <span class="pill">{e(str(red.get('default')))}</span>
-   · advisory (Phase 0 — not yet enforced)</p>
+   · {mode_note}</p>
 <table><thead><tr><th>Prefix override</th><th>Class</th></tr></thead>
-<tbody>{ov_rows}</tbody></table>"""
+<tbody>{ov_rows}</tbody></table>
+{_placement_panel_html(e)}"""
 
     auth_on = _request_verifier is not None
     collab = _realm_collaboration()
