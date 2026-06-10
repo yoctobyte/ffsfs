@@ -236,6 +236,70 @@ def test_prune_keeps_once_alive_peer_through_outage():
 
 
 @pytest.mark.unit
+def test_peer_backoff_delay_is_exponential_and_capped():
+    d = ffspeers._peer_backoff_delay
+    assert d(0) == 0.0
+    assert d(1) == ffspeers.PEER_BACKOFF_BASE
+    assert d(2) == ffspeers.PEER_BACKOFF_BASE * 2
+    assert d(3) == ffspeers.PEER_BACKOFF_BASE * 4
+    # grows without bound in formula, but caps at PEER_BACKOFF_MAX
+    assert d(99) == ffspeers.PEER_BACKOFF_MAX
+
+
+@pytest.mark.unit
+def test_ping_all_skips_peer_inside_backoff_window(monkeypatch):
+    """A peer with a future _peer_next_ping is not contacted this cycle."""
+    old_kp = list(ffspeers._known_peers)
+    old_next = dict(ffspeers._peer_next_ping)
+    calls = []
+    ffspeers._known_peers[:] = ["10.0.0.7:11181"]
+    ffspeers._peer_next_ping.clear()
+    ffspeers._peer_next_ping["10.0.0.7:11181"] = time.time() + 9999  # backed off
+
+    monkeypatch.setattr(ffspeers, "_authed_get",
+                        lambda *a, **k: calls.append(a) or SimpleNamespace(ok=True))
+    try:
+        ffspeers.ping_all()
+        assert calls == []                      # skipped, no network call
+    finally:
+        ffspeers._known_peers[:] = old_kp
+        ffspeers._peer_next_ping.clear(); ffspeers._peer_next_ping.update(old_next)
+
+
+@pytest.mark.unit
+def test_ping_failure_sets_backoff_and_success_clears_it(monkeypatch):
+    old_kp = list(ffspeers._known_peers)
+    old_next, old_fail = dict(ffspeers._peer_next_ping), dict(ffspeers._peer_fail)
+    peer = "10.0.0.6:11181"
+    ffspeers._known_peers[:] = [peer]
+    ffspeers._peer_next_ping.clear(); ffspeers._peer_fail.clear()
+
+    def boom(*a, **k):
+        raise OSError("Connection refused")
+
+    monkeypatch.setattr(ffspeers, "_authed_get", boom)
+    try:
+        ffspeers.ping_all()
+        assert ffspeers._peer_fail[peer] == 1
+        assert ffspeers._peer_next_ping[peer] > time.time()  # backoff scheduled
+
+        # peer comes back: reset (as inbound /hello would) then a good ping
+        ffspeers._reset_peer_backoff(peer)
+        assert peer not in ffspeers._peer_next_ping
+        assert ffspeers._peer_fail[peer] == 0
+        monkeypatch.setattr(ffspeers, "_authed_get",
+                            lambda *a, **k: SimpleNamespace(ok=True))
+        ffspeers.ping_all()
+        assert ffspeers._peer_fail[peer] == 0
+        assert peer not in ffspeers._peer_next_ping
+        assert ffspeers._last_seen[peer] > 0
+    finally:
+        ffspeers._known_peers[:] = old_kp
+        ffspeers._peer_next_ping.clear(); ffspeers._peer_next_ping.update(old_next)
+        ffspeers._peer_fail.clear(); ffspeers._peer_fail.update(old_fail)
+
+
+@pytest.mark.unit
 def test_list_dir_and_head(peer_client):
     client, data_path = peer_client
     subdir = data_path / "a"

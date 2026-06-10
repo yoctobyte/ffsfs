@@ -528,6 +528,13 @@ LIVENESS_INTERVAL = 30                # seconds
 # failures (≈ threshold × LIVENESS_INTERVAL seconds). Only never-seen entries
 # are pruned; a peer that was once alive is kept through transient outages.
 PEER_PRUNE_FAIL_THRESHOLD = 6
+# Offline peers are re-polled with exponential backoff instead of every
+# LIVENESS_INTERVAL. A host that comes back online re-announces itself via
+# inbound /hello (and autodiscovery), which resets the backoff — so there is
+# little value in hammering an unreachable peer between checks.
+# Delay = PEER_BACKOFF_BASE * 2^(fails-1), capped at PEER_BACKOFF_MAX.
+PEER_BACKOFF_BASE = LIVENESS_INTERVAL  # first retry one normal interval out
+PEER_BACKOFF_MAX = 1800                # cap offline re-poll at 30 min
 CONFIG_FILE = _storage_path("peers.conf")
 VERBOSE = True
 TRUST_UNKNOWN_PEER = False
@@ -595,6 +602,7 @@ def _check_auth():
 _known_peers: List[str] = []
 _last_seen: Dict[str, float] = {}           # "ip[:port]" -> last ping ts
 _peer_fail: Dict[str, int] = {}             # "ip[:port]" -> consecutive ping failures
+_peer_next_ping: Dict[str, float] = {}      # "ip[:port]" -> earliest ts to ping again (backoff)
 _start_ts = time.time()
 _local_backend: Any = None                  # must expose .data_path
 _rate_limits = RateLimits.unlimited()
@@ -1019,10 +1027,35 @@ def _index_add_local_version(versioned_name: str, size: int, mtime: int) -> None
     versions[:] = [x for x in versions if isinstance(x, dict) and x.get("name") != versioned_name]
     versions.append(entry.copy())
 
+def _peer_backoff_delay(fails: int) -> float:
+    """Exponential re-poll delay for an unreachable peer (seconds)."""
+    if fails <= 0:
+        return 0.0
+    return min(PEER_BACKOFF_BASE * (2 ** (fails - 1)), PEER_BACKOFF_MAX)
+
+
+def _reset_peer_backoff(peer: str) -> None:
+    """Clear failure/backoff state so the peer is polled at normal cadence
+    again. Called when the peer re-announces itself (inbound /hello)."""
+    _peer_fail[peer] = 0
+    _peer_next_ping.pop(peer, None)
+
+
+def _record_ping_failure(peer: str) -> None:
+    fails = _peer_fail.get(peer, 0) + 1
+    _peer_fail[peer] = fails
+    _peer_next_ping[peer] = time.time() + _peer_backoff_delay(fails)
+
+
 def ping_all():
     with _peers_lock:
         peers = list(_known_peers)
+    now = time.time()
     for peer in peers:
+        # Skip peers still inside their backoff window — they were offline last
+        # check and will re-announce via inbound /hello when they return.
+        if _peer_next_ping.get(peer, 0) > now:
+            continue
         host, port = _split_host_port(peer)
         if port is None:
             port = default_port_for_realm(_REALM) if _REALM else PEER_PORT
@@ -1033,11 +1066,12 @@ def ping_all():
             if r.ok:
                 _last_seen[peer] = time.time()
                 _peer_fail[peer] = 0
+                _peer_next_ping.pop(peer, None)
                 _log(f"[peer] {peer} is alive")
             else:
-                _peer_fail[peer] = _peer_fail.get(peer, 0) + 1
+                _record_ping_failure(peer)
         except Exception as e:
-            _peer_fail[peer] = _peer_fail.get(peer, 0) + 1
+            _record_ping_failure(peer)
             _log(f"[peer] ERROR pinging {peer}: {e}")
 
 
@@ -1427,6 +1461,8 @@ def hello():
         peer_id = remote_ip
 
     _last_seen[peer_id] = now
+    # Peer re-announced itself: drop any backoff so we resume normal polling.
+    _reset_peer_backoff(peer_id)
 
     if _peer_is_trusted_to_add():
         with _peers_lock:
@@ -2450,11 +2486,12 @@ def _prune_dead_unseen_peers() -> bool:
                 _known_peers.remove(peer)
                 _last_seen.pop(peer, None)
                 _peer_fail.pop(peer, None)
+                _peer_next_ping.pop(peer, None)
                 _peer_cache.pop(peer, None)
                 _log(f"[peer] Pruned dead peer (never responded): {peer}")
                 changed = True
         # Drop orphan counters for peers no longer in the list
-        for d in (_peer_fail, _last_seen):
+        for d in (_peer_fail, _last_seen, _peer_next_ping):
             for k in [k for k in d if k not in _known_peers]:
                 d.pop(k, None)
     return changed
