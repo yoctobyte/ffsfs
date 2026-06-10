@@ -469,6 +469,78 @@ plus per-node tier in the world map.
   `cold_archive_design.md`).
 - Any reduction.
 
+## 12. Phase 3 — guarded reduction (detailed design)
+
+Reduction = a *delete*. Everything here is governed by §6 and the founding
+asymmetry: when uncertain, keep. Phase 3 ships an **operator-gated, local,
+dry-run-first tool** — never a background loop. (The prune tool this was meant
+to reuse never shipped; this is the first §6-grade machinery, and a future
+prune tool should reuse *it*.)
+
+### 12.1 What a "drop" is
+
+Removing **this node's local copy of the current version** of an rf:N-classed
+path. The logical file stays intact on ≥ target other confirmed holders;
+fetch-on-demand still serves local reads. History is never touched: a path is
+only drop-eligible when the current version is its **only local version**
+(older local versions would otherwise become the local "newest" and confuse
+holdings/placement — skip with reason, let eviction clear history first).
+`mirror` paths are never reduced; `cache` copies belong to eviction, not this
+tool.
+
+### 12.2 Eligibility (§6 guards, per hash)
+
+Let C = holders confirmed **online this run** (fresh `/has-hashes`, never the
+world map, never graced cold holders — cold counts only against *adding*,
+never toward *dropping*):
+
+1. class resolves to `rf:N`, N ≥ 1;
+2. **margin/hysteresis**: C ≥ N + margin (`redundancy.reduction_margin`,
+   default 2, floor 1). Placement adds below N, reduction drops only at
+   N+margin → dead band, no flap;
+3. **serialized dropper**: only the holder with the **highest** node_id among
+   C may drop this round (placement owner is the *lowest* — disjoint roles).
+   One copy leaves per round per hash; margin absorbs one overlapping race;
+4. **availability floor**: if this node is the only online `always_online`
+   holder, ineligible (dropping must never break the §11 floor — but if the
+   floor is already unmet fleet-wide, an intermittent copy may still drop);
+5. **never-last-copy**: implied by 1+2 (C−1 ≥ N ≥ 1) but asserted anyway.
+
+### 12.3 Apply procedure (serialized, re-confirmed)
+
+Dry-run (`plan`) lists candidates + skip reasons and touches nothing. Apply,
+per candidate, capped per run: **re-confirm that single hash fresh** against
+all known peers immediately before acting (a stale plan is discarded, not
+trusted), re-evaluate 12.2, then remove the local file(s) from online data
+roots, fix the local index in-process (so `/has-hashes`/holdings stop
+advertising it instantly — this is why the tool runs *inside* the node, not as
+an external process racing a stale index), and **unpin** the hash (decides the
+Q11 unpin semantics: unpin is part of operator-gated drop, nothing else
+unpins). Logged in the placement recent-log as `reduced`.
+
+### 12.4 Surface
+
+`/redundancy/reduce` on the peer server — **loopback-gated regardless of HMAC**
+(a peer must never trigger local drops): GET = plan, POST = apply
+(`margin`/`limit` params). CLI: `ffsctl redundancy-reduce <realm> [--apply]
+[--margin M] [--limit K]`, signing like the other ffsctl calls. Requires the
+node to be running.
+
+### 12.5 Prerequisite — active-pull respects classes (§9.11, now binding)
+
+A drop must stick: the SyncWorker active-pull loop now skips paths whose
+resolved class is not `mirror` (placement owns rf:N copy counts; cache is
+fetch-on-demand). Tombstone propagation is unaffected. Without this, the next
+pull pass would resurrect every dropped copy.
+
+### 12.6 Explicitly NOT in Phase 3
+
+- Any automatic/background reduction (would additionally need §6.4
+  tombstone-the-intent + quiet period; the manual single-dropper +
+  fresh-re-confirm covers the race only because runs are operator-gated).
+- Realm-wide deletes, history pruning, tombstone GC.
+- Reducing `mirror` (change the class first, then reduce).
+
 ## Invariants / tensions to keep in view
 
 - Plain-file readability → favor replication over EC for the important tier.
