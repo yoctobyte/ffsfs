@@ -741,3 +741,47 @@ def test_sync_status_route(peer_client):
         assert data["active_pull_running"] is True
     finally:
         ffspeers._sync_worker = old_worker
+
+
+# ---- /has-hashes (redundancy Phase 1 bulk copy-confirm) ----------------------
+
+@pytest.mark.unit
+def test_has_hashes_confirms_only_current_versions(peer_client):
+    client, _ = peer_client
+    held = _ch(b"held")
+    superseded = _ch(b"old")
+    current = _ch(b"new")
+    ffspeers._local_file_index = {
+        "a.txt": [{"name": build_versioned_filename("a.txt", held, "write", 100)}],
+        "b.txt": [{"name": build_versioned_filename("b.txt", superseded, "write", 100)},
+                  {"name": build_versioned_filename("b.txt", current, "write", 200)}],
+        "gone.txt": [{"name": build_versioned_filename("gone.txt", _ch(b"g"), "delete", 100)}],
+    }
+    resp = client.post("/has-hashes", json={
+        "realm": "test",
+        "hashes": [held, superseded, current, _ch(b"absent"), _ch(b"g")],
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert set(body["held"]) == {held, current}
+    assert body["node_id"]
+
+
+@pytest.mark.unit
+def test_has_hashes_realm_mismatch(peer_client):
+    client, _ = peer_client
+    resp = client.post("/has-hashes", json={"realm": "wrong", "hashes": []})
+    assert resp.status_code == 403
+
+
+@pytest.mark.unit
+def test_has_hashes_rejects_bad_body_and_oversize(peer_client):
+    client, _ = peer_client
+    assert client.post("/has-hashes", json={"realm": "test"}).status_code == 400
+    assert client.post("/has-hashes",
+                       json={"realm": "test", "hashes": "x"}).status_code == 400
+    assert client.post("/has-hashes",
+                       json={"realm": "test", "hashes": [1, 2]}).status_code == 400
+    too_many = [f"{i:064x}" for i in range(ffspeers.HAS_HASHES_MAX + 1)]
+    assert client.post("/has-hashes",
+                       json={"realm": "test", "hashes": too_many}).status_code == 400

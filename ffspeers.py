@@ -2194,6 +2194,53 @@ def node_status():
     return jsonify({"nodes": _collect_federated_nodes()})
 
 
+HAS_HASHES_MAX = 1000  # per-request cap on bulk hash confirms
+
+
+@app.route("/has-hashes", methods=["POST"])
+def has_hashes():
+    """Bulk copy-confirm (redundancy design §9.3): which of these content
+    hashes does this node hold as a current version? This is the authoritative
+    check behind the advertised bloom — a copy counts toward a redundancy
+    target only after it is confirmed here (or via /head), never on bloom
+    membership alone. HMAC-authenticated like every other peer route."""
+    data = request.get_json(silent=True) or {}
+    if data.get("realm") != _REALM:
+        return jsonify({"error": "realm mismatch"}), 403
+    hashes = data.get("hashes")
+    if not isinstance(hashes, list) or not all(isinstance(h, str) for h in hashes):
+        return jsonify({"error": "bad request"}), 400
+    if len(hashes) > HAS_HASHES_MAX:
+        return jsonify({"error": f"too many hashes (max {HAS_HASHES_MAX})"}), 400
+    _init_instance_id()
+    held_set = ffsredundancy.current_hashes_from_index(_local_file_index)
+    held = sorted(set(hashes) & held_set)
+    return jsonify({"node_id": str(_INSTANCE_ID), "held": held})
+
+
+def confirm_held_hashes(peer: str, hashes) -> Optional[set]:
+    """Ask one peer which of these content hashes it holds (bulk /has-hashes,
+    batched to the server cap). Returns the confirmed subset, or None when the
+    peer cannot answer — callers must treat None as 'unconfirmed = assume
+    absent' (the safe, over-replicating direction)."""
+    batch = sorted(set(hashes or ()))
+    out: set = set()
+    if not batch:
+        return out
+    try:
+        for i in range(0, len(batch), HAS_HASHES_MAX):
+            chunk = batch[i:i + HAS_HASHES_MAX]
+            r = _authed_post(_peer_url(peer, "/has-hashes"), "/has-hashes",
+                             {"realm": _REALM, "hashes": chunk}, timeout=10)
+            if not r.ok:
+                return None
+            out.update((r.json() or {}).get("held") or ())
+    except Exception as ex:
+        _log(f"[peer] /has-hashes failed from {peer}: {ex}")
+        return None
+    return out
+
+
 def _federated_nodes_live(timeout: float = 3.0) -> list:
     """Local node status merged with each known peer's live /node-status, keyed
     by node name, newest 'updated' wins. Independent of file-sync state."""

@@ -401,6 +401,35 @@ def build_holdings(hashes: Iterable[str], node_id: str,
     return out
 
 
+def merge_holdings(node_statuses: Iterable[dict]) -> Dict[str, dict]:
+    """Approximate world map: {node_id: holdings} merged from node-status blobs
+    (§9.2). Self is authoritative for itself — each blob only contributes its
+    own "holdings" block; nobody asserts another node's. Newest "built" wins
+    per node_id. Blobs without a holdings block are skipped."""
+    world: Dict[str, dict] = {}
+    for status in node_statuses or ():
+        if not isinstance(status, dict):
+            continue
+        h = status.get("holdings")
+        if not isinstance(h, dict):
+            continue
+        node_id = str(h.get("node_id") or "").strip()
+        if not node_id:
+            continue
+        cur = world.get(node_id)
+        if cur is None or int(h.get("built", 0) or 0) > int(cur.get("built", 0) or 0):
+            world[node_id] = h
+    return world
+
+
+def candidate_holders(world: Dict[str, dict], content_hash: str) -> List[str]:
+    """node_ids whose advertised holdings *may* include content_hash — the set
+    worth a confirm round-trip. Never proof of a copy (§9.3): a copy counts
+    toward the target only after the peer confirms it holds the hash."""
+    return sorted(nid for nid, h in (world or {}).items()
+                  if holdings_may_hold(h, content_hash))
+
+
 def holdings_may_hold(holdings: Optional[dict], content_hash: str) -> bool:
     """Is this peer a candidate holder of content_hash, per its advertised
     holdings? True = worth a confirm round-trip — NEVER proof of a copy.

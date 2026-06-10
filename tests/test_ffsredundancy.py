@@ -314,3 +314,33 @@ def test_holdings_may_hold_semantics():
     assert R.holdings_may_hold({"node_id": "n", "count": 5}, member) is True
     # unreadable bloom degrades to candidate (never assume absence on error)
     assert R.holdings_may_hold({"count": 5, "bloom": {"m": "x"}}, member) is True
+
+
+@pytest.mark.unit
+def test_merge_holdings_keys_by_node_id_newest_built_wins():
+    old = R.build_holdings(_hashes(5, "x-"), "node-A", built=100)
+    new = R.build_holdings(_hashes(7, "y-"), "node-A", built=200)
+    other = R.build_holdings(_hashes(3, "z-"), "node-B", built=50)
+    world = R.merge_holdings([
+        {"node": "host1", "holdings": old},
+        {"node": "host1-renamed", "holdings": new},   # same instance, renamed
+        {"node": "host2", "holdings": other},
+        {"node": "no-holdings"},                       # pre-Phase-1 status blob
+        "junk",
+    ])
+    assert set(world) == {"node-A", "node-B"}
+    assert world["node-A"]["count"] == 7  # newest built wins
+    assert world["node-B"]["count"] == 3
+
+
+@pytest.mark.unit
+def test_candidate_holders_uses_bloom_never_empty_nodes():
+    target = "deadbeef" * 8
+    holder = R.build_holdings([target, "f" * 64], "node-A", built=1)
+    empty = R.build_holdings([], "node-B", built=1)
+    count_only = {"node_id": "node-C", "count": 9, "built": 1}  # no bloom -> ask
+    world = R.merge_holdings([{"holdings": h} for h in (holder, empty, count_only)])
+    cands = R.candidate_holders(world, target)
+    assert "node-A" in cands       # bloom says maybe
+    assert "node-B" not in cands   # self-reported empty
+    assert "node-C" in cands       # count-only: must ask-on-demand
