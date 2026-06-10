@@ -62,6 +62,23 @@ Recommended setup and launch flow:
 Interpreter resolution: `setup.sh`/`launch.sh` use `FFSFS_PYTHON` if set, else a
 project `./.venv`, else an active `$VIRTUAL_ENV`, else system `python3`.
 
+**Run as a systemd service** (instead of a held-open terminal). One template
+unit `ffsfs@.service`; each realm is the instance `ffsfs@<realm>`:
+
+```bash
+./service.sh install myrealm     # write unit + enable (user service by default)
+./service.sh start   myrealm
+./service.sh status  myrealm
+./service.sh stop    myrealm     # SIGINT → clean unmount, forced unmount fallback
+./service.sh uninstall myrealm
+```
+
+Default is a user service (`systemctl --user`, no root, starts on login;
+`loginctl enable-linger "$USER"` to run without a login session). `--system`
+installs a root system service but is discouraged (FUSE as root, reads `/root`
+config) and warns first. The unit calls `launch.sh`, inheriting the same
+interpreter resolution.
+
 A venv is optional — system packages work without one. `./setup.sh` offers to
 create the venv and install deps for you (default yes). To do it manually:
 
@@ -114,6 +131,17 @@ an SSH tunnel for remote):
 ```bash
 ssh -L 8765:localhost:<peer-port> user@node   # then open http://localhost:8765/dashboard
 ```
+
+**Forgot the port?** The dashboard port is realm-derived (and falls back if
+busy), so run the portal — a loopback-only, read-only landing page on a fixed
+port that links to every realm's live dashboard:
+
+```bash
+./ffsportal.py            # then open http://127.0.0.1:4085/
+```
+
+It reads each node's `runtime.json` for the *actual* bound port and marks realms
+live / stopped / inactive.
 
 ### Setup App
 

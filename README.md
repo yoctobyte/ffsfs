@@ -223,6 +223,48 @@ The config file lives at:
 ~/.ffsfs/.storage/<realm>/realm-config.json
 ```
 
+### Run as a systemd service
+
+Instead of keeping a terminal open, install an activated realm as a systemd
+service. A single template unit `ffsfs@.service` is used; each realm runs as the
+instance `ffsfs@<realm>`.
+
+```bash
+./service.sh install myrealm      # write the unit + enable it
+./service.sh start   myrealm      # start now
+./service.sh status  myrealm
+./service.sh stop    myrealm
+./service.sh uninstall myrealm
+```
+
+By default this is a **user service** (`systemctl --user`): no root, runs as
+you, starts on login. To keep it running without an active login session:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+`--system` installs a root-owned system service instead, but is **not
+recommended yet** (FUSE runs as root, reads `/root`'s config) and prints a
+warning first. Stop uses `SIGINT` so FFSFS takes its clean unmount path, with a
+forced unmount as a fallback. The service reuses `launch.sh`, so it inherits the
+same interpreter resolution (venv/system).
+
+### Find a realm's dashboard (portal)
+
+Each realm's dashboard listens on a realm-derived port (and falls back to the
+next free port if busy), so the URL is easy to forget — especially under
+systemd. Run the portal:
+
+```bash
+./ffsportal.py            # then open http://127.0.0.1:4085/
+```
+
+It is loopback-only and read-only, lists every configured realm, marks it
+**live / stopped / inactive**, and links to each running dashboard (it reads the
+*actual* bound port from each node's `runtime.json`, not just the configured
+one). Override the port with `--port`.
+
 ## Storage Backends
 
 A realm has one primary backend and can have additional storage backends.
