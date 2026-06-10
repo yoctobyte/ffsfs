@@ -5,6 +5,9 @@
 #   ./launch.sh <realm>                  # foreground (add --bg for background)
 #   ./service.sh install <realm>         # or install as a systemd service
 # See service.sh for start/stop/uninstall and the --system (root) option.
+#
+# Don't remember a realm's dashboard port? Run ./ffsportal.py and open
+#   http://127.0.0.1:62965/  — it links to every realm's live dashboard.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

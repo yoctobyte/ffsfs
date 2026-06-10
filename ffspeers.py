@@ -467,6 +467,26 @@ def _ensure_background_workers_started():
     except Exception as e:
         print(f"[peer] Failed to start background workers: {e}")
 
+def _write_runtime_portfile(port: int) -> None:
+    """Record the actual bound HTTP port (which may differ from the configured
+    one if it was busy) so a side-channel like the fixed-port portal (ffsportal.py)
+    can link to the live dashboard without guessing. Best-effort: never fatal."""
+    try:
+        import json
+        if not _REALM or _REALM == MAGIC_REALM:
+            return
+        realm_dir = os.path.join(_STORAGE_DIR, _REALM)
+        os.makedirs(realm_dir, exist_ok=True)
+        path = os.path.join(realm_dir, "runtime.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"realm": _REALM, "port": int(port),
+                       "pid": os.getpid(), "updated": time.time()}, f)
+        os.replace(tmp, path)
+    except Exception as e:
+        _log(f"[peer] runtime portfile write failed: {e}")
+
+
 def _set_actual_port(port: int) -> None:
     """
     Record the actual HTTP port (esp. if 0/auto was used), then bring the node fully online:
@@ -478,6 +498,7 @@ def _set_actual_port(port: int) -> None:
     global _actual_flask_port
     _actual_flask_port = int(port)
     _log(f"[peer] HTTP listening on {PEER_BIND_HOST}:{_actual_flask_port}")
+    _write_runtime_portfile(_actual_flask_port)
     
     #load subscriptiond data
     _load_subscriptions()
