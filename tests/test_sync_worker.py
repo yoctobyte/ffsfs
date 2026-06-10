@@ -490,3 +490,66 @@ def test_worker_start_lazy_does_not_spawn_threads(tmp_path):
         assert worker._evict_thread is None
     finally:
         worker.stop()
+
+
+@pytest.mark.unit
+def test_eviction_never_drops_pinned_hash(tmp_path, monkeypatch):
+    """Same as the evictable case, but the cached version's content hash is
+    pinned (a /replicate-hint durable replica) → must survive eviction."""
+    from ffsutils import parse_versioned_filename
+
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY)
+    primary.init()
+    cache = Volume(str(tmp_path / "cache"), role=ROLE_CACHE)
+    cache.init()
+    pool = StoragePool(primary=primary, secondaries=[cache])
+
+    cache_backend = StorageBackend(cache.path, "test")
+    old_path = _commit(cache_backend, "doc.txt", b"old-version-data", 100, monkeypatch)
+    old_name = os.path.basename(old_path)
+    pinned_hash = parse_versioned_filename(old_name)["content_hash"]
+
+    primary_backend = StorageBackend(primary.path, "test")
+    _commit(primary_backend, "doc.txt", b"new-version-data-x", 200, monkeypatch)
+
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {"doc.txt": [{"name": old_name}]}},
+    })
+    peers.pinned_hashes = lambda: {pinned_hash}
+
+    pool_backend = StorageBackend(primary.path, "test", pool=pool)
+    policy = SyncPolicy.from_config(NODE_ROLE_CACHE_LIMITED, {"cache_max_bytes": 1})
+    worker = SyncWorker(pool_backend, peers, policy, None)
+    result = worker.run_eviction_once()
+    assert result["removed"] == 0
+    assert os.path.exists(old_path)
+
+
+@pytest.mark.unit
+def test_eviction_skips_pass_when_pin_set_unreadable(tmp_path, monkeypatch):
+    """If the pinned set cannot be read, eviction cannot tell what is safe to
+    drop → the whole pass is skipped (the safe direction)."""
+    primary = Volume(str(tmp_path / "ssd"), role=ROLE_PRIMARY)
+    primary.init()
+    cache = Volume(str(tmp_path / "cache"), role=ROLE_CACHE)
+    cache.init()
+    pool = StoragePool(primary=primary, secondaries=[cache])
+
+    cache_backend = StorageBackend(cache.path, "test")
+    old_path = _commit(cache_backend, "doc.txt", b"old-version-data", 100, monkeypatch)
+    old_name = os.path.basename(old_path)
+    primary_backend = StorageBackend(primary.path, "test")
+    _commit(primary_backend, "doc.txt", b"new-version-data-x", 200, monkeypatch)
+
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {"doc.txt": [{"name": old_name}]}},
+    })
+    def _boom():
+        raise RuntimeError("pin store unreadable")
+    peers.pinned_hashes = _boom
+
+    pool_backend = StorageBackend(primary.path, "test", pool=pool)
+    policy = SyncPolicy.from_config(NODE_ROLE_CACHE_LIMITED, {"cache_max_bytes": 1})
+    worker = SyncWorker(pool_backend, peers, policy, None)
+    assert worker.run_eviction_once() == {"removed": 0, "freed": 0}
+    assert os.path.exists(old_path)

@@ -445,6 +445,8 @@ class SyncWorker:
           - Never evict the newest committed version of a vpath.
           - Never evict a version that does not exist on at least one peer or
             another local volume (best-effort check via peer cache).
+          - Never evict a pinned content hash (a durable replica this node was
+            asked to hold via /replicate-hint — redundancy design §9.8).
           - Stop as soon as we are under cache_max_bytes.
         """
         bound = self.policy.cache_max_bytes
@@ -468,12 +470,24 @@ class SyncWorker:
         # oldest atime first
         candidates.sort(key=lambda c: c["atime"])
 
+        pinned = set()
+        try:
+            if hasattr(self.peers, "pinned_hashes"):
+                pinned = self.peers.pinned_hashes() or set()
+        except Exception as e:
+            # Can't tell what is pinned -> evicting anything could drop a
+            # durable replica. Skip this pass entirely (safe direction).
+            print(f"[ffsfs] pinned-hash read failed, skipping eviction pass: {e}")
+            return {"removed": 0, "freed": 0}
+
         removed = 0
         freed = 0
         for c in candidates:
             if total - freed <= bound:
                 break
             if c["is_newest"]:
+                continue
+            if c.get("content_hash") in pinned:
                 continue
             if not self._exists_elsewhere(c["vpath"], c["name"], c["volume"]):
                 continue
@@ -534,6 +548,7 @@ class SyncWorker:
                         "size": st.st_size,
                         "atime": st.st_atime,
                         "is_newest": is_newest,
+                        "content_hash": parsed.get("content_hash"),
                         "volume": vol,
                     })
         return results

@@ -22,6 +22,7 @@ from ffsutils import (
     default_port_for_realm,
 )
 import hashlib
+import json
 from ffsratelimit import RateLimits
 import ffslog
 import ffsredundancy
@@ -819,14 +820,17 @@ def _content_disposition(name: str, inline: bool = False) -> str:
 
 def set_realm(realm: Optional[str]) -> None:
     """Override the peer-server realm at runtime."""
-    global _REALM
+    global _REALM, _pinned_loaded
     if realm:
         _REALM = realm
         # keep peer lists separate per realm (e.g. ~/.ffsfs/.storage/peers-TEST2.conf)
         cfg = _storage_path(f"peers-{_REALM}.conf")
-        load_config(cfg)        
+        load_config(cfg)
         global _config_path
         _config_path = cfg
+        # pinned set is per-realm: force a re-read of the new realm's file
+        with _pinned_lock:
+            _pinned_loaded = False
 
 
 # -------------------- Auth state --------------------
@@ -2239,6 +2243,190 @@ def confirm_held_hashes(peer: str, hashes) -> Optional[set]:
         _log(f"[peer] /has-hashes failed from {peer}: {ex}")
         return None
     return out
+
+
+# ---- redundancy Phase 1: pinned hashes + replicate-hint ----------------------
+# A pin marks a content hash this node was asked to hold as a durable replica
+# (design §9.8). Pins are persisted per realm so a restart does not turn a
+# durable replica back into evictable cache; eviction must never drop a pinned
+# hash. Phase 1 never unpins automatically.
+
+_pinned_hashes: set = set()
+_pinned_lock = threading.Lock()
+_pinned_loaded = False
+
+
+def _pinned_path() -> str:
+    return _storage_path(f"pinned-hashes-{_REALM}.json")
+
+
+def _load_pinned_locked() -> None:
+    global _pinned_loaded, _pinned_hashes
+    if _pinned_loaded:
+        return
+    try:
+        with open(_pinned_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _pinned_hashes = {str(h) for h in (data.get("pinned") or []) if h}
+    except FileNotFoundError:
+        _pinned_hashes = set()
+    except Exception as e:
+        ffslog.warn(f"pinned-hash file unreadable ({_pinned_path()}): {e}; "
+                    "starting with empty pin set", source="redundancy")
+        _pinned_hashes = set()
+    _pinned_loaded = True
+
+
+def pin_hash(content_hash: str) -> None:
+    """Persistently pin a content hash (idempotent)."""
+    content_hash = (content_hash or "").strip()
+    if not content_hash:
+        return
+    with _pinned_lock:
+        _load_pinned_locked()
+        if content_hash in _pinned_hashes:
+            return
+        _pinned_hashes.add(content_hash)
+        _ensure_storage_dir()
+        tmp = _pinned_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"pinned": sorted(_pinned_hashes)}, f, indent=1)
+        os.replace(tmp, _pinned_path())
+
+
+def pinned_hashes() -> set:
+    """Copy of the persisted pin set (content hashes eviction must keep)."""
+    with _pinned_lock:
+        _load_pinned_locked()
+        return set(_pinned_hashes)
+
+
+def pull_versioned_file(peer: str, versioned_name: str,
+                        rate_limits: Optional[RateLimits] = None) -> Optional[str]:
+    """Pull one exact versioned file from a peer over the normal authenticated
+    /get-file path, verify its embedded content hash, land it under the primary
+    data root and register it in the local index. Returns the local path, or
+    None on any failure (a hash mismatch discards the bytes)."""
+    try:
+        # validates traversal + versioned-name shape; maps under a data root
+        local_path = _safe_file_abspath(versioned_name)
+    except (ValueError, RuntimeError) as e:
+        _log(f"[peer] replicate pull rejected {versioned_name!r}: {e}")
+        return None
+    try:
+        r = _authed_get(_peer_url(peer, "/get-file"), "/get-file",
+                        {"realm": _REALM, "vpath": versioned_name},
+                        timeout=90, stream=True)
+        r.raise_for_status()
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        limits = rate_limits or _rate_limits
+        with open(local_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                limits.net_bg.consume(len(chunk))
+                limits.disk_bg.consume(len(chunk))
+                f.write(chunk)
+        parsed = parse_versioned_filename(versioned_name)
+        expected = parsed.get("content_hash") if parsed else None
+        if not _content_hash_matches(local_path, expected):
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
+            ffslog.warn(f"integrity check FAILED for {versioned_name} from "
+                        f"{peer}: content hash mismatch, discarded",
+                        source="redundancy")
+            return None
+        try:
+            st = os.stat(local_path)
+            _index_add_local_version(versioned_name, st.st_size, int(st.st_mtime))
+        except Exception:
+            pass
+        _log(f"[peer] replicate pulled {versioned_name} from {peer}")
+        return local_path
+    except Exception as e:
+        _log(f"[peer] replicate pull of {versioned_name} from {peer} failed: {e}")
+        return None
+
+
+def _can_accept_replica(size: int) -> bool:
+    """Best-effort donor space check: some online, non-parked volume must take
+    `size` bytes without breaking its capacity floor. Backends without a pool
+    (minimal/test) pass — the pull itself still fails on a full disk."""
+    pool = getattr(_local_backend, "pool", None)
+    if pool is None:
+        return True
+    try:
+        return any(v.can_accept_write(size) for v in pool.all_volumes
+                   if v.is_online() and not getattr(v, "ejected", False))
+    except Exception:
+        return True
+
+
+@app.route("/replicate-hint", methods=["POST"])
+def replicate_hint():
+    """Redundancy Phase 1 hint-pull (design §9.7): an owner asks this node to
+    hold a durable copy of one versioned file. The donor (this node) validates,
+    pulls the bytes itself over the authenticated /get-file + integrity path,
+    and pins the hash so eviction never drops it. Idempotent: a hint for a hash
+    already held just (re)pins it. Adds copies only — never removes anything."""
+    data = request.get_json(silent=True) or {}
+    if data.get("realm") != _REALM:
+        return jsonify({"error": "realm mismatch"}), 403
+    vpath = (data.get("vpath") or "").strip().strip("/")
+    suffix = (data.get("suffix") or "").strip()
+    chash = (data.get("content_hash") or "").strip()
+    source = (data.get("source") or "").strip()
+    if not vpath or not suffix or not chash:
+        return jsonify({"error": "bad request"}), 400
+    versioned_name = f"{vpath}.{suffix}"
+    parsed = parse_versioned_filename(versioned_name)
+    if (not parsed or parsed.get("content_hash") != chash
+            or is_hidden_mode(parsed.get("mode"))):
+        return jsonify({"error": "bad suffix"}), 400
+
+    held = ffsredundancy.current_hashes_from_index(_local_file_index)
+    if chash in held:
+        pin_hash(chash)
+        return jsonify({"ok": True, "already_present": True})
+
+    size = int(data.get("size", 0) or 0)
+    if not _can_accept_replica(size):
+        return jsonify({"error": "no space"}), 507
+
+    sources = ([source] if source else []) + [p for p in list(_known_peers)
+                                              if p != source]
+    pulled = None
+    for src in sources:
+        pulled = pull_versioned_file(src, versioned_name)
+        if pulled:
+            break
+    if not pulled:
+        return jsonify({"error": "pull failed"}), 502
+    pin_hash(chash)
+    return jsonify({"ok": True, "pulled": True})
+
+
+def send_replicate_hint(peer: str, vpath: str, suffix: str, content_hash: str,
+                        size: int = 0, source: str = "") -> Optional[dict]:
+    """Owner-side client: ask `peer` to hold a durable copy (POST
+    /replicate-hint). Returns the donor's response dict, or None on failure —
+    the caller treats failure as 'copy not added' and may pick another donor."""
+    try:
+        r = _authed_post(_peer_url(peer, "/replicate-hint"), "/replicate-hint",
+                         {"realm": _REALM, "vpath": vpath, "suffix": suffix,
+                          "content_hash": content_hash, "size": int(size or 0),
+                          "source": source or ""},
+                         timeout=120)
+        if not r.ok:
+            _log(f"[peer] replicate-hint to {peer} for {vpath} refused: "
+                 f"{r.status_code}")
+            return None
+        return r.json() or {}
+    except Exception as ex:
+        _log(f"[peer] replicate-hint to {peer} failed: {ex}")
+        return None
 
 
 def _federated_nodes_live(timeout: float = 3.0) -> list:

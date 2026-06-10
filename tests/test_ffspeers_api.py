@@ -785,3 +785,145 @@ def test_has_hashes_rejects_bad_body_and_oversize(peer_client):
     too_many = [f"{i:064x}" for i in range(ffspeers.HAS_HASHES_MAX + 1)]
     assert client.post("/has-hashes",
                        json={"realm": "test", "hashes": too_many}).status_code == 400
+
+
+# ---- replicate-hint + pinned hashes (redundancy Phase 1) ---------------------
+
+@pytest.fixture
+def pin_state(tmp_path, monkeypatch):
+    """Isolate the persisted pin set into tmp_path."""
+    monkeypatch.setattr(ffspeers, "_STORAGE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(ffspeers, "_pinned_hashes", set())
+    monkeypatch.setattr(ffspeers, "_pinned_loaded", False)
+
+
+@pytest.mark.unit
+def test_pin_hash_roundtrip_and_survives_restart(pin_state):
+    ffspeers.pin_hash("HASH1")
+    ffspeers.pin_hash("HASH2")
+    ffspeers.pin_hash("HASH1")  # idempotent
+    assert ffspeers.pinned_hashes() == {"HASH1", "HASH2"}
+    # simulate restart: in-memory state gone, file remains
+    ffspeers._pinned_hashes = set()
+    ffspeers._pinned_loaded = False
+    assert ffspeers.pinned_hashes() == {"HASH1", "HASH2"}
+
+
+def _hint_body(vpath, chash, ts=100, mode="write", **extra):
+    name = build_versioned_filename(vpath, chash, mode, ts)
+    suffix = name[len(vpath) + 1:]
+    body = {"realm": "test", "vpath": vpath, "suffix": suffix,
+            "content_hash": chash}
+    body.update(extra)
+    return body, name
+
+
+@pytest.mark.unit
+def test_replicate_hint_realm_mismatch(peer_client, pin_state):
+    client, _ = peer_client
+    body, _ = _hint_body("a.txt", _ch(b"x"))
+    body["realm"] = "wrong"
+    assert client.post("/replicate-hint", json=body).status_code == 403
+
+
+@pytest.mark.unit
+def test_replicate_hint_rejects_bad_requests(peer_client, pin_state):
+    client, _ = peer_client
+    chash = _ch(b"x")
+    # missing fields
+    assert client.post("/replicate-hint",
+                       json={"realm": "test"}).status_code == 400
+    # suffix hash does not match the claimed content_hash
+    body, _ = _hint_body("a.txt", chash)
+    body["content_hash"] = _ch(b"other")
+    assert client.post("/replicate-hint", json=body).status_code == 400
+    # tombstone suffix is never a durable copy
+    body, _ = _hint_body("a.txt", chash, mode="delete")
+    assert client.post("/replicate-hint", json=body).status_code == 400
+
+
+@pytest.mark.unit
+def test_replicate_hint_already_present_pins(peer_client, pin_state):
+    client, _ = peer_client
+    chash = _ch(b"already-here")
+    body, name = _hint_body("a.txt", chash)
+    ffspeers._local_file_index = {"a.txt": [{"name": name}]}
+    resp = client.post("/replicate-hint", json=body)
+    assert resp.status_code == 200
+    assert resp.get_json()["already_present"] is True
+    assert chash in ffspeers.pinned_hashes()
+
+
+@pytest.mark.unit
+def test_replicate_hint_pulls_and_pins(peer_client, pin_state, monkeypatch):
+    client, _ = peer_client
+    chash = _ch(b"new-bytes")
+    body, name = _hint_body("b.txt", chash, source="10.0.0.9:5000")
+    pulled = []
+    monkeypatch.setattr(ffspeers, "pull_versioned_file",
+                        lambda peer, vname, **kw: pulled.append((peer, vname))
+                        or "/fake/local/path")
+    resp = client.post("/replicate-hint", json=body)
+    assert resp.status_code == 200
+    assert resp.get_json()["pulled"] is True
+    assert pulled == [("10.0.0.9:5000", name)]  # explicit source tried first
+    assert chash in ffspeers.pinned_hashes()
+
+
+@pytest.mark.unit
+def test_replicate_hint_pull_failure_is_502_and_no_pin(peer_client, pin_state,
+                                                       monkeypatch):
+    client, _ = peer_client
+    chash = _ch(b"unfetchable")
+    body, _ = _hint_body("c.txt", chash, source="10.0.0.9:5000")
+    monkeypatch.setattr(ffspeers, "pull_versioned_file",
+                        lambda peer, vname, **kw: None)
+    resp = client.post("/replicate-hint", json=body)
+    assert resp.status_code == 502
+    assert chash not in ffspeers.pinned_hashes()
+    # no source and no known peers -> nothing to pull from
+    body.pop("source")
+    assert client.post("/replicate-hint", json=body).status_code == 502
+
+
+@pytest.mark.unit
+def test_replicate_hint_no_space_is_507(peer_client, pin_state, monkeypatch):
+    client, _ = peer_client
+    monkeypatch.setattr(ffspeers, "_can_accept_replica", lambda size: False)
+    body, _ = _hint_body("d.txt", _ch(b"big"), source="10.0.0.9:5000")
+    assert client.post("/replicate-hint", json=body).status_code == 507
+
+
+class _FakeResp:
+    def __init__(self, data):
+        self._data = data
+    def raise_for_status(self):
+        pass
+    def iter_content(self, chunk_size):
+        yield self._data
+
+
+@pytest.mark.unit
+def test_pull_versioned_file_verifies_hash(peer_client, monkeypatch):
+    _client, data_path = peer_client
+    payload = b"replicated content"
+    good = build_versioned_filename("pull.txt", _ch(payload), "write", 100)
+    monkeypatch.setattr(ffspeers, "_authed_get",
+                        lambda *a, **kw: _FakeResp(payload))
+    local = ffspeers.pull_versioned_file("peerX", good)
+    assert local and os.path.exists(local)
+    with open(local, "rb") as f:
+        assert f.read() == payload
+    # corrupted transfer: bytes don't match the embedded hash -> discarded
+    bad = build_versioned_filename("evil.txt", _ch(b"expected"), "write", 100)
+    monkeypatch.setattr(ffspeers, "_authed_get",
+                        lambda *a, **kw: _FakeResp(b"tampered"))
+    assert ffspeers.pull_versioned_file("peerX", bad) is None
+    assert not os.path.exists(os.path.join(str(data_path), bad))
+
+
+@pytest.mark.unit
+def test_pull_versioned_file_rejects_traversal(peer_client):
+    _client, _ = peer_client
+    name = build_versioned_filename("evil.txt", _ch(b"x"), "write", 100)
+    assert ffspeers.pull_versioned_file("peerX", f"../{name}") is None
