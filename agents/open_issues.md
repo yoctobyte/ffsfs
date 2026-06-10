@@ -213,9 +213,16 @@ stopping for features/fixes/logs.
   edit-menu item 15 + realm summary) and the dashboard (read-only Redundancy
   panel), plus a detect→suggest→confirm scan walk (`walk_suggestions` /
   `aggregate_by_prefix` over the primary backend; setup shows a file sample +
-  per-prefix roll-up and adopts overrides on confirm). **Phase 0 DONE.** Phases
-  1–3 (placement, world map, guarded reduction) still need design sign-off
-  before coding.
+  per-prefix roll-up and adopts overrides on confirm). **Phase 0 DONE.**
+  **Phase 1 placement DESIGNED** (redundancy_design.md §9, needs sign-off before
+  coding): add-only enforcement — holdings summary (count + bloom) in
+  node-status, approximate world map = merge of self-reported holdings, bloom
+  used only to pick confirm candidates (FP direction is unsafe so copies count
+  only after a `/head` confirm), target from `class_for_path`, lowest-node-id
+  owner drives, donor selection by profile/space/diversity/reachability,
+  hint-pull `/replicate-hint` reusing `/get-file` + integrity, pinned set exempt
+  from eviction, over-target flagged not dropped. Phases 2–3 (availability
+  weighting, guarded reduction) still need design.
 
 - [P3] **Fixed-port portal — DONE.** `ffsportal.py`: stdlib, loopback-only
   landing page on a fixed easy-to-remember port (0xFF5 = 4085) that lists

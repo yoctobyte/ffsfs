@@ -176,7 +176,8 @@ Needed in the dashboard before enabling any automatic reduction:
 
 **Phase 1 — approximate placement:** nodes advertise holdings summaries
 (count + bloom) in node-status; under-target files get pushed to a donor;
-over-target only flagged (no automatic drop yet). Conservative.
+over-target only flagged (no automatic drop yet). Conservative. **Detailed
+design in §9 below.**
 
 **Phase 2 — availability-weighted + tiers:** uptime scoring,
 expected-available-copies, on-demand/cold designation, failure-domain-aware
@@ -185,7 +186,216 @@ placement, dashboard stats from §7.
 **Phase 3 — guarded reduction:** turn on automatic copy *reduction* using the
 §6 safeguards, only after §7 observability has proven the policy in real use.
 
-## 9. Erasure coding — note, probably not
+## 9. Phase 1 placement — detailed design (proposed, needs sign-off)
+
+Phase 1 is the **first enforcement**, but only in the safe direction: it *adds*
+copies to reach a target, and never removes one. Removal is Phase 3. Everything
+here is built on existing machinery — node-status, the content-hash naming, the
+peer fetch + integrity path, and the SyncWorker — not a new subsystem.
+
+### 9.1 Unit of placement
+
+The replicated unit is a **content hash**, not a path or a version. A logical
+file's *current* state is the newest live version (same selection the Phase 0
+walk uses: skip `delete`/`moved` tombstones and `.ffsfs-nodes`). Phase 1 targets
+the content hash of that current version. Older version hashes are history; they
+are not driven to a target (they ride existing mirror/sync only). A `delete`/
+`moved` tombstone means the path has no current hash → no placement target.
+
+### 9.2 Holdings advertisement (the world map input)
+
+Each node already publishes `.ffsfs-nodes/<node>.json` every
+`NODE_STATUS_INTERVAL_SECS` (=300) via `_write_node_status`, and serves it live
+on `/node-status`. Extend that JSON with a **holdings summary**:
+
+```json
+"holdings": {
+  "node_id": "<instance.id uuid>",
+  "count": 1234,                       // distinct current-version hashes held
+  "bloom": { "m": 16384, "k": 7, "bits": "<base64>" },
+  "built": 1781000000
+}
+```
+
+- Built from `_local_file_index` (vpath → versions; each version name carries
+  its `content_hash`). Take the current-version hash per live vpath, insert into
+  a Bloom filter; publish base64 bits + `count`.
+- `node_id` = the persisted `_INSTANCE_ID` (stable across restarts/rename).
+- Bloom is sized for the local `count` at a target false-positive rate (~1%):
+  roughly `m ≈ 1.44 · n · log2(1/p)` bits, `k ≈ ln2 · m/n`. For 100k hashes at
+  1% that is ~120 KB — fine to ride node-status sync on a LAN. **Scaling note:**
+  past ~1M files the bloom gets large; cap it (degrade to count-only +
+  ask-on-demand) or shard by hash-prefix later. Not a Phase-1 blocker.
+
+The **approximate world map** is then just the merge of every node's
+self-reported holdings (self is authoritative for itself; nobody asserts another
+node's holdings). No master, partition-tolerant, reuses the existing federated
+node-status aggregation (`_federated_nodes_live`).
+
+### 9.3 Counting copies — the one real subtlety
+
+A Bloom filter only errs as a **false positive** (says "present" when absent).
+That direction is *dangerous* here: an FP makes us believe a copy exists that
+does not → we under-replicate. So:
+
+> **Bloom is never trusted as proof of a copy.** It only narrows *which* peers to
+> ask. A copy is counted toward the target only after a peer **confirms** it via
+> an authenticated `/head?vpath=…` (or equivalent has-hash check) returning the
+> matching `content_hash`. Unconfirmed = assumed absent = eligible to push.
+
+This keeps the founding invariant ("when uncertain, replicate"). The coarse
+bloom count is still fine for the *dashboard* world-map view (approx), just not
+for the place/skip decision. Confirmed-copy count for hash H =
+`self_holds(H)` + peers that answer `/head` positively.
+
+### 9.4 Target resolution
+
+`ffsredundancy.class_for_path(vpath, cfg)` → desired confirmed-copy count:
+
+- `mirror` → every node in the realm (today's behavior; unchanged path).
+- `rf:N`   → N.
+- `cache`  → 0 durable target (never pushed for durability; fetch-on-demand
+  only). A cache-class file is allowed to exist as a transient copy but is not
+  driven up and is freely evictable.
+
+### 9.5 Who drives replication (dedupe without a master)
+
+Over-pushing is *safe* (just extra copies) but wasteful if every coordinator
+acts on the same under-target file at once. Deterministic ownership:
+
+> The **owner** of hash H is the live holder with the lowest `node_id` among the
+> current confirmed holders. The owner is responsible for driving H to target;
+> other coordinators defer for a cooldown. If the owner is offline, the
+> next-lowest takes over (re-derived each sweep). No election protocol, no lock —
+> pure function of the holder set, recomputed from the world map.
+
+`cache-only` / `access_only` nodes never drive (they are not coordinators, per
+`participates_in_placement`).
+
+### 9.6 Donor selection
+
+For a file under target, pick donors from peers that:
+
+1. **can hold durable replicas** — `is_durable_replica(storage_profile)` (not
+   cache-only) and `donates_storage(...)`;
+2. **have space** — respect the already-shipped capacity floor / free-space
+   routing (`can_accept_write` / reserve); never push onto a near-full volume;
+3. **are diverse** — a distinct node from existing holders (Phase 1 failure
+   domain = node; per-disk diversity is Phase 2);
+4. **are reachable** — currently alive (so the push can complete now); offline
+   on-demand nodes are a Phase 2 durability lever, not used in Phase 1.
+
+Tie-break by most free space (matches existing write-target preference). Pick the
+fewest donors needed to reach target.
+
+### 9.7 Replication protocol (reuses fetch + integrity)
+
+Prefer **hint-pull** over coordinator-push: it reuses the existing authenticated
+`/get-file` + `_content_hash_matches` path and puts back-pressure on the donor.
+
+1. Owner sends an authenticated `POST /replicate-hint` to the chosen donor:
+   `{realm, vpath, content_hash, suffix, size, source}` (HMAC-signed like other
+   peer calls).
+2. Donor validates realm/auth, checks it does not already hold the hash, checks
+   space, then **pulls** the version via the normal `/get-file` from `source`
+   (or any known holder), writing it through the standard commit path and
+   verifying `_content_hash_matches`. A bad hash is discarded (existing guard).
+3. Donor records the hash in a **pinned set** (durable replica it was asked to
+   keep) and re-advertises its holdings next node-status cycle (or sooner via a
+   nudge).
+
+Idempotent: a duplicate hint for a hash the donor already holds is a no-op
+`{ok, already_present}`.
+
+### 9.8 Pinning vs eviction
+
+`SyncWorker.run_eviction_once` already refuses to evict the newest version and
+anything "not present on at least one peer." Phase 1 adds one rule: **never evict
+a hash in the local pinned (asked-to-hold) set.** The pinned set is persisted
+(small file under the realm state dir) so a restart does not turn a durable
+replica back into evictable cache. This is the only eviction change; no copy is
+ever *deleted* by Phase 1 logic itself.
+
+### 9.9 Triggers
+
+Placement runs:
+
+- **on commit** — `notify_commit` already fans out; the owner of a freshly
+  committed hash checks target and pushes if short. Cheap, event-driven.
+- **periodic reconcile sweep** — a low-frequency loop (e.g. every few minutes,
+  jittered) recomputes targets vs confirmed copies across local current hashes
+  and repairs drift (a holder went away, a class changed, a hint was lost). This
+  is the self-healing path; keep it conservative and rate-limited.
+- **on peer/holder change** — when a peer drops (liveness), the owner of any hash
+  that fell below target re-pushes.
+
+### 9.10 Over-target handling
+
+If confirmed copies > target, Phase 1 **only flags** it (dashboard "over-
+replicated" list). It never drops — that is Phase 3 under the §6 guards. Flagging
+now gives the operator visibility and lets us validate the counting before any
+reduction is trusted.
+
+### 9.11 Enforcement vs existing mirror sync
+
+`class = mirror` keeps exactly today's blind-mirror behavior (no Phase-1 change).
+Only `rf:N` / `cache` paths consult the placement logic, so turning Phase 1 on is
+inert until an operator sets a non-mirror class — consistent with Phase 0's
+default. The SyncWorker active-pull loop should consult `class_for_path` so it
+does not blindly pull a `cache`/at-target file onto a node that should not hold a
+durable copy.
+
+### 9.12 Observability (extends the Phase 0 dashboard panel)
+
+Add to the existing Redundancy panel (§7 subset that Phase 1 can populate):
+per-path **confirmed copies vs target** (under/at/over), an **at-risk** list
+(below target; single-copy; only-copy-on-now-offline), and the approximate
+**world map** (per-node holdings count, who-probably-has from bloom). A short
+**recent-placement log** (hints sent/fulfilled) for trust.
+
+### 9.13 New config knobs (all optional, safe defaults)
+
+- `redundancy.reconcile_interval` (default a few minutes).
+- donor space headroom reuse (already exists via capacity floor).
+- a per-node cap on concurrent outstanding hints (avoid flooding one donor).
+- pinned-set location (realm state dir).
+
+### 9.14 Failure modes / edges
+
+- **Partition / stale map** → unconfirmed copies assumed absent → over-replicate
+  → safe.
+- **Bloom staleness** (≤ one node-status interval) → at worst a redundant
+  confirm round-trip or a transient extra copy → safe.
+- **Churn / flapping peer** → owner cooldown + reconcile rate-limit damp it.
+- **Donor fills up** → capacity floor refuses; owner picks another donor; if none,
+  file stays under target and is surfaced in the at-risk list (never silently
+  dropped).
+- **History not replicated** → only current hashes are driven; old versions ride
+  existing sync. Acceptable for Phase 1 (durability is about current content).
+
+### 9.15 Test plan
+
+Unit/integration (no real FUSE on workstation; VM for end-to-end):
+- holdings-summary build + bloom membership/FP rate from a known hash set.
+- world-map merge from multiple node-status blobs.
+- confirmed-copy counting ignores bloom-only "present" (FP) and counts only
+  `/head`-confirmed holders.
+- owner selection = lowest node_id among holders; re-derivation when owner drops.
+- donor selection respects profile/space/diversity/reachability.
+- `/replicate-hint` idempotency + integrity rejection of a wrong-hash pull.
+- eviction never drops a pinned hash; pinned set survives restart.
+- a two-peer VM scenario (with HMAC on, per the open P1) where an rf:2 file on a
+  single node gets a second confirmed copy on a donor, and an rf:1/cache file
+  does not.
+
+### 9.16 Explicitly deferred to Phase 2/3
+
+Availability-weighted "expected-available-copies", on-demand/cold tier as a
+durability slot, per-physical-disk failure domains, and **any** copy reduction.
+Phase 1 ships add-only placement with full observability so Phase 3 reduction can
+later be trusted.
+
+## 10. Erasure coding — note, probably not
 
 RF=2 doubles storage; Reed-Solomon k+m gives similar durability at ~1.3×. BUT:
 CPU, partial-read complexity, and it **breaks the "readable plain files without
