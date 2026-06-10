@@ -444,3 +444,71 @@ def holdings_may_hold(holdings: Optional[dict], content_hash: str) -> bool:
         return BloomFilter.from_dict(bloom).might_contain(content_hash)
     except Exception:
         return True
+
+
+# ---- Phase 1: target / owner / donor selection (pure decisions) --------------
+# Pure functions over plain dicts/sets so placement decisions are unit-testable
+# without peers or a filesystem. The runtime wiring (sweep, hints) feeds them.
+
+def placement_target(cls: str) -> Optional[int]:
+    """Desired confirmed-copy count Phase 1 placement drives toward (§9.4).
+
+    rf:N -> N. cache -> 0 (never pushed for durability; transient copies are
+    allowed and freely evictable). mirror -> None: mirror rides today's blind
+    mirror sync untouched — placement logic never drives or caps it (§9.11)."""
+    c = normalize_class(cls)
+    if c == CLASS_MIRROR:
+        return None
+    if c == CLASS_CACHE:
+        return 0
+    return parse_rf(c)
+
+
+def placement_status(confirmed: int, target: Optional[int]) -> str:
+    """"under" / "at" / "over" for a confirmed-copy count vs target; "n/a" for
+    mirror (no placement target). Phase 1 only ever *acts* on "under"; "over"
+    is flagged for the dashboard, never dropped (§9.10)."""
+    if target is None:
+        return "n/a"
+    if confirmed < target:
+        return "under"
+    if confirmed > target:
+        return "over"
+    return "at"
+
+
+def owner_for_hash(holder_ids: Iterable[str]) -> Optional[str]:
+    """Owner of a hash = the lowest node_id among its confirmed holders (§9.5).
+    The owner drives replication; others defer for a cooldown. Re-derived from
+    the holder set each sweep — no election, no lock, and an offline owner is
+    simply absent from the holder set so the next-lowest takes over. None when
+    nobody is confirmed to hold it."""
+    ids = sorted(str(h).strip() for h in (holder_ids or ()) if str(h or "").strip())
+    return ids[0] if ids else None
+
+
+def select_donors(peers: Iterable[dict], holder_ids: Iterable[str],
+                  needed: int) -> List[str]:
+    """Pick donor node_ids for an under-target hash (§9.6). `peers` are plain
+    descriptors {node_id, storage_profile, free_bytes?, alive?}.
+
+    Filters: durable + donating storage profile (never cache-only), not already
+    a holder (Phase 1 failure domain = distinct node), and currently alive so
+    the copy can land now. Prefers most free space (matches the existing
+    write-target preference); returns at most `needed`. The donor still
+    enforces its own capacity floor when it pulls — this list is a preference,
+    not a reservation."""
+    holders = {str(h) for h in (holder_ids or ())}
+    ranked = []
+    for p in peers or ():
+        nid = str(p.get("node_id") or "").strip()
+        if not nid or nid in holders:
+            continue
+        if not p.get("alive", True):
+            continue
+        profile = p.get("storage_profile") or ""
+        if not (is_durable_replica(profile) and donates_storage(profile)):
+            continue
+        ranked.append((-(int(p.get("free_bytes") or 0)), nid))
+    ranked.sort()
+    return [nid for _neg_free, nid in ranked[:max(0, int(needed))]]

@@ -344,3 +344,51 @@ def test_candidate_holders_uses_bloom_never_empty_nodes():
     assert "node-A" in cands       # bloom says maybe
     assert "node-B" not in cands   # self-reported empty
     assert "node-C" in cands       # count-only: must ask-on-demand
+
+
+# ---- Phase 1: target / owner / donor selection -------------------------------
+
+@pytest.mark.unit
+def test_placement_target_per_class():
+    assert R.placement_target("rf:3") == 3
+    assert R.placement_target("rf:1") == 1
+    assert R.placement_target("cache") == 0
+    assert R.placement_target("mirror") is None  # rides blind-mirror, not driven
+
+
+@pytest.mark.unit
+def test_placement_status():
+    assert R.placement_status(1, 3) == "under"
+    assert R.placement_status(3, 3) == "at"
+    assert R.placement_status(4, 3) == "over"   # flagged only, never dropped
+    assert R.placement_status(5, None) == "n/a"  # mirror
+
+
+@pytest.mark.unit
+def test_owner_is_lowest_holder_and_rederives():
+    assert R.owner_for_hash(["node-b", "node-a", "node-c"]) == "node-a"
+    # owner gone from the confirmed holder set -> next-lowest takes over
+    assert R.owner_for_hash(["node-b", "node-c"]) == "node-b"
+    assert R.owner_for_hash([]) is None
+    assert R.owner_for_hash(["", "  ", "node-z"]) == "node-z"
+
+
+def _peer(nid, profile="bulk", free=100, alive=True):
+    return {"node_id": nid, "storage_profile": profile,
+            "free_bytes": free, "alive": alive}
+
+
+@pytest.mark.unit
+def test_select_donors_filters_and_prefers_free_space():
+    import ffsvolumes as V
+    peers = [
+        _peer("holder", free=999),                                  # already holds
+        _peer("cacheonly", profile=V.NODE_STORAGE_CACHE_ONLY, free=999),
+        _peer("dead", free=999, alive=False),
+        _peer("small", profile=V.NODE_STORAGE_LIMITED, free=10),
+        _peer("big", profile=V.NODE_STORAGE_BULK, free=500),
+    ]
+    assert R.select_donors(peers, ["holder"], 2) == ["big", "small"]
+    assert R.select_donors(peers, ["holder"], 1) == ["big"]
+    assert R.select_donors(peers, ["holder"], 0) == []
+    assert R.select_donors([], [], 3) == []
