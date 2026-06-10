@@ -213,6 +213,14 @@ Setup also records *intent* so behavior can be tuned later:
   `sd` keys default to a small max file size — and you can assign a themed job
   (e.g. "music only", scoped to a `/music` prefix). The size cap is enforced
   today; theme/prefix write-routing is future work.
+- **Redundancy classes** (edit-menu item 15). Default is `mirror` (every node
+  keeps everything — unchanged behavior). Per path prefix you can opt into
+  `rf:N` (keep N confirmed copies on distinct nodes; a background worker adds
+  copies when below target, availability- and failure-domain-aware) or `cache`
+  (no durable copy, fetch on demand). Setup can scan existing files and
+  suggest classes from size/type. Surplus copies are only ever removed by the
+  operator-gated, dry-run-first `ffsctl redundancy-reduce`. Details:
+  `agents/operator_guide.md` §3b and `agents/redundancy_design.md`.
 
 `setup.sh` saves after each step but marks a realm inactive until activation.
 `launch.sh` refuses inactive setup configs unless `--allow-inactive` is passed.
@@ -303,6 +311,20 @@ Remove a backend from config without deleting files on disk:
 ```bash
 python3 ffsctl.py backend remove myrealm backup-a
 ```
+
+Edit a registered backend's settings in place (by UUID, label, or path):
+
+```bash
+python3 ffsctl.py backend set myrealm backup-a --role cache --no-mirror
+python3 ffsctl.py backend set myrealm backup-a --max-bytes 0   # 0 = clear cap
+```
+
+`backend set` accepts the same policy flags as `add` (`--role`, `--media`,
+`--max-bytes`, `--max-file-size`, `--reserve-bytes`) plus `--no-mirror`,
+`--device-class` and `--job <prefix|none>`; size caps clear with `0`. The
+primary volume's role cannot be changed. The interactive setup app offers the
+same under "Edit a backend" (menu item 5). A running service applies backend
+edits on its next restart.
 
 Park a backend for clean removal (e.g. a rotated USB/archive disk) without
 unregistering it — it receives no new writes, stays in the config, and catches

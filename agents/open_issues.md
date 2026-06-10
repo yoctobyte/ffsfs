@@ -189,7 +189,7 @@ stopping for features/fixes/logs.
   auto-rediscovery (must not silently re-add an ignored peer; needs an in-memory
   denylist checked in `_upsert_peer`/`_on_seeds`).
 
-- [P2] **Auto-redundancy (replication factor, beyond blind mirror).** Today the
+- [P2] **Auto-redundancy (replication factor, beyond blind mirror) — DONE.** Today the
   only model is full mirror (RF = N nodes); does not scale as data grows. Add a
   per-file *target RF* maintained across distinct nodes, defaulted from a cheap
   importance heuristic (size is an inverse proxy for importance; type/extension
@@ -205,25 +205,24 @@ stopping for features/fixes/logs.
   at-risk stats) is a prerequisite before any automatic reduction. Phase it:
   static class setting first, placement later, guarded reduction last. Full
   design in `agents/redundancy_design.md`.
-  **Phase 0 IN PROGRESS** (`ffsredundancy.py`): class model (mirror / rf:N /
-  cache) + local size/type suggestion heuristic + per-prefix class resolver +
-  realm-config `redundancy` block recorded/validated in setup (advisory, no
-  enforcement; node roles reuse the existing `node_role`/`node_storage_profile`
-  taxonomy). Surfaced in the setup app (`prompt_redundancy` in the wizard +
-  edit-menu item 15 + realm summary) and the dashboard (read-only Redundancy
-  panel), plus a detect→suggest→confirm scan walk (`walk_suggestions` /
-  `aggregate_by_prefix` over the primary backend; setup shows a file sample +
-  per-prefix roll-up and adopts overrides on confirm). **Phase 0 DONE.**
-  **Phase 1 placement DESIGNED** (redundancy_design.md §9, needs sign-off before
-  coding): add-only enforcement — holdings summary (count + bloom) in
-  node-status, approximate world map = merge of self-reported holdings, bloom
-  used only to pick confirm candidates (FP direction is unsafe so copies count
-  only after a `/head` confirm), target from `class_for_path`, lowest-node-id
-  owner drives, donor selection by profile/space/diversity/reachability,
-  hint-pull `/replicate-hint` reusing `/get-file` + integrity, pinned set exempt
-  from eviction, over-target flagged not dropped. Phases 2–3 (availability
-  weighting, guarded reduction) still need design.
-  **Status + all open questions: `agents/redundancy_handover.md`.**
+  **ALL FOUR PHASES SHIPPED** (designs §9/§11/§12 in redundancy_design.md;
+  status + decisions in `agents/redundancy_handover.md`; operator docs in
+  `operator_guide.md` §3b):
+  Phase 0 — class model (mirror / rf:N / cache), size/type suggestion
+  heuristic, per-prefix resolver, setup + dashboard surfacing, scan walk.
+  Phase 1 — add-only placement: holdings (count + bloom) in node-status,
+  confirm-before-count via bulk `/has-hashes`, lowest-id owner, donor
+  selection, hint-pull `/replicate-hint` + pinned set exempt from eviction,
+  over-target flagged not dropped.
+  Phase 2 — availability floor (≥1 online always-on copy) + one graced
+  offline on-demand durability slot, host failure domains, at-risk
+  surfacing.
+  Phase 3 — guarded reduction: operator-gated dry-run-first
+  `ffsctl redundancy-reduce` (fresh confirms, N+margin hysteresis, serialized
+  highest-id dropper, floor protection, unpin-on-drop); active pull gated by
+  class so drops stick. Two-peer VM scenario (`redundancy-rf2`, HMAC on)
+  covers replication, cache exclusion, and reduction end-to-end.
+  Remaining: hardening pool only (handover doc) — pick by real-use pain.
 
 - [P3] **Fixed-port portal — DONE.** `ffsportal.py`: stdlib, loopback-only
   landing page on a fixed easy-to-remember port (0xFF5 = 4085) that lists

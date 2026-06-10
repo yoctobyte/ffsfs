@@ -398,6 +398,28 @@ current bytes under its `.ffsfs_data/` plus the new committed file would exceed
 `--reserve-bytes <n>` rejects that backend as the final storage target when the
 filesystem free space after the commit would be below `n` bytes.
 
+#### Editing a Registered Backend
+
+`backend set` changes an existing backend's settings in place, addressed by
+UUID, label, or path:
+
+```bash
+python3 ffsctl.py backend set myrealm backup-a --role cache --no-mirror
+python3 ffsctl.py backend set myrealm backup-a --media hdd --device-class usb
+python3 ffsctl.py backend set myrealm backup-a --max-bytes 0    # 0 clears a cap
+```
+
+It accepts the same policy flags as `add`, plus `--no-mirror` (turn
+mirror-on-write off), `--device-class <class>` and `--job <prefix|none>`
+(themed job prefix; `none` clears it). Size caps (`--max-bytes`,
+`--max-file-size`, `--reserve-bytes`) are cleared with `0`. Invalid values are
+rejected and change nothing, and the primary volume's role cannot be changed.
+
+The interactive setup app (`python3 ffssetup.py`) offers the same per-backend
+editing under "Edit a backend" (edit-menu item 5); blank answers keep the
+current value. Either way, a running service applies backend edits on its next
+restart.
+
 #### How Writes Are Routed
 
 New writes start as a temporary file on the current staging target:
@@ -555,6 +577,73 @@ Each backend path also contains `.ffsfs-volume.id`. FFSFS considers a backend
 online only when the directory exists, that file exists, and the ID inside it
 matches the ID in the realm config. This prevents accidentally writing to the
 wrong mounted disk path.
+
+---
+
+## 3b) Redundancy Classes & Placement
+
+By default every realm behaves as a blind mirror (`mirror` class): every node
+pulls everything its sync policy wants. The redundancy feature lets you say,
+per path prefix, how many copies the realm should keep instead. Full design:
+`agents/redundancy_design.md`; current status: `agents/redundancy_handover.md`.
+
+### Classes
+
+- `mirror` — today's behavior, the default. Never auto-suggested, never reduced.
+- `rf:N` — keep N copies on distinct nodes. Placement adds copies when below N.
+- `cache` — no durable copy; fetch on demand, freely evictable. For large
+  regenerable data (ISOs, model weights, video).
+
+Configured in realm-config under `redundancy` (setup app: edit-menu item 15,
+which can also scan existing files and suggest per-prefix classes from
+size/type):
+
+```json
+"redundancy": {
+  "default": "mirror",
+  "overrides": { "photos": "rf:3", "iso": "cache" },
+  "reconcile_interval": 300,
+  "offline_grace": 604800,
+  "reduction_margin": 2
+}
+```
+
+### How placement works (add-only)
+
+With an `rf:` class configured on a node whose role participates in placement,
+a background worker periodically reconciles every local current version
+against its target: nodes advertise what they hold (count + Bloom filter in
+node-status), copies are only *counted* after a peer positively confirms them
+(`/has-hashes`), and the lowest-id confirmed holder asks a suitable donor to
+pull a copy (`/replicate-hint`, verified + pinned on the donor; eviction never
+drops a pinned hash). Counting is availability-aware: a healthy placement
+needs at least one copy on an online `always_online` node, and at most one
+offline `on_demand` copy (a sleeping NAS) counts toward the target, for
+`offline_grace` at most. Donors on a different host are preferred. When in
+doubt — peer unreachable, Bloom ambiguity, stale state — the system always
+errs toward an extra copy, never fewer.
+
+The dashboard's Redundancy panel shows the last sweep, the at-risk list
+(paths below target / without an always-on copy), recent placements, and the
+per-node world map.
+
+### Reducing surplus copies (operator-gated)
+
+Placement only ever adds. Dropping a surplus local copy is a manual,
+dry-run-first operation:
+
+```bash
+python3 ffsctl.py redundancy-reduce myrealm            # dry-run: what could drop, what is kept and why
+python3 ffsctl.py redundancy-reduce myrealm --apply    # actually drop eligible local copies
+```
+
+A copy is only eligible when the path's class is `rf:N`, enough *other* nodes
+confirmed online right now (at least N + `reduction_margin`), this node is the
+designated dropper this round (highest node id — so two operators running it
+simultaneously cannot drop the same file twice), dropping does not remove the
+only always-on copy, and the file has no older local versions. Each drop is
+re-confirmed against all peers immediately before it happens. The node must be
+running; the realm always keeps at least the target number of copies.
 
 ---
 
