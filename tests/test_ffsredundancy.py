@@ -79,6 +79,43 @@ def test_suggest_class_buckets(name, size, expect):
 
 
 @pytest.mark.unit
-def test_node_roles_constants():
-    assert R.DEFAULT_NODE_ROLE == R.ROLE_COORDINATOR
-    assert R.NODE_ROLES == {R.ROLE_COORDINATOR, R.ROLE_DONOR, R.ROLE_CACHE_ONLY}
+def test_normalize_redundancy_config_validates_and_canonicalizes():
+    out = R.normalize_redundancy_config(
+        {"default": " RF:2 ", "overrides": {"/photos/": "rf:3", "iso": "CACHE"}})
+    assert out["default"] == "rf:2"
+    assert out["overrides"] == {"photos": "rf:3", "iso": "cache"}
+    # empty/None -> mirror default, no overrides
+    assert R.normalize_redundancy_config(None) == {"default": "mirror", "overrides": {}}
+    with pytest.raises(ValueError):
+        R.normalize_redundancy_config({"overrides": {"x": "rf:0"}})
+
+
+@pytest.mark.unit
+def test_class_for_path_longest_prefix_wins():
+    cfg = {"default": "rf:2", "overrides": {
+        "photos": "rf:3", "photos/screenshots": "cache", "iso": "cache"}}
+    assert R.class_for_path("docs/readme.md", cfg) == "rf:2"        # default
+    assert R.class_for_path("photos/IMG_1.jpg", cfg) == "rf:3"      # prefix
+    assert R.class_for_path("photos/screenshots/a.png", cfg) == "cache"  # longest wins
+    assert R.class_for_path("iso/ubuntu.iso", cfg) == "cache"
+    assert R.class_for_path("photosX/a", cfg) == "rf:2"            # not a boundary match
+    # no config -> mirror (unchanged behavior)
+    assert R.class_for_path("anything", None) == "mirror"
+
+
+@pytest.mark.unit
+def test_node_participation_predicates_reuse_existing_taxonomy():
+    import ffsvolumes as V
+    # durable replica: anything but cache-only
+    assert R.is_durable_replica(V.NODE_STORAGE_BULK) is True
+    assert R.is_durable_replica(V.NODE_STORAGE_LIMITED) is True
+    assert R.is_durable_replica(V.NODE_STORAGE_CACHE_ONLY) is False
+    # placement participation: replica + shared, not the follower roles
+    assert R.participates_in_placement(V.NODE_ROLE_REPLICA) is True
+    assert R.participates_in_placement(V.NODE_ROLE_SHARED) is True
+    assert R.participates_in_placement(V.NODE_ROLE_CACHE_LIMITED) is False
+    assert R.participates_in_placement(V.NODE_ROLE_ACCESS_ONLY) is False
+    # donates storage: bulk/limited, not cache-only
+    assert R.donates_storage(V.NODE_STORAGE_BULK) is True
+    assert R.donates_storage(V.NODE_STORAGE_LIMITED) is True
+    assert R.donates_storage(V.NODE_STORAGE_CACHE_ONLY) is False

@@ -39,6 +39,22 @@ def test_suggest_backend_defaults_usb():
 
 
 @pytest.mark.unit
+def test_redundancy_defaults_to_mirror(realm):
+    data = ffssetup.load_realm(realm)
+    assert data["redundancy"] == {"default": "mirror", "overrides": {}}
+
+
+@pytest.mark.unit
+def test_set_redundancy_records_and_validates(realm):
+    norm = ffssetup.set_redundancy(
+        realm, default="rf:2", overrides={"/photos/": "rf:3", "iso": "cache"})
+    assert norm == {"default": "rf:2", "overrides": {"photos": "rf:3", "iso": "cache"}}
+    assert ffssetup.load_realm(realm)["redundancy"] == norm
+    with pytest.raises(ValueError):
+        ffssetup.set_redundancy(realm, default="rf:0")
+
+
+@pytest.mark.unit
 def test_external_disk_has_no_small_file_cap():
     # a USB/eSATA external HDD/SSD must NOT get the small-key cap
     from ffsvolumes import DEVICE_EXTERNAL

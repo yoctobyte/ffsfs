@@ -204,7 +204,14 @@ stopping for features/fixes/logs.
   drops, never last copy). Observability (dashboard replica-count / world-map /
   at-risk stats) is a prerequisite before any automatic reduction. Phase it:
   static class setting first, placement later, guarded reduction last. Full
-  design in `agents/redundancy_design.md`. Discuss before coding.
+  design in `agents/redundancy_design.md`.
+  **Phase 0 IN PROGRESS** (`ffsredundancy.py`): class model (mirror / rf:N /
+  cache) + local size/type suggestion heuristic + per-prefix class resolver +
+  realm-config `redundancy` block recorded/validated in setup (advisory, no
+  enforcement; node roles reuse the existing `node_role`/`node_storage_profile`
+  taxonomy). REMAINING for Phase 0: surface it in the setup app / dashboard
+  (operator review of suggestions). Phases 1–3 (placement, world map, guarded
+  reduction) still need design sign-off before coding.
 
 - [P3] **Fixed-port portal — DONE.** `ffsportal.py`: stdlib, loopback-only
   landing page on a fixed easy-to-remember port (0xFF5 = 4085) that lists

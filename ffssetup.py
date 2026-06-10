@@ -44,6 +44,7 @@ from ffsvolumes import (
     StoragePool,
     Volume,
 )
+import ffsredundancy
 
 
 SETUP_SCHEMA_VERSION = 1
@@ -220,6 +221,8 @@ def setup_defaults(realm: str, data: Optional[dict] = None) -> dict:
     data.setdefault("online_expectation", "unknown")
     data.setdefault("backend_policy", "minimal")
     data.setdefault("collaboration", DEFAULT_COLLABORATION)
+    data.setdefault("redundancy",
+                    {"default": ffsredundancy.DEFAULT_CLASS, "overrides": {}})
     _ensure_setup_state(data)
     return data
 
@@ -232,6 +235,24 @@ def set_collaboration(realm: str, mode: str) -> None:
     data = setup_defaults(realm, load_realm(realm))
     data["collaboration"] = mode
     _save_inactive(realm, data, "collaboration")
+
+
+def set_redundancy(realm: str, default: Optional[str] = None,
+                   overrides: Optional[dict] = None) -> dict:
+    """Record the realm's redundancy policy (default class + per-prefix
+    overrides). Intent only — Phase 0 stores and validates it; no replication
+    is enforced from it yet. Returns the normalized block. Raises ValueError on
+    an invalid class."""
+    data = setup_defaults(realm, load_realm(realm))
+    cur = dict(data.get("redundancy") or {})
+    if default is not None:
+        cur["default"] = default
+    if overrides is not None:
+        cur["overrides"] = overrides
+    norm = ffsredundancy.normalize_redundancy_config(cur)  # validates
+    data["redundancy"] = norm
+    _save_inactive(realm, data, "redundancy")
+    return norm
 
 
 def create_realm_config(
@@ -591,6 +612,11 @@ def validate_realm(realm: str) -> List[ValidationIssue]:
         issues.append(ValidationIssue("error", f"invalid storage pool: {e}"))
     if data.get("peer_trust") == "manual" and not data.get("approved_peers"):
         issues.append(ValidationIssue("warning", "manual peer trust has no approved peers"))
+    if data.get("redundancy") is not None:
+        try:
+            ffsredundancy.normalize_redundancy_config(data.get("redundancy"))
+        except ValueError as e:
+            issues.append(ValidationIssue("error", f"invalid redundancy config: {e}"))
     return issues
 
 

@@ -76,6 +76,13 @@ Implication: "is this node a replica holder for H" is a property the holder
 advertises, but the *decision* to place can come from any coordinator. Passive
 nodes are pure followers of hints.
 
+**Implementation note (Phase 0):** these abstractions are NOT a new config
+taxonomy — they are derived from the existing `node_role` /
+`node_storage_profile` / `node_availability` fields in realm-config (defined in
+`ffsvolumes`). `ffsredundancy.participates_in_placement` / `donates_storage` /
+`is_durable_replica` are pure predicates over those existing settings. The
+on-demand/cold tier (§5) likewise reuses `node_availability`.
+
 ## 4. The world map (approximate, never a perfect ledger)
 
 Redundancy needs replica-count awareness, but a perfect global, consistent

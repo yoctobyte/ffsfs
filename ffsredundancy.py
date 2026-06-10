@@ -22,6 +22,14 @@ import math
 import os
 from typing import Optional, Tuple
 
+from ffsvolumes import (
+    NODE_ROLE_REPLICA,
+    NODE_ROLE_SHARED,
+    NODE_STORAGE_BULK,
+    NODE_STORAGE_CACHE_ONLY,
+    NODE_STORAGE_LIMITED,
+)
+
 # ---- class model ------------------------------------------------------------
 
 CLASS_MIRROR = "mirror"
@@ -31,12 +39,28 @@ CLASS_RF_PREFIX = "rf:"          # concrete classes are "rf:1", "rf:2", ...
 DEFAULT_RF = 2                    # default target copies when unspecified
 MAX_SUGGESTED_RF = 3             # heuristic never suggests more than this
 
-# Node roles (Phase 0 records them; behavior is later phases).
-ROLE_COORDINATOR = "coordinator"  # full participant: tracks holdings, places copies
-ROLE_DONOR = "donor"              # offers storage + follows backup hints, no placement
-ROLE_CACHE_ONLY = "cache-only"    # keeps nothing durable; never a replica
-NODE_ROLES = {ROLE_COORDINATOR, ROLE_DONOR, ROLE_CACHE_ONLY}
-DEFAULT_NODE_ROLE = ROLE_COORDINATOR
+
+# ---- node participation (interprets the EXISTING node taxonomy) -------------
+# The design doc talks about coordinator / donor / cache-only nodes. Rather than
+# add a second, competing taxonomy, Phase 0 derives that participation from the
+# node_role / node_storage_profile already in realm-config (defined in
+# ffsvolumes). These are pure predicates — they decide nothing yet, they only
+# interpret existing settings for later placement code.
+
+def is_durable_replica(storage_profile: str) -> bool:
+    """A node holds durable replicas (counts toward RF) unless it is cache-only."""
+    return storage_profile != NODE_STORAGE_CACHE_ONLY
+
+
+def participates_in_placement(node_role: str) -> bool:
+    """A coordinator-class node that may place/track copies. Replica and shared
+    storage nodes participate; access-only / cache-limited nodes are followers."""
+    return node_role in (NODE_ROLE_REPLICA, NODE_ROLE_SHARED)
+
+
+def donates_storage(storage_profile: str) -> bool:
+    """Node offers storage for redundant copies (bulk or limited, not cache-only)."""
+    return storage_profile in (NODE_STORAGE_BULK, NODE_STORAGE_LIMITED)
 
 
 def parse_rf(spec: str) -> Optional[int]:
@@ -142,3 +166,40 @@ def suggest_class(logical_name: str, size: int) -> Tuple[str, str]:
     if imp >= 0.12:
         return f"{CLASS_RF_PREFIX}1", f"low-priority {kind} file ({tag}) → keep 1 copy"
     return CLASS_CACHE, f"large {kind} file ({tag}) → cache-only (re-fetchable)"
+
+
+# ---- per-realm / per-prefix redundancy config -------------------------------
+# Recorded in realm-config under "redundancy":
+#   {"default": "mirror", "overrides": {"photos": "rf:3", "iso": "cache"}}
+# Phase 0 stores and resolves it; enforcement is a later phase. "mirror" stays
+# the default so behavior is unchanged until an operator opts into rf:/cache.
+
+DEFAULT_CLASS = CLASS_MIRROR
+
+
+def _norm_prefix(prefix: str) -> str:
+    return (prefix or "").strip().strip("/")
+
+
+def normalize_redundancy_config(cfg: Optional[dict]) -> dict:
+    """Validate + canonicalize a redundancy config block. Raises ValueError on a
+    bad class. Returns {"default": <class>, "overrides": {prefix: class}}."""
+    cfg = cfg or {}
+    default = normalize_class(cfg.get("default", DEFAULT_CLASS))
+    overrides = {}
+    for prefix, spec in (cfg.get("overrides") or {}).items():
+        overrides[_norm_prefix(prefix)] = normalize_class(spec)
+    return {"default": default, "overrides": overrides}
+
+
+def class_for_path(vpath: str, cfg: Optional[dict]) -> str:
+    """Resolve the effective redundancy class for a vpath. Longest matching
+    prefix override wins; otherwise the configured default."""
+    norm = normalize_redundancy_config(cfg)
+    vp = _norm_prefix(vpath)
+    best_prefix, best_cls = None, norm["default"]
+    for prefix, cls in norm["overrides"].items():
+        if vp == prefix or (prefix and vp.startswith(prefix + "/")):
+            if best_prefix is None or len(prefix) > len(best_prefix):
+                best_prefix, best_cls = prefix, cls
+    return best_cls
