@@ -200,10 +200,18 @@ class SyncWorker:
                 newest_name, newest_ts = self._newest_non_delete(versions)
                 any_name, any_ts = self._newest_any(versions)
                 if newest_name is not None and newest_ts >= any_ts:
+                    # Non-mirror classes are managed by placement / fetch-on-
+                    # demand, never by blind pull (design §9.11/§12.5) —
+                    # otherwise active pull would resurrect reduced copies and
+                    # drag cache-class blobs onto every node.
+                    if not (vpath.startswith(NODE_STATUS_DIR + "/")
+                            or self._is_mirror_class(vpath)):
+                        continue
                     cur = remote_best.get(vpath)
                     if cur is None or newest_ts > cur[0]:
                         remote_best[vpath] = (newest_ts, newest_name)
                 elif any_name is not None:
+                    # tombstones always propagate (delete correctness)
                     cur = remote_tombstones.get(vpath)
                     if cur is None or any_ts > cur[0]:
                         remote_tombstones[vpath] = (any_ts, any_name)
@@ -263,6 +271,20 @@ class SyncWorker:
                 "failed": failed, "skipped_backoff": skipped_backoff,
                 "tombstones_written": tombstones_written,
                 "conflicts": len(self._conflicts)}
+
+    def _is_mirror_class(self, vpath: str) -> bool:
+        """Resolved redundancy class for vpath is mirror (= blind-pull is the
+        intended behavior). When no placement worker / config is registered,
+        everything is mirror — today's behavior unchanged."""
+        worker = getattr(self.peers, "_placement_worker", None) if self.peers else None
+        cfg = getattr(worker, "cfg", None)
+        if not cfg:
+            return True
+        try:
+            import ffsredundancy
+            return ffsredundancy.class_for_path(vpath, cfg) == ffsredundancy.CLASS_MIRROR
+        except Exception:
+            return True  # never let a bad config stop mirror sync
 
     def _record_failure(self, vpath: str, error: str) -> None:
         now = time.time()

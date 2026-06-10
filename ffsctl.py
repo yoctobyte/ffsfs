@@ -869,6 +869,83 @@ def cmd_ratelimit(args):
         print(f"Set rate_limits.{key} = {v}")
 
 
+def cmd_redundancy_reduce(args):
+    """Guarded reduction (redundancy design §12): ask the RUNNING node to plan
+    (dry-run) or apply dropping surplus local copies of rf:N files. The node
+    enforces every guard (fresh confirms, margin, serialized dropper,
+    availability floor); this command is just the operator's trigger."""
+    realm = args.realm
+    data = _load_realm_config(realm)
+    if not data:
+        print(f"No config found for realm '{realm}'. Run: ffsctl realm init {realm}")
+        return
+    port = data.get("port")
+    if not port:
+        print(f"Realm '{realm}' has no port in its config — is the node set up?")
+        return
+
+    path = "/redundancy/reduce"
+    params = {}
+    if args.margin is not None:
+        params["margin"] = str(args.margin)
+    if args.limit is not None:
+        params["limit"] = str(args.limit)
+    method = "POST" if args.apply else "GET"
+    headers = {}
+    secret = data.get("realm_secret")
+    if secret:
+        from ffspeer_auth import sign_request
+        node_name = (data.get("node_name")
+                     or os.environ.get("FFSFS_NODE_NAME")
+                     or os.environ.get("FFSFS_HOSTNAME")
+                     or socket.gethostname())
+        headers = sign_request(secret, method, path, params, b"", realm, node_name)
+    try:
+        r = requests.request(method, f"http://127.0.0.1:{port}{path}",
+                             params=params, headers=headers, timeout=120)
+    except Exception as e:
+        print(f"Cannot reach the local node on port {port}: {e}")
+        print("Reduction requires the node to be running (it must answer "
+              "fresh /has-hashes confirms and fix its index in-process).")
+        return
+    if r.status_code != 200:
+        print(f"Node refused ({r.status_code}): {r.text.strip()}")
+        return
+    res = r.json()
+
+    if not args.apply:
+        cands = res.get("candidates") or []
+        print(f"Reduction DRY-RUN (margin={res.get('margin')}, "
+              f"limit={res.get('limit')}) — nothing was deleted.")
+        if not cands:
+            print("No local copies are eligible to drop.")
+        for c in cands:
+            pin = " [pinned]" if c.get("pinned") else ""
+            print(f"  DROPPABLE {c['vpath']}  "
+                  f"confirmed={c['confirmed']} target={c['target']}{pin}")
+        skipped = res.get("skipped") or []
+        if skipped:
+            print(f"Skipped ({len(skipped)} shown):")
+            for s in skipped:
+                print(f"  keep {s.get('vpath', '?')}: {s.get('reason')}")
+        if cands:
+            print(f"\nTo drop these local copies: "
+                  f"ffsctl redundancy-reduce {realm} --apply")
+        return
+
+    dropped = res.get("dropped") or []
+    print(f"Reduction APPLIED (margin={res.get('margin')}).")
+    for d in dropped:
+        print(f"  dropped {d['vpath']} ({d.get('freed_bytes', 0)} bytes)")
+    print(f"Dropped {len(dropped)} local copies, "
+          f"freed {res.get('freed_bytes', 0)} bytes.")
+    skipped = res.get("skipped") or []
+    if skipped:
+        print(f"Skipped ({len(skipped)} shown):")
+        for s in skipped:
+            print(f"  keep {s.get('vpath', '?')}: {s.get('reason')}")
+
+
 # --------------------- fallback direct run --------------------
 
 def fallback_run(argv):
@@ -962,6 +1039,21 @@ def main():
     srl.add_argument("key", nargs="?", help="rate-limit key (disk_fg_bps|disk_bg_bps|net_fg_bps|net_bg_bps)")
     srl.add_argument("value", nargs="?", help="bytes/sec (for set)")
     srl.set_defaults(func=cmd_ratelimit)
+
+    srr = sub.add_parser(
+        "redundancy-reduce",
+        help="guarded reduction of surplus rf:N copies on THIS node "
+             "(dry-run by default; --apply deletes local copies)")
+    srr.add_argument("realm", help="realm name")
+    srr.add_argument("--apply", action="store_true",
+                     help="actually drop the eligible local copies "
+                          "(default: dry-run plan only)")
+    srr.add_argument("--margin", type=int, default=None,
+                     help="hysteresis margin: drop only when confirmed copies "
+                          ">= target + margin (default 2, min 1)")
+    srr.add_argument("--limit", type=int, default=None,
+                     help="max copies to drop in one run (default 20)")
+    srr.set_defaults(func=cmd_redundancy_reduce)
 
     args, rest = ap.parse_known_args()
 

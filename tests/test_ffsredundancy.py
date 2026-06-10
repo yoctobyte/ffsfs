@@ -735,3 +735,167 @@ def test_worker_counts_domain_conflict_when_forced_same_host():
     stats = w.run_reconcile_once()
     assert stats["hints_sent"] == 1
     assert stats["domain_conflicts"] == 1
+
+
+# ---- Phase 3: guarded reduction (§12) -----------------------------------------
+
+@pytest.mark.unit
+def test_evaluate_reduction_guards():
+    import ffsvolumes as V
+    H = lambda nid, tier=None: {"node_id": nid, "availability": tier}
+    # margin hysteresis: rf:1 + margin 2 needs 3 confirmed copies
+    ok, why = R.evaluate_reduction("zz", [H("aa"), H("zz")], 1, margin=2)
+    assert not ok and "only 2" in why
+    ok, _ = R.evaluate_reduction("zz", [H("aa"), H("bb"), H("zz")], 1, margin=2)
+    assert ok
+    # serialized dropper: only the HIGHEST node_id drops a round
+    ok, why = R.evaluate_reduction("aa", [H("aa"), H("bb"), H("zz")], 1, margin=2)
+    assert not ok and "zz" in why
+    # availability floor: the only always-on holder never drops
+    ok, why = R.evaluate_reduction(
+        "zz", [H("aa"), H("bb"), H("zz", V.NODE_AVAILABILITY_ALWAYS_ON)],
+        1, margin=2)
+    assert not ok and "availability floor" in why
+    # ...but may drop when another always-on holder remains
+    ok, _ = R.evaluate_reduction(
+        "zz", [H("aa", V.NODE_AVAILABILITY_ALWAYS_ON), H("bb"),
+               H("zz", V.NODE_AVAILABILITY_ALWAYS_ON)], 1, margin=2)
+    assert ok
+    # non-rf classes are never reduced; non-holders never drop
+    assert R.evaluate_reduction("zz", [H("zz")], None, 2)[0] is False
+    assert R.evaluate_reduction("zz", [H("zz")], 0, 2)[0] is False
+    assert R.evaluate_reduction("me", [H("aa"), H("bb"), H("zz")], 1, 2)[0] is False
+    # margin floor: margin 0 is clamped to 1
+    ok, _ = R.evaluate_reduction("zz", [H("aa"), H("zz")], 1, margin=0)
+    assert ok  # 2 >= 1 + 1
+
+
+class ReducPeers(FakePeersModule):
+    """FakePeersModule + the reduction surface (drop/unpin/pins)."""
+
+    def __init__(self, *a, pinned=(), confirm_script=None, **kw):
+        super().__init__(*a, **kw)
+        self._pinned = set(pinned)
+        self.unpinned = []
+        self.drops = []
+        self._confirm_script = list(confirm_script or [])
+
+    def pinned_hashes(self):
+        return set(self._pinned)
+
+    def unpin_hash(self, h):
+        self.unpinned.append(h)
+        self._pinned.discard(h)
+        return True
+
+    def drop_local_version(self, vpath, name):
+        self.drops.append((vpath, name))
+        return {"removed": 1, "bytes": 7}
+
+    def confirm_held_hashes(self, addr, hashes):
+        if self._confirm_script:
+            resp = self._confirm_script.pop(0)
+            if resp is None:
+                return None
+            return {"node_id": resp["node_id"],
+                    "held": set(resp["held"]) & set(hashes)}
+        return super().confirm_held_hashes(addr, hashes)
+
+
+RF1_CFG = {"default": "mirror", "overrides": {"docs": "rf:1"}}
+
+
+@pytest.mark.unit
+def test_plan_reduction_dry_run_touches_nothing():
+    chash = "C" * 16
+    peers = ReducPeers(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        self_id="zz-self",   # highest holder -> this round's dropper
+        peers=["10.0.0.2:1", "10.0.0.3:1"],
+        confirms={"10.0.0.2:1": {"node_id": "aa-peer", "held": {chash}},
+                  "10.0.0.3:1": {"node_id": "bb-peer", "held": {chash}}},
+        pinned=[chash])
+    w = R.PlacementWorker(peers, RF1_CFG)
+    plan = w.plan_reduction()
+    assert len(plan["candidates"]) == 1
+    c = plan["candidates"][0]
+    assert c["vpath"] == "docs/a.txt" and c["confirmed"] == 3
+    assert c["pinned"] is True
+    assert peers.drops == [] and peers.unpinned == []   # dry-run
+
+
+@pytest.mark.unit
+def test_plan_reduction_skips_local_history_and_low_margin():
+    chash, old = "C" * 16, "D" * 16
+    peers = ReducPeers(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", old, ts=50),
+                        _idx_entry("docs/a.txt", chash, ts=100)],
+         "docs/b.txt": [_idx_entry("docs/b.txt", "E" * 16)]},
+        self_id="zz-self",
+        peers=["10.0.0.2:1"],
+        confirms={"10.0.0.2:1": {"node_id": "aa-peer",
+                                 "held": {chash, "E" * 16}}})
+    w = R.PlacementWorker(peers, RF1_CFG)
+    plan = w.plan_reduction()
+    assert plan["candidates"] == []
+    reasons = {s["vpath"]: s["reason"] for s in plan["skipped"]}
+    assert "history" in reasons["docs/a.txt"]
+    assert "only 2" in reasons["docs/b.txt"]   # needs >= 1+2 confirmed
+
+
+@pytest.mark.unit
+def test_apply_reduction_drops_unpins_and_logs():
+    chash = "C" * 16
+    peers = ReducPeers(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        self_id="zz-self",
+        peers=["10.0.0.2:1", "10.0.0.3:1"],
+        confirms={"10.0.0.2:1": {"node_id": "aa-peer", "held": {chash}},
+                  "10.0.0.3:1": {"node_id": "bb-peer", "held": {chash}}},
+        pinned=[chash])
+    w = R.PlacementWorker(peers, RF1_CFG)
+    stats = w.apply_reduction()
+    assert len(stats["dropped"]) == 1
+    assert stats["freed_bytes"] == 7
+    assert len(peers.drops) == 1
+    assert peers.drops[0][0] == "docs/a.txt"
+    assert peers.unpinned == [chash]
+    assert w.status()["recent"][-1]["result"] == "reduced"
+
+
+@pytest.mark.unit
+def test_apply_reduction_reconfirm_failure_aborts_drop():
+    chash = "C" * 16
+    # plan round: both peers confirm (3 copies). re-confirm round: one peer
+    # vanished -> only 2 copies -> the drop MUST be aborted.
+    script = [
+        {"node_id": "aa-peer", "held": {chash}},   # plan, peer 1
+        {"node_id": "bb-peer", "held": {chash}},   # plan, peer 2
+        {"node_id": "aa-peer", "held": {chash}},   # re-confirm, peer 1
+        None,                                       # re-confirm, peer 2 gone
+    ]
+    peers = ReducPeers(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        self_id="zz-self",
+        peers=["10.0.0.2:1", "10.0.0.3:1"],
+        confirm_script=script)
+    w = R.PlacementWorker(peers, RF1_CFG)
+    stats = w.apply_reduction()
+    assert stats["dropped"] == []
+    assert peers.drops == [] and peers.unpinned == []
+    assert any("re-confirm" in s.get("reason", "") for s in stats["skipped"])
+
+
+@pytest.mark.unit
+def test_reduction_never_runs_from_the_sweep():
+    chash = "C" * 16
+    peers = ReducPeers(   # wildly over-replicated rf:1
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        self_id="zz-self",
+        peers=["10.0.0.2:1", "10.0.0.3:1"],
+        confirms={"10.0.0.2:1": {"node_id": "aa-peer", "held": {chash}},
+                  "10.0.0.3:1": {"node_id": "bb-peer", "held": {chash}}})
+    w = R.PlacementWorker(peers, RF1_CFG)
+    stats = w.run_reconcile_once()
+    assert stats["over"] == 1          # flagged...
+    assert peers.drops == []           # ...but the sweep never deletes

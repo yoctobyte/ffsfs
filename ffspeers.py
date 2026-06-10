@@ -2423,6 +2423,14 @@ def _load_pinned_locked() -> None:
     _pinned_loaded = True
 
 
+def _save_pinned_locked() -> None:
+    _ensure_storage_dir()
+    tmp = _pinned_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"pinned": sorted(_pinned_hashes)}, f, indent=1)
+    os.replace(tmp, _pinned_path())
+
+
 def pin_hash(content_hash: str) -> None:
     """Persistently pin a content hash (idempotent)."""
     content_hash = (content_hash or "").strip()
@@ -2433,11 +2441,20 @@ def pin_hash(content_hash: str) -> None:
         if content_hash in _pinned_hashes:
             return
         _pinned_hashes.add(content_hash)
-        _ensure_storage_dir()
-        tmp = _pinned_path() + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"pinned": sorted(_pinned_hashes)}, f, indent=1)
-        os.replace(tmp, _pinned_path())
+        _save_pinned_locked()
+
+
+def unpin_hash(content_hash: str) -> bool:
+    """Remove a pin. ONLY the operator-gated reduction path (design §12.3)
+    calls this — nothing automatic ever unpins. Returns True if it was pinned."""
+    content_hash = (content_hash or "").strip()
+    with _pinned_lock:
+        _load_pinned_locked()
+        if content_hash not in _pinned_hashes:
+            return False
+        _pinned_hashes.discard(content_hash)
+        _save_pinned_locked()
+    return True
 
 
 def pinned_hashes() -> set:
@@ -2561,6 +2578,68 @@ def replicate_hint():
         return jsonify({"error": "pull failed"}), 502
     pin_hash(chash)
     return jsonify({"ok": True, "pulled": True})
+
+
+def drop_local_version(vpath: str, versioned_name: str) -> dict:
+    """Reduction (§12.3): remove this node's copies of one exact versioned
+    file from the local data roots and fix the in-memory index immediately, so
+    /has-hashes and holdings stop advertising the copy the moment it is gone.
+    Validates the name and rejects traversal. Returns {"removed", "bytes"}."""
+    parsed = parse_versioned_filename(versioned_name)
+    if not parsed or parsed["logical_name"] != (vpath or "").strip().strip("/"):
+        raise ValueError(f"not a versioned file of {vpath!r}: {versioned_name!r}")
+    parts = versioned_name.replace("\\", "/").split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise ValueError(f"bad path: {versioned_name!r}")
+    removed = 0
+    freed = 0
+    for base in _local_data_roots():
+        full = os.path.abspath(os.path.join(base, versioned_name))
+        if os.path.commonpath([base, full]) != base:
+            raise ValueError("path escapes base")
+        if not os.path.exists(full):
+            continue
+        try:
+            size = os.path.getsize(full)
+        except OSError:
+            size = 0
+        os.remove(full)
+        removed += 1
+        freed += size
+    lst = _local_file_index.get(vpath)
+    if lst is not None:
+        lst[:] = [e for e in lst if e.get("name") != versioned_name]
+        if not lst:
+            _local_file_index.pop(vpath, None)
+    if removed:
+        ffslog.warn(f"reduction dropped local copy {versioned_name} "
+                    f"({freed} bytes)", source="redundancy")
+    return {"removed": removed, "bytes": freed}
+
+
+@app.route("/redundancy/reduce", methods=["GET", "POST"])
+def redundancy_reduce():
+    """Phase 3 guarded reduction (design §12.4). Operator-only: loopback-gated
+    even when HMAC is on — a peer must never be able to trigger local copy
+    drops. GET = dry-run plan, POST = apply (margin/limit query params)."""
+    if not _is_loopback_request():
+        return jsonify({"error": "reduction is operator-only (loopback)"}), 403
+    if _placement_worker is None:
+        return jsonify({"error": "placement worker not registered"}), 503
+
+    def _num(name):
+        v = request.values.get(name)
+        try:
+            return int(v) if v else None
+        except (TypeError, ValueError):
+            return None
+
+    margin, limit = _num("margin"), _num("limit")
+    if request.method == "GET":
+        return jsonify(_placement_worker.plan_reduction(margin=margin,
+                                                        limit=limit))
+    return jsonify(_placement_worker.apply_reduction(margin=margin,
+                                                     limit=limit))
 
 
 def send_replicate_hint(peer: str, vpath: str, suffix: str, content_hash: str,

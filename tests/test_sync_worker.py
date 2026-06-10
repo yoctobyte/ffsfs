@@ -553,3 +553,27 @@ def test_eviction_skips_pass_when_pin_set_unreadable(tmp_path, monkeypatch):
     worker = SyncWorker(pool_backend, peers, policy, None)
     assert worker.run_eviction_once() == {"removed": 0, "freed": 0}
     assert os.path.exists(old_path)
+
+
+@pytest.mark.unit
+def test_active_pull_skips_non_mirror_classes(tmp_path):
+    """§12.5: blind pull must not resurrect reduced rf:N copies or drag
+    cache-class blobs around. Mirror paths (and node-status) still pull."""
+    backend, _ = _make_backend(tmp_path)
+    peers = FakePeers(peer_cache={
+        "peerA": {"files": {
+            "docs/managed.txt": [{"name": "managed.txt.AAAAAAAA.write.0.500"}],
+            "iso/big.iso": [{"name": "big.iso.BBBBBBBB.write.0.500"}],
+            "plain.txt": [{"name": "plain.txt.CCCCCCCC.write.0.500"}],
+        }},
+    })
+    peers._placement_worker = types.SimpleNamespace(
+        cfg={"default": "mirror",
+             "overrides": {"docs": "rf:2", "iso": "cache"}})
+    policy = SyncPolicy.for_role(NODE_ROLE_REPLICA)
+    worker = SyncWorker(backend, peers, policy, None)
+    worker.run_active_once()
+    fetched = [v for v, _ts, _f in peers.fetch_calls]
+    assert "plain.txt" in fetched          # mirror still pulls
+    assert "docs/managed.txt" not in fetched   # placement's job
+    assert "iso/big.iso" not in fetched        # fetch-on-demand only

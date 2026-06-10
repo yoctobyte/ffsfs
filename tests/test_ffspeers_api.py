@@ -927,3 +927,72 @@ def test_pull_versioned_file_rejects_traversal(peer_client):
     _client, _ = peer_client
     name = build_versioned_filename("evil.txt", _ch(b"x"), "write", 100)
     assert ffspeers.pull_versioned_file("peerX", f"../{name}") is None
+
+
+# ---- reduction surface (redundancy Phase 3) ----------------------------------
+
+@pytest.mark.unit
+def test_unpin_hash(pin_state):
+    ffspeers.pin_hash("KEEP")
+    ffspeers.pin_hash("DROP")
+    assert ffspeers.unpin_hash("DROP") is True
+    assert ffspeers.unpin_hash("DROP") is False   # already gone
+    assert ffspeers.pinned_hashes() == {"KEEP"}
+    # persisted: a "restart" still sees the unpin
+    ffspeers._pinned_hashes = set()
+    ffspeers._pinned_loaded = False
+    assert ffspeers.pinned_hashes() == {"KEEP"}
+
+
+@pytest.mark.unit
+def test_drop_local_version_removes_file_and_fixes_index(peer_client):
+    _client, data_path = peer_client
+    payload = b"surplus copy"
+    name = build_versioned_filename("docs/a.txt", _ch(payload), "write", 100)
+    full = os.path.join(str(data_path), name)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "wb") as f:
+        f.write(payload)
+    ffspeers._local_file_index = {"docs/a.txt": [{"name": name, "size": 12}]}
+    res = ffspeers.drop_local_version("docs/a.txt", name)
+    assert res == {"removed": 1, "bytes": 12}
+    assert not os.path.exists(full)
+    assert "docs/a.txt" not in ffspeers._local_file_index  # index fixed live
+
+
+@pytest.mark.unit
+def test_drop_local_version_rejects_bad_names(peer_client):
+    name = build_versioned_filename("a.txt", _ch(b"x"), "write", 100)
+    with pytest.raises(ValueError):
+        ffspeers.drop_local_version("a.txt", f"../{name}")
+    with pytest.raises(ValueError):
+        ffspeers.drop_local_version("other.txt", name)  # name/vpath mismatch
+    with pytest.raises(ValueError):
+        ffspeers.drop_local_version("a.txt", "not-versioned")
+
+
+@pytest.mark.unit
+def test_reduce_route_is_loopback_only_and_needs_worker(peer_client, monkeypatch):
+    client, _ = peer_client
+    # remote callers are always refused, HMAC or not
+    resp = client.get("/redundancy/reduce",
+                      environ_overrides={"REMOTE_ADDR": "10.0.0.9"})
+    assert resp.status_code == 403
+    # loopback but no worker registered
+    monkeypatch.setattr(ffspeers, "_placement_worker", None)
+    assert client.get("/redundancy/reduce").status_code == 503
+
+    calls = []
+
+    class FakeWorker:
+        def plan_reduction(self, margin=None, limit=None):
+            calls.append(("plan", margin, limit))
+            return {"candidates": [], "skipped": [], "margin": margin or 2}
+        def apply_reduction(self, margin=None, limit=None):
+            calls.append(("apply", margin, limit))
+            return {"dropped": [], "skipped": [], "freed_bytes": 0}
+
+    monkeypatch.setattr(ffspeers, "_placement_worker", FakeWorker())
+    assert client.get("/redundancy/reduce?margin=3").status_code == 200
+    assert client.post("/redundancy/reduce?limit=5").status_code == 200
+    assert calls == [("plan", 3, None), ("apply", None, 5)]

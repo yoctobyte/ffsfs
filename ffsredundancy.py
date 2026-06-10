@@ -587,6 +587,50 @@ def evaluate_placement(holders: Iterable[dict], target: int,
     }
 
 
+# ---- Phase 3: guarded reduction eligibility (design §12.2) -------------------
+# Reduction is a DELETE. Counting here uses ONLY holders confirmed online in
+# this run — never the world map, never graced cold holders (cold counts
+# against adding, never toward dropping).
+
+DEFAULT_REDUCTION_MARGIN = 2     # drop-eligible only at target + margin
+MAX_REDUCTION_DROPS_PER_RUN = 20
+
+
+def evaluate_reduction(self_id: str, holders: Iterable[dict], target:
+                       Optional[int], margin: int = DEFAULT_REDUCTION_MARGIN
+                       ) -> Tuple[bool, str]:
+    """May THIS node drop its copy of one hash this round? `holders` are the
+    holders confirmed online in THIS run (incl. self): [{node_id,
+    availability?}]. Returns (eligible, reason). Guards per §12.2:
+    rf class only; C >= target+margin hysteresis; only the HIGHEST node_id
+    holder drops a round (serialized — placement's owner is the lowest);
+    never break the availability floor; never the last copy."""
+    margin = max(1, int(margin))
+    if not target or int(target) < 1:
+        return False, "class is not rf:N — nothing to reduce"
+    target = int(target)
+    recs = [h for h in (holders or ()) if str(h.get("node_id") or "").strip()]
+    ids = sorted(str(h["node_id"]) for h in recs)
+    self_id = str(self_id)
+    if self_id not in ids:
+        return False, "this node is not a confirmed holder"
+    c = len(ids)
+    if c - 1 < 1:
+        return False, "never the last copy"
+    if c < target + margin:
+        return False, (f"only {c} confirmed online copies "
+                       f"(drop needs >= {target + margin})")
+    if ids[-1] != self_id:
+        return False, f"not this round's dropper (that is {ids[-1]})"
+    self_always_on = any(is_always_on(h.get("availability"))
+                         for h in recs if str(h["node_id"]) == self_id)
+    if self_always_on and not any(
+            is_always_on(h.get("availability"))
+            for h in recs if str(h["node_id"]) != self_id):
+        return False, "would break the availability floor (only always-on copy)"
+    return True, "eligible"
+
+
 # ---- Phase 1: placement worker (reconcile sweep + commit nudges) -------------
 
 DEFAULT_RECONCILE_INTERVAL_SECS = 300
@@ -718,10 +762,14 @@ class PlacementWorker:
             target = placement_target(class_for_path(vpath, self.cfg))
             if not target:
                 continue
+            local_versions = sum(
+                1 for v in versions or ()
+                if parse_versioned_filename(v.get("name", "")))
             cur = work.get(chash)
             if cur is None or target > cur["target"]:
                 work[chash] = {"vpath": vpath, "name": name, "size": size,
-                               "target": target}
+                               "target": target,
+                               "local_versions": local_versions}
         return work
 
     def _node_meta(self) -> Dict[str, dict]:
@@ -917,4 +965,137 @@ class PlacementWorker:
         stats["at_risk"] = at_risk
         with self._lock:
             self._last_stats = stats
+        return stats
+
+    # Phase 3: guarded reduction (§12). Operator-gated only — the sweep NEVER
+    # calls these; they run via the loopback /redundancy/reduce route.
+
+    def _confirm_round(self, hashes: Set[str]
+                       ) -> Tuple[Dict[str, Set[str]], Dict[str, str]]:
+        """Fresh bulk confirms for `hashes` against every known peer:
+        ({hash: online holder node_ids incl. self}, {node_id: addr})."""
+        peers = self.peers
+        self_id = str(getattr(peers, "_INSTANCE_ID", "") or "")
+        holders: Dict[str, Set[str]] = {h: {self_id} for h in hashes}
+        addr_by_node: Dict[str, str] = {}
+        for addr in list(getattr(peers, "_known_peers", []) or []):
+            resp = peers.confirm_held_hashes(addr, set(hashes))
+            if resp is None:
+                continue
+            nid = str(resp.get("node_id") or "").strip()
+            if not nid or nid == self_id:
+                continue
+            addr_by_node[nid] = addr
+            for h in resp.get("held") or ():
+                if h in holders:
+                    holders[h].add(nid)
+        return holders, addr_by_node
+
+    def _holder_records(self, node_ids: Iterable[str], self_id: str,
+                        meta: Dict[str, dict], selfp: dict) -> List[dict]:
+        return [{"node_id": nid,
+                 "availability": (selfp.get("availability") if nid == self_id
+                                  else meta.get(nid, {}).get("availability"))}
+                for nid in node_ids]
+
+    def plan_reduction(self, margin: Optional[int] = None,
+                       limit: Optional[int] = None) -> dict:
+        """Dry-run (§12.3): which local copies COULD this node drop, and why
+        not for the rest. Touches nothing. Counting is fresh confirms only."""
+        margin = max(1, int(margin or DEFAULT_REDUCTION_MARGIN))
+        limit = max(1, int(limit or MAX_REDUCTION_DROPS_PER_RUN))
+        out = {"at": int(time.time()), "margin": margin, "limit": limit,
+               "candidates": [], "skipped": []}
+        self_id = str(getattr(self.peers, "_INSTANCE_ID", "") or "")
+        if not self.has_rf_targets() or not self_id:
+            return out
+        work = self._rf_targeted_work()
+        if not work:
+            return out
+        holders, _addrs = self._confirm_round(set(work))
+        meta = self._node_meta()
+        selfp = self._self_profile()
+        try:
+            pinned = self.peers.pinned_hashes() or set()
+        except Exception:
+            pinned = set()
+        for chash, info in sorted(work.items(), key=lambda kv: kv[1]["vpath"]):
+            row = {"vpath": info["vpath"], "hash": chash,
+                   "target": info["target"], "margin": margin,
+                   "confirmed": len(holders[chash]),
+                   "pinned": chash in pinned}
+            if info.get("local_versions", 1) != 1:
+                row["reason"] = ("local history present — let eviction clear "
+                                 "old versions first")
+                out["skipped"].append(row)
+                continue
+            ok, reason = evaluate_reduction(
+                self_id, self._holder_records(holders[chash], self_id,
+                                              meta, selfp),
+                info["target"], margin)
+            if ok and len(out["candidates"]) < limit:
+                out["candidates"].append(row)
+            else:
+                row["reason"] = reason if not ok else "over per-run limit"
+                out["skipped"].append(row)
+        out["skipped"] = out["skipped"][:50]
+        return out
+
+    def apply_reduction(self, margin: Optional[int] = None,
+                        limit: Optional[int] = None) -> dict:
+        """Apply the plan, serialized: each candidate is RE-CONFIRMED fresh
+        against every known peer immediately before its drop (§12.3 — a stale
+        plan is discarded, never trusted), then the local copy is removed, the
+        index fixed in-process, and the hash unpinned. Add-only machinery is
+        untouched; this is the only code path that deletes anything."""
+        margin = max(1, int(margin or DEFAULT_REDUCTION_MARGIN))
+        limit = max(1, int(limit or MAX_REDUCTION_DROPS_PER_RUN))
+        plan = self.plan_reduction(margin=margin, limit=limit)
+        stats = {"at": int(time.time()), "margin": margin,
+                 "dropped": [], "skipped": list(plan["skipped"]),
+                 "freed_bytes": 0}
+        self_id = str(getattr(self.peers, "_INSTANCE_ID", "") or "")
+        work = self._rf_targeted_work()
+        meta = self._node_meta()
+        selfp = self._self_profile()
+        for cand in plan["candidates"]:
+            chash = cand["hash"]
+            info = work.get(chash)
+            if not info or info["vpath"] != cand["vpath"]:
+                cand["reason"] = "changed since planning"
+                stats["skipped"].append(cand)
+                continue
+            holders, _addrs = self._confirm_round({chash})
+            ok, reason = evaluate_reduction(
+                self_id, self._holder_records(holders[chash], self_id,
+                                              meta, selfp),
+                info["target"], margin)
+            if not ok:
+                cand["reason"] = f"re-confirm: {reason}"
+                stats["skipped"].append(cand)
+                continue
+            try:
+                res = self.peers.drop_local_version(info["vpath"], info["name"])
+            except Exception as e:
+                cand["reason"] = f"drop failed: {e}"
+                stats["skipped"].append(cand)
+                continue
+            if not res or int(res.get("removed", 0)) < 1:
+                cand["reason"] = "no local file found"
+                stats["skipped"].append(cand)
+                continue
+            try:
+                self.peers.unpin_hash(chash)
+            except Exception:
+                pass  # a pin without a file is harmless; never blocks the drop
+            freed = int(res.get("bytes", 0))
+            stats["freed_bytes"] += freed
+            stats["dropped"].append({"vpath": info["vpath"], "hash": chash,
+                                     "freed_bytes": freed})
+            with self._lock:
+                self._recent.append({"at": int(time.time()),
+                                     "vpath": info["vpath"], "hash": chash,
+                                     "donor": self_id, "ok": True,
+                                     "result": "reduced"})
+        stats["skipped"] = stats["skipped"][:50]
         return stats
