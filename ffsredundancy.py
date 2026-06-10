@@ -18,14 +18,18 @@ usually the important, irreplaceable ones: source, photos, docs, configs; huge
 files are usually regenerable: ISOs, models, video). Extension refines it.
 """
 
+import base64
+import hashlib
 import math
 import os
+import time
 from collections import Counter
-from typing import List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from ffsutils import (
     DATA_DIR,
     NODE_STATUS_DIR,
+    NULL_HASH,
     normalize_vpath,
     parse_versioned_filename,
 )
@@ -281,3 +285,133 @@ def aggregate_by_prefix(suggestions: List[dict], depth: int = 1) -> List[dict]:
                      "suggested": majority, "classes": dict(g["classes"])})
     rows.sort(key=lambda r: r["bytes"], reverse=True)
     return rows
+
+
+# ---- Phase 1: holdings summary (the world-map input) -------------------------
+# Each node advertises WHAT it currently holds in its node-status JSON: a count
+# of distinct current-version content hashes plus a Bloom filter over them
+# (design §9.2). The Bloom only ever errs as a FALSE POSITIVE, which here would
+# mean "believe a copy exists that doesn't" → under-replication. So the bloom is
+# never proof of a copy: it only narrows which peers are worth a confirm
+# round-trip (§9.3). Unconfirmed = assumed absent = eligible to push.
+
+HOLDINGS_FP_RATE = 0.01            # bloom sizing target (~1% false positives)
+HOLDINGS_BLOOM_MAX_ITEMS = 1_000_000  # past this, degrade to count-only
+                                      # (peers fall back to ask-on-demand)
+
+
+class BloomFilter:
+    """Minimal fixed-size Bloom filter over strings (content hashes).
+
+    No false negatives ever; false-positive rate set by sizing. Membership uses
+    k indexes derived from a double-hashed sha256 of the item."""
+
+    def __init__(self, m: int, k: int, bits: Optional[bytearray] = None):
+        if m < 8 or k < 1:
+            raise ValueError(f"bad bloom params m={m} k={k}")
+        self.m = int(m)
+        self.k = int(k)
+        nbytes = (self.m + 7) // 8
+        if bits is None:
+            bits = bytearray(nbytes)
+        if len(bits) != nbytes:
+            raise ValueError(f"bloom bits length {len(bits)} != {nbytes} for m={m}")
+        self.bits = bytearray(bits)
+
+    @classmethod
+    def for_capacity(cls, n: int, p: float = HOLDINGS_FP_RATE) -> "BloomFilter":
+        """Size for n items at false-positive rate p (m ≈ 1.44·n·log2(1/p))."""
+        n = max(1, int(n))
+        m = int(math.ceil(-n * math.log(p) / (math.log(2) ** 2)))
+        m = max(8, (m + 7) // 8 * 8)  # whole bytes
+        k = max(1, int(round(m / n * math.log(2))))
+        return cls(m, k)
+
+    def _indexes(self, item: str) -> Iterable[int]:
+        d = hashlib.sha256(item.encode("utf-8")).digest()
+        h1 = int.from_bytes(d[:8], "big")
+        h2 = int.from_bytes(d[8:16], "big") | 1
+        for i in range(self.k):
+            yield (h1 + i * h2) % self.m
+
+    def add(self, item: str) -> None:
+        for idx in self._indexes(item):
+            self.bits[idx >> 3] |= 1 << (idx & 7)
+
+    def might_contain(self, item: str) -> bool:
+        """False = definitely absent. True = maybe present (confirm before
+        counting it as a copy)."""
+        return all(self.bits[idx >> 3] & (1 << (idx & 7))
+                   for idx in self._indexes(item))
+
+    def to_dict(self) -> dict:
+        return {"m": self.m, "k": self.k,
+                "bits": base64.b64encode(bytes(self.bits)).decode("ascii")}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "BloomFilter":
+        return cls(int(d["m"]), int(d["k"]),
+                   bytearray(base64.b64decode(d["bits"])))
+
+
+def current_hashes_from_index(index: Optional[Dict[str, List[dict]]]) -> Set[str]:
+    """Distinct current-version content hashes from a local file index shaped
+    like ffspeers._local_file_index (vpath -> [{"name": versioned-name, ...}]).
+
+    Per vpath, only the newest version counts; a delete/moved tombstone as the
+    newest version means the path holds no current hash. The reserved
+    node-status dir and NULL_HASH versions are skipped."""
+    out: Set[str] = set()
+    for vpath, versions in (index or {}).items():
+        if not vpath or vpath == NODE_STATUS_DIR or vpath.startswith(NODE_STATUS_DIR + "/"):
+            continue
+        best = None  # (timestamp, mode, content_hash)
+        for v in versions or ():
+            parsed = parse_versioned_filename(v.get("name", ""))
+            if not parsed:
+                continue
+            ts = parsed["timestamp"]
+            if best is None or ts > best[0]:
+                best = (ts, parsed["mode"], parsed["content_hash"])
+        if best is None:
+            continue
+        _ts, mode, chash = best
+        if mode in _SKIP_MODES or not chash or chash == NULL_HASH:
+            continue
+        out.add(chash)
+    return out
+
+
+def build_holdings(hashes: Iterable[str], node_id: str,
+                   built: Optional[int] = None) -> dict:
+    """Build the node-status "holdings" block (§9.2): {node_id, count, built,
+    bloom?}. The bloom is omitted past HOLDINGS_BLOOM_MAX_ITEMS (count-only;
+    peers must ask-on-demand) and when there is nothing to hold."""
+    hset = set(hashes or ())
+    out = {
+        "node_id": str(node_id or ""),
+        "count": len(hset),
+        "built": int(built if built is not None else time.time()),
+    }
+    if hset and len(hset) <= HOLDINGS_BLOOM_MAX_ITEMS:
+        bf = BloomFilter.for_capacity(len(hset))
+        for h in hset:
+            bf.add(h)
+        out["bloom"] = bf.to_dict()
+    return out
+
+
+def holdings_may_hold(holdings: Optional[dict], content_hash: str) -> bool:
+    """Is this peer a candidate holder of content_hash, per its advertised
+    holdings? True = worth a confirm round-trip — NEVER proof of a copy.
+    Count-only / unreadable bloom degrades to True (ask-on-demand); an empty
+    or missing holdings block is False (peer self-reports holding nothing)."""
+    if not holdings or not holdings.get("count"):
+        return False
+    bloom = holdings.get("bloom")
+    if not bloom:
+        return True
+    try:
+        return BloomFilter.from_dict(bloom).might_contain(content_hash)
+    except Exception:
+        return True

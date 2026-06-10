@@ -36,6 +36,29 @@ def test_write_node_status_roundtrip(fs):
 
 
 @pytest.mark.unit
+def test_node_status_includes_holdings(fs, monkeypatch):
+    name = build_versioned_filename("a.txt", "A" * 16, "write", 100)
+    monkeypatch.setattr(ffspeers, "_local_file_index", {"a.txt": [{"name": name}]})
+    monkeypatch.setattr(ffspeers, "_INSTANCE_ID", "test-instance")
+    status = fs._build_node_status()
+    h = status["holdings"]
+    assert h["node_id"] == "test-instance"
+    assert h["count"] == 1
+    import ffsredundancy
+    assert ffsredundancy.holdings_may_hold(h, "A" * 16) is True
+
+
+@pytest.mark.unit
+def test_node_status_survives_holdings_failure(fs, monkeypatch):
+    def boom():
+        raise RuntimeError("no index")
+    monkeypatch.setattr(ffspeers, "holdings_summary", boom)
+    status = fs._build_node_status()
+    assert "holdings" not in status
+    assert status["realm"] == "test"
+
+
+@pytest.mark.unit
 def test_prune_node_status_keeps_latest(fs, tmp_path):
     ndir = os.path.join(ffsfs.data_root(str(tmp_path)), NODE_STATUS_DIR)
     os.makedirs(ndir, exist_ok=True)

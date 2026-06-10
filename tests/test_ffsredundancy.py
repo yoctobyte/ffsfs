@@ -181,3 +181,136 @@ def test_node_participation_predicates_reuse_existing_taxonomy():
     assert R.donates_storage(V.NODE_STORAGE_BULK) is True
     assert R.donates_storage(V.NODE_STORAGE_LIMITED) is True
     assert R.donates_storage(V.NODE_STORAGE_CACHE_ONLY) is False
+
+
+# ---- Phase 1: holdings summary / bloom --------------------------------------
+
+def _hashes(n, salt=""):
+    import hashlib
+    return {hashlib.sha256(f"{salt}{i}".encode()).hexdigest() for i in range(n)}
+
+
+@pytest.mark.unit
+def test_bloom_no_false_negatives():
+    members = _hashes(1000, "in-")
+    bf = R.BloomFilter.for_capacity(len(members))
+    for h in members:
+        bf.add(h)
+    assert all(bf.might_contain(h) for h in members)
+
+
+@pytest.mark.unit
+def test_bloom_false_positive_rate_bounded():
+    members = _hashes(1000, "in-")
+    bf = R.BloomFilter.for_capacity(len(members))
+    for h in members:
+        bf.add(h)
+    others = _hashes(2000, "out-")
+    fp = sum(1 for h in others if bf.might_contain(h))
+    # sized for ~1%; allow generous slack to keep the test deterministic-ish
+    assert fp / len(others) < 0.05
+
+
+@pytest.mark.unit
+def test_bloom_serialization_roundtrip():
+    members = _hashes(50, "rt-")
+    bf = R.BloomFilter.for_capacity(len(members))
+    for h in members:
+        bf.add(h)
+    d = bf.to_dict()
+    assert set(d) == {"m", "k", "bits"}
+    bf2 = R.BloomFilter.from_dict(d)
+    assert bf2.m == bf.m and bf2.k == bf.k
+    assert all(bf2.might_contain(h) for h in members)
+
+
+@pytest.mark.unit
+def test_bloom_rejects_bad_params():
+    with pytest.raises(ValueError):
+        R.BloomFilter(0, 1)
+    with pytest.raises(ValueError):
+        R.BloomFilter(64, 0)
+    with pytest.raises(ValueError):
+        R.BloomFilter(64, 2, bytearray(3))  # wrong bits length
+
+
+def _ver(leaf, chash, mode, ts):
+    return {"name": build_versioned_filename(leaf, chash, mode, timestamp=ts, flags=0)}
+
+
+@pytest.mark.unit
+def test_current_hashes_newest_version_wins():
+    index = {
+        "docs/a.txt": [_ver("a.txt", "A" * 16, "write", 100),
+                       _ver("a.txt", "B" * 16, "write", 200)],
+    }
+    assert R.current_hashes_from_index(index) == {"B" * 16}
+
+
+@pytest.mark.unit
+def test_current_hashes_skips_tombstones_nodes_dir_and_null_hash():
+    from ffsutils import NULL_HASH
+    index = {
+        # newest is a delete tombstone -> no current hash
+        "gone.txt": [_ver("gone.txt", "A" * 16, "write", 100),
+                     _ver("gone.txt", "B" * 16, "delete", 200)],
+        # moved tombstone likewise
+        "moved.txt": [_ver("moved.txt", "C" * 16, "moved", 300)],
+        # reserved node-status dir is never advertised
+        f"{NODE_STATUS_DIR}/host.json": [_ver("host.json", "D" * 16, "write", 400)],
+        # NULL_HASH versions carry no content
+        "null.txt": [_ver("null.txt", NULL_HASH, "write", 500)],
+        # unparseable entry is ignored
+        "junk.txt": [{"name": "not-a-versioned-name"}],
+        # live file counts
+        "keep.txt": [_ver("keep.txt", "E" * 16, "write", 600)],
+    }
+    assert R.current_hashes_from_index(index) == {"E" * 16}
+
+
+@pytest.mark.unit
+def test_current_hashes_empty_index():
+    assert R.current_hashes_from_index({}) == set()
+    assert R.current_hashes_from_index(None) == set()
+
+
+@pytest.mark.unit
+def test_build_holdings_shape_and_membership():
+    hashes = _hashes(100, "h-")
+    h = R.build_holdings(hashes, "node-uuid-1", built=12345)
+    assert h["node_id"] == "node-uuid-1"
+    assert h["count"] == 100
+    assert h["built"] == 12345
+    bf = R.BloomFilter.from_dict(h["bloom"])
+    assert all(bf.might_contain(x) for x in hashes)
+
+
+@pytest.mark.unit
+def test_build_holdings_empty_has_no_bloom():
+    h = R.build_holdings([], "n")
+    assert h["count"] == 0
+    assert "bloom" not in h
+
+
+@pytest.mark.unit
+def test_build_holdings_degrades_to_count_only_past_cap(monkeypatch):
+    monkeypatch.setattr(R, "HOLDINGS_BLOOM_MAX_ITEMS", 10)
+    h = R.build_holdings(_hashes(11), "n")
+    assert h["count"] == 11
+    assert "bloom" not in h  # count-only: peers must ask-on-demand
+
+
+@pytest.mark.unit
+def test_holdings_may_hold_semantics():
+    hashes = _hashes(20, "m-")
+    member = next(iter(hashes))
+    h = R.build_holdings(hashes, "n")
+    # bloom present: members are candidates; a definite-absent is not
+    assert R.holdings_may_hold(h, member) is True
+    # no/empty holdings -> peer self-reports nothing -> not a candidate
+    assert R.holdings_may_hold(None, member) is False
+    assert R.holdings_may_hold(R.build_holdings([], "n"), member) is False
+    # count-only (no bloom) -> must ask-on-demand -> candidate
+    assert R.holdings_may_hold({"node_id": "n", "count": 5}, member) is True
+    # unreadable bloom degrades to candidate (never assume absence on error)
+    assert R.holdings_may_hold({"count": 5, "bloom": {"m": "x"}}, member) is True

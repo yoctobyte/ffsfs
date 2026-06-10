@@ -1007,7 +1007,7 @@ class FFSFS(Operations):
             peers_known = list(getattr(peers, "_known_peers", []) or [])
         except Exception:
             pass
-        return {
+        status = {
             "node": self._node_name(),
             "realm": self.realm,
             "updated": int(now),
@@ -1016,6 +1016,13 @@ class FFSFS(Operations):
             "backends": backends,
             "peers_known": peers_known,
         }
+        # Holdings summary (redundancy design §9.2): advisory world-map input.
+        # Status must still publish if it fails, so log-and-omit, never raise.
+        try:
+            status["holdings"] = peers.holdings_summary()
+        except Exception as e:
+            print(f"[ffsfs] holdings summary failed: {e}")
+        return status
 
     def _write_node_status(self) -> None:
         vpath = f"{NODE_STATUS_DIR}/{self._node_name()}.json"

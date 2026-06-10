@@ -24,6 +24,7 @@ from ffsutils import (
 import hashlib
 from ffsratelimit import RateLimits
 import ffslog
+import ffsredundancy
 
 import unicodedata
 import html as _esc
@@ -677,6 +678,15 @@ def _init_instance_id():
         return
     import uuid
     _INSTANCE_ID = _read_or_create(_storage_path("instance.id"), lambda: uuid.uuid4())
+
+def holdings_summary() -> dict:
+    """Holdings block for node-status (redundancy design §9.2): count + bloom
+    over the current-version content hashes this node holds, keyed by the
+    persistent instance id. Built from the in-memory local file index, so it is
+    only as fresh as the index refresh loop — fine for an approximate world map."""
+    _init_instance_id()
+    hashes = ffsredundancy.current_hashes_from_index(_local_file_index)
+    return ffsredundancy.build_holdings(hashes, _INSTANCE_ID)
 
 def _update_fsid_from_backend():
     """Derive a stable fsid for this storage; persist it so parallel clusters don't collide."""
