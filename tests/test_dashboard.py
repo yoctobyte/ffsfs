@@ -40,6 +40,7 @@ def test_dashboard_loopback_ok(dash):
     assert "FFSFS Dashboard" in body
     assert "demo" in body            # realm shown
     assert "127.0.0.1:18766" in body  # known peer listed
+    assert "Redundancy" in body       # redundancy panel present
 
 
 @pytest.mark.unit

@@ -209,9 +209,12 @@ stopping for features/fixes/logs.
   cache) + local size/type suggestion heuristic + per-prefix class resolver +
   realm-config `redundancy` block recorded/validated in setup (advisory, no
   enforcement; node roles reuse the existing `node_role`/`node_storage_profile`
-  taxonomy). REMAINING for Phase 0: surface it in the setup app / dashboard
-  (operator review of suggestions). Phases 1–3 (placement, world map, guarded
-  reduction) still need design sign-off before coding.
+  taxonomy). Surfaced in the setup app (`prompt_redundancy` in the wizard +
+  edit-menu item 15 + realm summary) and the dashboard (read-only Redundancy
+  panel). **Phase 0 DONE.** REMAINING (optional): show per-file `suggest_class`
+  proposals over a sample of real files (detect→suggest→confirm walk). Phases
+  1–3 (placement, world map, guarded reduction) still need design sign-off
+  before coding.
 
 - [P3] **Fixed-port portal — DONE.** `ffsportal.py`: stdlib, loopback-only
   landing page on a fixed easy-to-remember port (0xFF5 = 4085) that lists

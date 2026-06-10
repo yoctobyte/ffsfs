@@ -732,6 +732,53 @@ def prompt_collaboration(realm: str) -> None:
     set_collaboration(realm, mode)
 
 
+def prompt_redundancy(realm: str) -> None:
+    """Ask the realm's redundancy policy: a default class + optional per-prefix
+    overrides. Recorded only — Phase 0 enforces nothing yet."""
+    data = load_realm(realm) or {}
+    cur = ffsredundancy.normalize_redundancy_config(data.get("redundancy"))
+    print("Redundancy policy (how hard files are replicated; advisory for now):")
+    print("  mirror - keep a copy on every node (current behavior)")
+    print("  rf:N   - keep N copies on distinct nodes (e.g. rf:2, rf:3)")
+    print("  cache  - keep no durable copy; fetch on demand (large re-gettable data)")
+    default = _prompt("Default class (mirror/rf:N/cache)", cur["default"]).lower()
+    try:
+        default = ffsredundancy.normalize_class(default)
+    except ValueError as e:
+        print(f"{e}; keeping '{cur['default']}'.")
+        default = cur["default"]
+
+    overrides = dict(cur["overrides"])
+    if overrides:
+        print("Current per-prefix overrides:")
+        for p, c in overrides.items():
+            print(f"  {p or '(root)'} -> {c}")
+    if _yes_no("Add/replace a per-prefix override?", False):
+        while True:
+            prefix = _prompt("Path prefix (e.g. photos), blank to stop").strip()
+            if not prefix:
+                break
+            spec = _prompt(f"Class for '{prefix}' (mirror/rf:N/cache/none to remove)",
+                           "rf:3").lower()
+            if spec in ("none", "remove", "-"):
+                overrides.pop(ffsredundancy._norm_prefix(prefix), None)
+                print(f"Removed override for '{prefix}'.")
+                continue
+            try:
+                ffsredundancy.normalize_class(spec)
+            except ValueError as e:
+                print(f"{e}; skipped.")
+                continue
+            overrides[ffsredundancy._norm_prefix(prefix)] = spec
+
+    try:
+        norm = set_redundancy(realm, default=default, overrides=overrides)
+        print(f"Redundancy: default {norm['default']}, "
+              f"{len(norm['overrides'])} override(s).")
+    except ValueError as e:
+        print(f"Could not save redundancy policy: {e}")
+
+
 def _prompt_backend_details(realm: str, path: str, label: str):
     """Ask device class, apply assumption defaults (overridable), optional themed
     job; then register the backend. Returns the created Volume."""
@@ -830,6 +877,9 @@ def wizard_create_or_edit(realm: str) -> None:
     prompt_collaboration(realm)
 
     print()
+    prompt_redundancy(realm)
+
+    print()
     print_device_summary()
     while _yes_no("Add a secondary backend?", False):
         path = _prompt("Backend folder")
@@ -897,6 +947,13 @@ def print_realm_summary(realm: str) -> None:
     print(f"  trust_unknown_peers: {bool(data.get('trust_unknown_peers', False))}")
     print(f"  known_peers: {len(data.get('known_peers') or [])}")
     print(f"  approved_peers: {len(data.get('approved_peers') or [])}")
+    try:
+        red = ffsredundancy.normalize_redundancy_config(data.get("redundancy"))
+        ov = "".join(f"\n      {p or '(root)'} -> {c}" for p, c in red["overrides"].items())
+        print(f"  redundancy: default {red['default']}"
+              + (f", {len(red['overrides'])} override(s):" + ov if ov else ""))
+    except ValueError as e:
+        print(f"  redundancy: INVALID ({e})")
     pool_data = data.get("storage_pool")
     if pool_data:
         pool = StoragePool.from_dict(pool_data)
@@ -1169,6 +1226,7 @@ def edit_realm_menu(realm: str) -> None:
         print("12) Deactivate         (take out of service; launch.sh refuses it)")
         print("13) Set collaboration intent (solo/shared)")
         print("14) Set realm secret   (align/join peers; use same on every host)")
+        print("15) Set redundancy policy (default class + per-prefix overrides)")
         print("0) Back")
         choice = _prompt("Choice", "10")
         if choice == "1":
@@ -1206,6 +1264,8 @@ def edit_realm_menu(realm: str) -> None:
             prompt_collaboration(realm)
         elif choice == "14":
             prompt_realm_secret(realm)
+        elif choice == "15":
+            prompt_redundancy(realm)
         elif choice == "0":
             return
         else:

@@ -1847,6 +1847,21 @@ def _realm_collaboration():
     return _guarded_value(_load, timeout=1.0)
 
 
+def _realm_redundancy():
+    """Best-effort read of the realm's redundancy policy for display. Returns a
+    normalized {"default", "overrides"} block, or None if unavailable. Advisory
+    (Phase 0) — nothing here enforces it."""
+    def _load():
+        from ffsctl import _load_realm_config
+        import ffsredundancy
+        raw = (_load_realm_config(_REALM) or {}).get("redundancy")
+        try:
+            return ffsredundancy.normalize_redundancy_config(raw)
+        except Exception:
+            return None
+    return _guarded_value(_load, timeout=1.0)
+
+
 def _fmt_ago(seconds) -> str:
     if seconds is None:
         return "never"
@@ -1959,6 +1974,21 @@ def dashboard():
 <table><thead><tr><th>Path</th><th>Local hash</th><th>Remote hash</th></tr></thead>
 <tbody>{c_rows}</tbody></table>"""
 
+    red = _realm_redundancy()
+    if red is None:
+        red_html = "<p><em>Redundancy policy unavailable.</em></p>"
+    else:
+        ov = red.get("overrides") or {}
+        ov_rows = "\n".join(
+            f"<tr><td><code>{e(p or '(root)')}</code></td><td>{e(c)}</td></tr>"
+            for p, c in ov.items()
+        ) or "<tr><td colspan='2'><em>none</em></td></tr>"
+        red_html = f"""
+<p>default class: <span class="pill">{e(str(red.get('default')))}</span>
+   · advisory (Phase 0 — not yet enforced)</p>
+<table><thead><tr><th>Prefix override</th><th>Class</th></tr></thead>
+<tbody>{ov_rows}</tbody></table>"""
+
     auth_on = _request_verifier is not None
     collab = _realm_collaboration()
     collab_html = f" · collaboration {e(str(collab))}" if collab else ""
@@ -1995,6 +2025,9 @@ def dashboard():
 <table><thead><tr><th>Label</th><th>Role</th><th>Device</th><th>Media</th>
 <th>Job</th><th>Mirror</th><th>Status</th><th>Capacity</th><th>Path</th></tr></thead>
 <tbody>{vol_html}</tbody></table>
+
+<h2>Redundancy</h2>
+{red_html}
 
 <h2>Sync</h2>
 {sync_html}
