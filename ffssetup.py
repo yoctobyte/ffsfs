@@ -839,6 +839,8 @@ def wizard_create_or_edit(realm: str) -> None:
         print(f"Activated. You can now launch this realm with:")
         print(f"    ./launch.sh {realm}")
         print(f"  (add --bg to run in the background)")
+        print(f"  Or install it as a systemd service (starts on login):")
+        print(f"    ./service.sh install {realm} && ./service.sh start {realm}")
     else:
         print()
         print("Saved as inactive. Activate it later in setup, then launch with:")

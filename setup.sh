@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# setup.sh — configure/activate an FFSFS realm (console setup app).
+#
+# After activating a realm, run it with:
+#   ./launch.sh <realm>                  # foreground (add --bg for background)
+#   ./service.sh install <realm>         # or install as a systemd service
+# See service.sh for start/stop/uninstall and the --system (root) option.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
