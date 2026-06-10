@@ -13,7 +13,7 @@ operator opts in.
 | Phase | What | State |
 |-------|------|-------|
 | 0 | class model + size/type suggestion + per-prefix config + setup/dashboard surfacing + scan walk | **SHIPPED** |
-| 1 | approximate placement (add-only): holdings map, target enforcement, hint-pull replication | **DESIGNED, needs sign-off** (`redundancy_design.md §9`) |
+| 1 | approximate placement (add-only): holdings map, target enforcement, hint-pull replication | **SHIPPED** (design `redundancy_design.md §9`) |
 | 2 | availability-weighting, on-demand/cold tier, per-disk failure domains | not designed |
 | 3 | guarded copy *reduction* (the dangerous direction) | not designed |
 
@@ -26,11 +26,17 @@ operator opts in.
 057aa0c feat: surface Phase 0 in setup app + dashboard
 314dfa3 feat: detect-suggest-confirm scan walk
 fcb444f docs: detailed Phase 1 placement design (§9)
+4b81eae feat: Phase 1a — holdings summary + Bloom in node-status
+f7ffb90 feat: Phase 1b — world-map merge + bulk copy-confirm (/has-hashes)
+67d6d58 feat: Phase 1c — pure target/owner/donor selection
+59b754a feat: Phase 1d — replicate-hint, pinned set, eviction exemption
+1aa0657 feat: Phase 1e — placement worker (reconcile sweep + nudges)
+2e8b9b9 feat: Phase 1f — dashboard placement panel
 ```
 
 ## Phase 0 — what shipped (where to look)
 
-- **`ffsredundancy.py`** — the whole advisory core, no enforcement:
+- **`ffsredundancy.py`** — advisory core:
   - class model: `mirror` / `cache` / `rf:N`; `normalize_class`, `parse_rf`,
     `DEFAULT_CLASS = "mirror"`.
   - importance heuristic: `size_score` (inverse-size, log) × `type_weight`
@@ -38,106 +44,125 @@ fcb444f docs: detailed Phase 1 placement design (§9)
     `suggest_class(name, size) -> (class, reason)`.
   - per-prefix config: `normalize_redundancy_config`, `class_for_path`
     (longest-prefix override wins).
-  - node participation predicates that **reuse the existing taxonomy** (no new
-    role enum): `is_durable_replica`, `participates_in_placement`,
+  - node participation predicates over the EXISTING taxonomy (no new role
+    enum): `is_durable_replica`, `participates_in_placement`,
     `donates_storage` over `node_role` / `node_storage_profile` (ffsvolumes).
-  - scan walk: `walk_suggestions(data_root)` (newest live version per logical
-    file; skips delete/move tombstones + `.ffsfs-nodes`), `aggregate_by_prefix`.
-- **`ffssetup.py`** — records + validates a `redundancy` block in realm-config:
-  `set_redundancy(realm, default, overrides)`, validation in `validate_realm`,
-  `prompt_redundancy` in the wizard + edit-menu item 15 + `_redundancy_scan_offer`
-  (sample + per-prefix roll-up, adopt overrides on confirm) +
-  `print_realm_summary` display.
-- **`ffspeers.py`** — read-only dashboard panel via `_realm_redundancy()`
-  ("advisory — not yet enforced").
-- **Tests**: `tests/test_ffsredundancy.py` (27), `tests/test_intent_setup.py`
-  (+2), `tests/test_dashboard.py` (+1). Full suite **312 passing**.
+  - scan walk: `walk_suggestions(data_root)`, `aggregate_by_prefix`.
+- **`ffssetup.py`** — records + validates the `redundancy` realm-config block:
+  `set_redundancy`, `validate_realm`, wizard `prompt_redundancy` + edit-menu 15
+  + `_redundancy_scan_offer`, `print_realm_summary`.
+- **`ffspeers.py`** — dashboard panel via `_realm_redundancy()`.
 
 Config shape in realm-config.json:
 ```json
-"redundancy": { "default": "mirror", "overrides": { "photos": "rf:3", "iso": "cache" } }
+"redundancy": { "default": "mirror", "overrides": { "photos": "rf:3", "iso": "cache" },
+                "reconcile_interval": 300 }
 ```
+(`reconcile_interval` optional; normalize ignores unknown keys.)
 
-## Phase 1 — designed, not built (summary; full detail in §9)
+## Phase 1 — what shipped (where to look)
 
-Add-only enforcement on existing machinery (node-status, content-hash naming,
-`/get-file` + `_content_hash_matches`, SyncWorker):
+Add-only enforcement on existing machinery, exactly per §9. mirror-class paths
+are untouched; the worker only starts when an `rf:` class is configured AND the
+node role participates in placement — default config is a no-op.
 
-- **Unit** = current-version content hash per live path.
-- **Holdings summary** (count + Bloom over current hashes, keyed by
-  `_INSTANCE_ID`) published in node-status; world map = merge of self-reported
-  holdings (no master).
-- **Counting**: Bloom only picks confirm candidates; a copy counts toward target
-  only after a `/head` confirm (Bloom FP direction is unsafe → unconfirmed =
-  assume absent = push).
-- **Target** from `class_for_path`; **owner** = lowest node-id holder drives;
-  **donor** by durable-profile/space/diversity/reachability.
-- **Replication** = hint-pull `/replicate-hint` → donor pulls + verifies + pins;
-  **eviction** never drops a pinned hash (persisted set).
-- **Over-target** flagged, never dropped.
+- **a. Holdings (§9.2)** — `ffsredundancy`: `BloomFilter` (~1% FP sizing),
+  `current_hashes_from_index` (newest live version per vpath; skips
+  delete/moved tombstones, `.ffsfs-nodes`, NULL_HASH), `build_holdings`
+  (count-only past `HOLDINGS_BLOOM_MAX_ITEMS` = 1M), `holdings_may_hold`
+  (candidate check, NEVER proof). `ffspeers.holdings_summary()` publishes it in
+  node-status via `_build_node_status` (log-and-omit on failure). node-status
+  also carries `node_role` / `storage_profile` (from `set_node_profile`,
+  pushed in by `mount()`).
+- **b. World map + confirm (§9.3)** — `merge_holdings` (self-reported only,
+  newest `built` per node_id), `candidate_holders`. `/has-hashes` bulk confirm
+  (cap `HAS_HASHES_MAX` = 1000/request) answers from current-version hashes;
+  `confirm_held_hashes(peer, hashes)` returns `{node_id, held}` or None
+  (None = assume absent = safe over-replication).
+- **c. Decisions (§9.4–9.6)** — pure: `placement_target` (mirror→None,
+  cache→0, rf:N→N), `placement_status` (under/at/over/n-a), `owner_for_hash`
+  (lowest confirmed holder), `select_donors` (durable+donating+alive+
+  not-holder, most-free-space first).
+- **d. Replication (§9.7–9.8)** — `POST /replicate-hint` (validates suffix↔hash,
+  rejects tombstones, cache-only node refuses with 403, 507 when capacity
+  floor would break, idempotent already_present, defaults pull source to the
+  hinting owner via remote_addr+from_port); donor `pull_versioned_file`
+  (traversal-rejecting, integrity-verifying, registers in local index);
+  `send_replicate_hint` owner-side client. **Pinned set**: per-realm JSON at
+  `<state>/.storage/pinned-hashes-<realm>.json`, atomic writes, reloaded by
+  `set_realm`. Eviction (`ffssync.run_eviction_once`) never drops a pinned
+  hash; unreadable pin set ⇒ the whole eviction pass is skipped.
+- **e. Triggers (§9.9)** — `ffsredundancy.PlacementWorker`: jittered reconcile
+  sweep (default 300 s; `redundancy.reconcile_interval`), debounced on-commit
+  nudge via `notify_commit_safe` → `note_commit`, one bulk confirm round-trip
+  per peer per sweep, owner deference, per-sweep hint cap
+  (`DEFAULT_MAX_HINTS_PER_SWEEP` = 20 counting failures), over-target flagged
+  only. Wired in `ffsfs.mount()` (+ `register_placement_worker`), stopped in
+  `_shutdown`.
+- **f. Observability (§9.12)** — dashboard Redundancy panel: placement
+  active/advisory, last-sweep stats, recent-placement log, world map
+  (self-reported holdings + profile/role per node).
+- **VM scenario** — `tools/vm/scenarios/two-peer/redundancy-rf2.sh`: both peers
+  restarted with HMAC ON and separate state dirs (distinct instance ids);
+  asserts unsigned requests get 403, an rf:2 file gains a pinned confirmed
+  copy on the donor, and a cache-class file is never replicated.
+- **Tests**: `test_ffsredundancy.py` (54), `test_ffspeers_api.py` (+13),
+  `test_sync_worker.py` (+2), `test_federated.py` (+2), `test_dashboard.py`
+  (+1). Full suite **356 passing**.
 
-## OPEN QUESTIONS / decisions needing sign-off
+## DECISIONS taken (was: open questions 1–7)
 
-Phase 1 (block implementation until answered):
+Implemented per the doc's own recommendations; revisit only with new evidence:
 
-1. **Replication direction** — hint-pull (donor pulls via `/get-file`) vs
-   coordinator-push. Recommendation: **hint-pull** (reuses integrity + back-
-   pressure). Confirm.
-2. **Holdings representation** — Bloom-in-node-status vs count-only +
-   ask-on-demand `/has?hash=`. Recommendation: **Bloom**, with a cap/degrade to
-   ask-on-demand past ~1M files. Confirm the cap + FP target (~1%).
-3. **Confirm cost** — counting requires a `/head` round-trip per candidate
-   holder. Acceptable, or batch into a `/has-hashes` bulk endpoint? (Likely add
-   a bulk check to avoid N calls per file.)
-4. **Owner election** — pure "lowest node-id among holders" with cooldown, no
-   lease. OK, or do we want a soft lease to cut duplicate pushes harder?
-5. **Reconcile sweep cadence** — default interval + jitter + rate limit. Pick a
-   number (proposed: a few minutes).
-6. **Pinned-set persistence** — file location/format under the realm state dir;
-   how it interacts with manual file removal.
-7. **mirror semantics at scale** — `mirror` = "every node" is fine on a handful
-   of nodes; does it need a soft cap or to become `rf:all-up-to-K` on bigger
-   fleets? (Phase 1 leaves mirror unchanged; flag for later.)
+1. **Replication direction** → hint-pull (reuses integrity + back-pressure).
+2. **Holdings representation** → Bloom in node-status, ~1% FP, degrade to
+   count-only + ask-on-demand past 1M hashes.
+3. **Confirm cost** → bulk `/has-hashes` (1000/request), one round-trip per
+   peer per sweep, not per-file `/head`.
+4. **Owner election** → lowest node_id among confirmed holders, re-derived per
+   sweep; no lease (sweep interval is the cooldown).
+5. **Sweep cadence** → 300 s default, ±20 % jitter, per-sweep hint cap 20,
+   5 s commit-nudge debounce.
+6. **Pinned-set persistence** → `pinned-hashes-<realm>.json` under the node
+   state dir; manual file removal does NOT unpin (Phase 1 never unpins —
+   an unpin tool is Phase 3 territory).
+7. **mirror at scale** → unchanged in Phase 1 (mirror never consults
+   placement); soft-cap / `rf:all-up-to-K` still flagged for Phase 2+.
 
-Cross-phase / model (not blocking Phase 1, but decide before Phase 2/3):
+## OPEN QUESTIONS (cross-phase, decide before Phase 2/3)
 
-8. **Availability weighting** — how to score node uptime (rolling window from
-   `_last_seen`/node-status), and the exact "expected-available-copies" target
-   formula (Phase 2).
-9. **On-demand/cold tier as a durability slot** — does a copy on an offline
-   on-demand node count toward the durability target while it's down? (Phase 2;
-   maps onto `cold_archive_design.md`.)
-10. **Failure domains** — Phase 1 diversity unit is "distinct node"; when do we
-    add per-physical-disk / per-host diversity? (Phase 2.)
-11. **Reduction safety** — the simultaneous-delete race mitigations (§6:
-    confirm-before-rely, margin/hysteresis, serialized drops, tombstone-intent,
-    never-last-copy). All Phase 3; must reuse the prune tool's machinery. Needs
-    its own design pass.
-12. **Erasure coding** — recommended **no** for the readable tier (breaks the
-    plain-file invariant); only ever for the huge cold tier, if at all. Confirm
-    we're parking it.
+8. **Availability weighting** — uptime scoring + "expected-available-copies"
+   target formula (Phase 2).
+9. **On-demand/cold tier as a durability slot** — does an offline on-demand
+   copy count? (Phase 2; maps onto `cold_archive_design.md`.)
+10. **Failure domains** — per-physical-disk / per-host diversity (Phase 2;
+    Phase 1 unit is "distinct node").
+11. **Reduction safety** — §6 guards (confirm-before-rely, hysteresis,
+    serialized drops, tombstone-intent, never-last-copy); Phase 3, own design
+    pass, must reuse the prune tool's machinery. Also: unpin semantics.
+12. **Erasure coding** — parked (readable-tier invariant); cold tier only, if
+    ever.
 
 ## Suggested next steps
 
-1. Get sign-off on Q1–Q7 (Phase 1 blockers).
-2. Implement Phase 1 bottom-up, each its own commit + tests, no real FUSE on the
-   workstation (VM for end-to-end):
-   a. holdings summary build + Bloom (pure, unit-tested) → publish in
-      node-status.
-   b. world-map merge + confirmed-copy counting (`/head` or bulk `/has-hashes`).
-   c. target/owner/donor selection (pure functions, unit-tested).
-   d. `/replicate-hint` endpoint + donor pull + pin; eviction pin-exemption.
-   e. triggers (on-commit + reconcile sweep) wired conservatively.
-   f. dashboard: confirmed-vs-target, at-risk, world-map; recent-placement log.
-3. Land the open P1 first if not already: a **two-peer VM scenario with HMAC
-   on** — Phase 1 replication must be tested over the signed path.
+1. Run/keep-green the VM scenario: `tools/vm/run-two-peer-scenario.sh
+   redundancy-rf2` (first signed-path replication test).
+2. Phase 1 hardening candidates: `/has-hashes` answer from *any* held version
+   (not just current) if restore-from-history matters; sweep-time refresh of a
+   stale local index; surface at-risk (under-target) paths as a dedicated
+   dashboard list with per-path counts.
+3. Phase 2 design pass (availability weighting, failure domains, on-demand
+   tier) — start from §9.16 and questions 8–10.
 
 ## Watch-outs
 
 - Default stays `mirror`; never change behavior for existing realms silently.
-- Never trust Bloom as proof of a copy (FP → under-replication).
-- Respect the shipped capacity floor when choosing donors.
+- Never trust Bloom as proof of a copy (FP → under-replication). Counting uses
+  `/has-hashes` confirms only.
+- Respect the shipped capacity floor when choosing donors (donor re-checks at
+  pull time; the owner's pick is a preference, not a reservation).
 - Phase 1 deletes nothing. If a design step seems to require removing a copy,
-  stop — that's Phase 3.
-- Add tests with each correctness change (project rule). Prefer VM tests for FUSE
-  + peer networking.
+  stop — that's Phase 3. (Eviction even refuses to run when it can't read the
+  pin set.)
+- Add tests with each correctness change (project rule). Prefer VM tests for
+  FUSE + peer networking.
