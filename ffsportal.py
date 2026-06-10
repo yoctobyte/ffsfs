@@ -12,7 +12,7 @@ It is read-only, loopback-only, and has no FFSFS dependencies (stdlib only), so
 it stays up regardless of any realm's state.
 
 Run:
-    ./ffsportal.py                # http://127.0.0.1:62965/
+    ./ffsportal.py                # http://127.0.0.1:4085/
     ./ffsportal.py --port 50000   # override
     FFSFS_STATE_DIR=~/.ffsfs ./ffsportal.py
 """
@@ -24,9 +24,9 @@ import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# 0xF5F5 = 62965. "F5F5" ~ FFSFS; high enough to avoid common-service conflicts
-# and not the usual 8080/8000 dev ports.
-DEFAULT_PORT = 0xF5F5
+# 0xFF5 = 4085. "FF5" ~ FFSFS; not in /etc/services and not a common dev port
+# (8080/8000/4040/4200…); unprivileged so no root needed.
+DEFAULT_PORT = 0xFF5
 BIND_HOST = "127.0.0.1"          # loopback only, matching the dashboards
 RUNTIME_FRESH_SECS = 120         # runtime.json older than this = treat as stale
 
@@ -155,7 +155,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser(description="FFSFS fixed-port realm portal")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
-                    help=f"listen port (default {DEFAULT_PORT} = 0xF5F5)")
+                    help=f"listen port (default {DEFAULT_PORT} = 0xFF5)")
     ap.add_argument("--host", default=BIND_HOST,
                     help="bind host (default 127.0.0.1, loopback only)")
     args = ap.parse_args()

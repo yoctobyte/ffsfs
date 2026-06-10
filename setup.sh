@@ -7,7 +7,7 @@
 # See service.sh for start/stop/uninstall and the --system (root) option.
 #
 # Don't remember a realm's dashboard port? Run ./ffsportal.py and open
-#   http://127.0.0.1:62965/  — it links to every realm's live dashboard.
+#   http://127.0.0.1:4085/  — it links to every realm's live dashboard.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

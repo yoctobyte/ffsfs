@@ -207,7 +207,7 @@ stopping for features/fixes/logs.
   design in `agents/redundancy_design.md`. Discuss before coding.
 
 - [P3] **Fixed-port portal — DONE.** `ffsportal.py`: stdlib, loopback-only
-  landing page on a fixed easy-to-remember port (0xF5F5 = 62965) that lists
+  landing page on a fixed easy-to-remember port (0xFF5 = 4085) that lists
   configured realms and links to each live dashboard, so the realm-derived (and
   busy-fallback) dashboard port no longer has to be guessed — useful especially
   when FFSFS runs as a systemd service. Nodes now write `runtime.json`
