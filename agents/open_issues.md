@@ -223,6 +223,7 @@ stopping for features/fixes/logs.
   hint-pull `/replicate-hint` reusing `/get-file` + integrity, pinned set exempt
   from eviction, over-target flagged not dropped. Phases 2–3 (availability
   weighting, guarded reduction) still need design.
+  **Status + all open questions: `agents/redundancy_handover.md`.**
 
 - [P3] **Fixed-port portal — DONE.** `ffsportal.py`: stdlib, loopback-only
   landing page on a fixed easy-to-remember port (0xFF5 = 4085) that lists
