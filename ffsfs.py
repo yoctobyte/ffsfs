@@ -937,6 +937,11 @@ class FFSFS(Operations):
         except Exception:
             pass
         try:
+            if getattr(self, "placement_worker", None) is not None:
+                self.placement_worker.stop(timeout=2.0)
+        except Exception:
+            pass
+        try:
             self._open_mon.join(timeout=2.0)
         except Exception:
             pass
@@ -1022,6 +1027,11 @@ class FFSFS(Operations):
             status["holdings"] = peers.holdings_summary()
         except Exception as e:
             print(f"[ffsfs] holdings summary failed: {e}")
+        # Node role/storage profile so peers can pick durable donors (§9.6).
+        try:
+            status.update(peers.node_profile())
+        except Exception as e:
+            print(f"[ffsfs] node profile read failed: {e}")
         return status
 
     def _write_node_status(self) -> None:
@@ -2022,6 +2032,28 @@ def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool 
 
             port = int(os.environ.get("FFSFS_PEER_PORT", "8765"))
             peers.start_local_peer_server(port)
+
+            # Redundancy Phase 1: node profile + placement worker. The worker
+            # only spins up when an rf: class is configured AND this node's
+            # role participates in placement — default config = no-op.
+            if hasattr(peers, "set_node_profile"):
+                peers.set_node_profile(cfg.get("node_role"),
+                                       cfg.get("node_storage_profile"))
+            if hasattr(peers, "register_placement_worker"):
+                import ffsredundancy
+                from ffsvolumes import DEFAULT_NODE_ROLE
+                rcfg = cfg.get("redundancy") or {}
+                worker = ffsredundancy.PlacementWorker(
+                    peers, rcfg,
+                    interval_secs=rcfg.get("reconcile_interval"))
+                peers.register_placement_worker(worker)
+                fs.placement_worker = worker
+                if ffsredundancy.participates_in_placement(
+                        cfg.get("node_role") or DEFAULT_NODE_ROLE):
+                    worker.start()
+                    if worker.has_rf_targets():
+                        print("[ffsfs] redundancy placement worker started "
+                              f"(reconcile every ~{int(worker.interval)}s)")
     except Exception as e:
         print(f"[ffsfs] peer server start failed: {e}")
     

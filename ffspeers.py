@@ -1141,6 +1141,11 @@ def notify_commit_safe(vpath: str, final_name: str, size: int, mtime: int) -> No
     suffix = get_suffix_from_path(final_name)
     versioned_name = f"{vpath}.{suffix}"
     _index_add_local_version(versioned_name, size, mtime)
+    if _placement_worker is not None:
+        try:
+            _placement_worker.note_commit(vpath)
+        except Exception as e:
+            _log(f"[peer] placement commit nudge failed: {e}")
     if not _known_peers:
         return
     #payload = {"realm": _REALM, "event": "commit", "vpath": vpath, "suffix": suffix}
@@ -2222,27 +2227,56 @@ def has_hashes():
     return jsonify({"node_id": str(_INSTANCE_ID), "held": held})
 
 
-def confirm_held_hashes(peer: str, hashes) -> Optional[set]:
+def confirm_held_hashes(peer: str, hashes) -> Optional[dict]:
     """Ask one peer which of these content hashes it holds (bulk /has-hashes,
-    batched to the server cap). Returns the confirmed subset, or None when the
-    peer cannot answer — callers must treat None as 'unconfirmed = assume
-    absent' (the safe, over-replicating direction)."""
+    batched to the server cap). Returns {"node_id": str, "held": set} — the
+    confirmed subset plus the answering instance id (needed for owner election
+    and donor identity) — or None when the peer cannot answer. Callers must
+    treat None as 'unconfirmed = assume absent' (the safe, over-replicating
+    direction)."""
     batch = sorted(set(hashes or ()))
-    out: set = set()
-    if not batch:
-        return out
+    held: set = set()
+    node_id = ""
     try:
-        for i in range(0, len(batch), HAS_HASHES_MAX):
+        for i in range(0, max(len(batch), 1), HAS_HASHES_MAX):
             chunk = batch[i:i + HAS_HASHES_MAX]
             r = _authed_post(_peer_url(peer, "/has-hashes"), "/has-hashes",
                              {"realm": _REALM, "hashes": chunk}, timeout=10)
             if not r.ok:
                 return None
-            out.update((r.json() or {}).get("held") or ())
+            body = r.json() or {}
+            node_id = str(body.get("node_id") or node_id)
+            held.update(body.get("held") or ())
     except Exception as ex:
         _log(f"[peer] /has-hashes failed from {peer}: {ex}")
         return None
-    return out
+    return {"node_id": node_id, "held": held}
+
+
+# ---- redundancy Phase 1: node profile advertisement ---------------------------
+# The node's configured role/storage-profile, pushed in at mount from the node
+# config so placement (and peers, via node-status) can tell durable donors from
+# cache-only nodes. Defaults match ffsvolumes defaults.
+
+_NODE_ROLE: Optional[str] = None
+_NODE_STORAGE_PROFILE: Optional[str] = None
+
+
+def set_node_profile(node_role: Optional[str],
+                     storage_profile: Optional[str]) -> None:
+    global _NODE_ROLE, _NODE_STORAGE_PROFILE
+    _NODE_ROLE = (node_role or "").strip() or None
+    _NODE_STORAGE_PROFILE = (storage_profile or "").strip() or None
+
+
+def node_profile() -> dict:
+    """This node's role/storage profile for node-status (falls back to the
+    ffsvolumes defaults when the config never set them)."""
+    from ffsvolumes import DEFAULT_NODE_ROLE, DEFAULT_NODE_STORAGE_PROFILE
+    return {
+        "node_role": _NODE_ROLE or DEFAULT_NODE_ROLE,
+        "storage_profile": _NODE_STORAGE_PROFILE or DEFAULT_NODE_STORAGE_PROFILE,
+    }
 
 
 # ---- redundancy Phase 1: pinned hashes + replicate-hint ----------------------
@@ -2385,6 +2419,9 @@ def replicate_hint():
     if (not parsed or parsed.get("content_hash") != chash
             or is_hidden_mode(parsed.get("mode"))):
         return jsonify({"error": "bad suffix"}), 400
+    # a cache-only node never holds durable replicas (design §3/§9.6)
+    if not ffsredundancy.is_durable_replica(node_profile()["storage_profile"]):
+        return jsonify({"error": "cache-only node refuses durable copies"}), 403
 
     held = ffsredundancy.current_hashes_from_index(_local_file_index)
     if chash in held:
@@ -2395,6 +2432,12 @@ def replicate_hint():
     if not _can_accept_replica(size):
         return jsonify({"error": "no space"}), 507
 
+    if not source:
+        # default to the hinting owner itself (it is a confirmed holder):
+        # requester address + its advertised port, like /notify does
+        from_port = str(data.get("from_port") or "").strip()
+        if from_port.isdigit():
+            source = f"{_normalize_remote_addr(request.remote_addr or '')}:{from_port}"
     sources = ([source] if source else []) + [p for p in list(_known_peers)
                                               if p != source]
     pulled = None
@@ -2417,7 +2460,8 @@ def send_replicate_hint(peer: str, vpath: str, suffix: str, content_hash: str,
         r = _authed_post(_peer_url(peer, "/replicate-hint"), "/replicate-hint",
                          {"realm": _REALM, "vpath": vpath, "suffix": suffix,
                           "content_hash": content_hash, "size": int(size or 0),
-                          "source": source or ""},
+                          "source": source or "",
+                          "from_port": _advertise_port()},
                          timeout=120)
         if not r.ok:
             _log(f"[peer] replicate-hint to {peer} for {vpath} refused: "
@@ -2951,6 +2995,16 @@ _sync_worker: Any = None
 def register_sync_worker(worker):
     global _sync_worker
     _sync_worker = worker
+
+
+_placement_worker = None
+
+
+def register_placement_worker(worker):
+    """Redundancy Phase 1: placement worker gets commit nudges (on-commit
+    trigger, design §9.9) and is surfaced on the dashboard."""
+    global _placement_worker
+    _placement_worker = worker
 
 
 def start_local_peer_server(port: int = PEER_PORT) -> None:

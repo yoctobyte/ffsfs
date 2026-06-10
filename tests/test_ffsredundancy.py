@@ -392,3 +392,180 @@ def test_select_donors_filters_and_prefers_free_space():
     assert R.select_donors(peers, ["holder"], 1) == ["big"]
     assert R.select_donors(peers, ["holder"], 0) == []
     assert R.select_donors([], [], 3) == []
+
+
+# ---- Phase 1: placement worker (reconcile sweep) ------------------------------
+
+class FakePeersModule:
+    """ffspeers-shaped stand-in for PlacementWorker tests."""
+
+    def __init__(self, index, self_id="node-self", peers=(), confirms=None,
+                 statuses=(), hint_ok=True):
+        self._local_file_index = index
+        self._INSTANCE_ID = self_id
+        self._known_peers = list(peers)
+        self._confirms = confirms or {}  # addr -> {"node_id","held"} or None
+        self._statuses = list(statuses)
+        self._hint_ok = hint_ok
+        self.hints = []
+
+    def confirm_held_hashes(self, addr, hashes):
+        c = self._confirms.get(addr)
+        if c is None:
+            return None
+        return {"node_id": c["node_id"], "held": set(c["held"]) & set(hashes)}
+
+    def send_replicate_hint(self, addr, vpath, suffix, content_hash, size=0,
+                            source=""):
+        self.hints.append({"addr": addr, "vpath": vpath, "suffix": suffix,
+                           "hash": content_hash, "size": size})
+        return {"ok": True, "pulled": True} if self._hint_ok else None
+
+    def _collect_federated_nodes(self):
+        return self._statuses
+
+
+def _idx_entry(vpath, chash, ts=100, size=7, mode="write"):
+    leaf = vpath.rsplit("/", 1)[-1]
+    name = build_versioned_filename(leaf, chash, mode, ts)
+    if "/" in vpath:
+        name = vpath.rsplit("/", 1)[0] + "/" + name
+    return {"name": name, "size": size}
+
+
+RF2_CFG = {"default": "mirror", "overrides": {"docs": "rf:2"}}
+
+
+@pytest.mark.unit
+def test_worker_default_mirror_config_is_noop():
+    peers = FakePeersModule({"docs/a.txt": [_idx_entry("docs/a.txt", "A" * 16)]})
+    w = R.PlacementWorker(peers, {"default": "mirror"})
+    assert w.has_rf_targets() is False
+    stats = w.run_reconcile_once()
+    assert "skipped" in stats
+    assert peers.hints == []
+    w.start()
+    assert w._thread is None  # never spins up without rf targets
+
+
+@pytest.mark.unit
+def test_worker_sends_hint_when_under_target():
+    chash = "C" * 16
+    peers = FakePeersModule(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash, size=42)],
+         "other.txt": [_idx_entry("other.txt", "D" * 16)]},  # mirror -> untouched
+        peers=["10.0.0.2:8765"],
+        confirms={"10.0.0.2:8765": {"node_id": "zz-peer", "held": set()}})
+    w = R.PlacementWorker(peers, RF2_CFG)
+    stats = w.run_reconcile_once()
+    assert stats["checked"] == 1          # only the rf:2 path
+    assert stats["under"] == 1
+    assert stats["hints_sent"] == 1
+    assert peers.hints[0]["vpath"] == "docs/a.txt"
+    assert peers.hints[0]["hash"] == chash
+    assert peers.hints[0]["addr"] == "10.0.0.2:8765"
+    assert peers.hints[0]["suffix"].startswith(chash + ".write.")
+    assert w.status()["recent"][0]["result"] == "pulled"
+
+
+@pytest.mark.unit
+def test_worker_no_hint_when_at_target():
+    chash = "C" * 16
+    peers = FakePeersModule(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        peers=["10.0.0.2:8765"],
+        confirms={"10.0.0.2:8765": {"node_id": "zz-peer", "held": {chash}}})
+    w = R.PlacementWorker(peers, RF2_CFG)
+    stats = w.run_reconcile_once()
+    assert stats["under"] == 0
+    assert peers.hints == []
+
+
+@pytest.mark.unit
+def test_worker_defers_to_lower_node_id_owner():
+    chash = "C" * 16
+    # peer "aa-peer" < "node-self" also holds the hash -> it owns the repair
+    peers = FakePeersModule(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        peers=["10.0.0.2:8765", "10.0.0.3:8765"],
+        confirms={"10.0.0.2:8765": {"node_id": "aa-peer", "held": {chash}},
+                  "10.0.0.3:8765": {"node_id": "zz-peer", "held": set()}})
+    w = R.PlacementWorker(peers, {"default": "mirror",
+                                  "overrides": {"docs": "rf:3"}})
+    stats = w.run_reconcile_once()
+    assert stats["under"] == 1   # 2 of 3 copies
+    assert peers.hints == []     # but aa-peer drives, not us
+
+
+@pytest.mark.unit
+def test_worker_flags_over_target_but_never_acts():
+    chash = "C" * 16
+    peers = FakePeersModule(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        peers=["10.0.0.2:8765"],
+        confirms={"10.0.0.2:8765": {"node_id": "zz-peer", "held": {chash}}})
+    w = R.PlacementWorker(peers, {"default": "mirror",
+                                  "overrides": {"docs": "rf:1"}})
+    stats = w.run_reconcile_once()
+    assert stats["over"] == 1
+    assert stats["over_paths"] == ["docs/a.txt"]
+    assert peers.hints == []
+
+
+@pytest.mark.unit
+def test_worker_skips_cache_only_donor():
+    import ffsvolumes as V
+    chash = "C" * 16
+    peers = FakePeersModule(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        peers=["10.0.0.2:8765"],
+        confirms={"10.0.0.2:8765": {"node_id": "zz-peer", "held": set()}},
+        statuses=[{"holdings": {"node_id": "zz-peer"},
+                   "storage_profile": V.NODE_STORAGE_CACHE_ONLY,
+                   "backends": []}])
+    w = R.PlacementWorker(peers, RF2_CFG)
+    stats = w.run_reconcile_once()
+    assert stats["under"] == 1
+    assert peers.hints == []  # only candidate donor is cache-only
+
+
+@pytest.mark.unit
+def test_worker_unreachable_peer_assumed_absent_no_donor():
+    chash = "C" * 16
+    peers = FakePeersModule(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        peers=["10.0.0.2:8765"],
+        confirms={"10.0.0.2:8765": None})  # cannot answer
+    w = R.PlacementWorker(peers, RF2_CFG)
+    stats = w.run_reconcile_once()
+    assert stats["peers_answered"] == 0
+    assert stats["under"] == 1   # surfaced as at-risk
+    assert peers.hints == []     # nobody reachable to donate
+
+
+@pytest.mark.unit
+def test_worker_hint_cap_respected():
+    peers = FakePeersModule(
+        {f"docs/f{i}.txt": [_idx_entry(f"docs/f{i}.txt", f"{i:016d}")]
+         for i in range(10)},
+        peers=["10.0.0.2:8765"],
+        confirms={"10.0.0.2:8765": {"node_id": "zz-peer", "held": set()}})
+    w = R.PlacementWorker(peers, RF2_CFG, max_hints_per_sweep=3)
+    stats = w.run_reconcile_once()
+    assert stats["hints_sent"] == 3
+
+
+@pytest.mark.unit
+def test_worker_note_commit_nudges_only_rf_paths():
+    peers = FakePeersModule({})
+    w = R.PlacementWorker(peers, RF2_CFG)
+    w.note_commit("mirror-land/file.txt")
+    assert not w._nudge.is_set()
+    w.note_commit("docs/file.txt")
+    assert w._nudge.is_set()
+
+
+@pytest.mark.unit
+def test_worker_malformed_config_falls_back_to_noop():
+    w = R.PlacementWorker(FakePeersModule({}), {"default": "bogus-class"})
+    assert w.has_rf_targets() is False

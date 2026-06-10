@@ -22,14 +22,17 @@ import base64
 import hashlib
 import math
 import os
+import random
+import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from ffsutils import (
     DATA_DIR,
     NODE_STATUS_DIR,
     NULL_HASH,
+    get_suffix_from_path,
     normalize_vpath,
     parse_versioned_filename,
 )
@@ -512,3 +515,245 @@ def select_donors(peers: Iterable[dict], holder_ids: Iterable[str],
         ranked.append((-(int(p.get("free_bytes") or 0)), nid))
     ranked.sort()
     return [nid for _neg_free, nid in ranked[:max(0, int(needed))]]
+
+
+# ---- Phase 1: placement worker (reconcile sweep + commit nudges) -------------
+
+DEFAULT_RECONCILE_INTERVAL_SECS = 300
+DEFAULT_MAX_HINTS_PER_SWEEP = 20      # rate limit: never flood donors
+_NUDGE_DEBOUNCE_SECS = 5.0            # batch bursts of commits into one pass
+
+
+class PlacementWorker:
+    """Add-only enforcement (design §9.9): periodically reconciles every local
+    current version with an rf:N class against its confirmed-copy target, and
+    sends /replicate-hint to donors when under target. It never removes a copy;
+    over-target is only recorded for the dashboard.
+
+    Driven by the existing peer machinery through the injected ffspeers-shaped
+    module: _local_file_index / _INSTANCE_ID / _known_peers,
+    confirm_held_hashes, send_replicate_hint, and (best-effort) the federated
+    node statuses for donor profile/free-space. mirror-class paths are never
+    touched — with the default config the sweep is a no-op."""
+
+    def __init__(self, peers_module, redundancy_cfg: Optional[dict] = None,
+                 interval_secs: Optional[float] = None,
+                 max_hints_per_sweep: int = DEFAULT_MAX_HINTS_PER_SWEEP):
+        self.peers = peers_module
+        try:
+            self.cfg = normalize_redundancy_config(redundancy_cfg)
+        except ValueError:
+            # a malformed block must not break mounting; fall back to default
+            # (= all mirror = sweep no-op) rather than guess
+            self.cfg = normalize_redundancy_config(None)
+        self.interval = float(interval_secs or DEFAULT_RECONCILE_INTERVAL_SECS)
+        self.max_hints = int(max_hints_per_sweep)
+        self._stop = threading.Event()
+        self._nudge = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._last_stats: dict = {}
+        self._recent: deque = deque(maxlen=50)  # placement log for the dashboard
+
+    # lifecycle ---------------------------------------------------------
+
+    def start(self) -> None:
+        if self._thread is not None or not self.has_rf_targets():
+            return
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="ffsfs-placement")
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        self._nudge.set()
+        if self._thread is not None:
+            try:
+                self._thread.join(timeout=timeout)
+            except Exception:
+                pass
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            # jittered interval so a fleet does not sweep in lockstep; a commit
+            # nudge wakes the loop early (then debounce to batch the burst)
+            woke = self._nudge.wait(self.interval * random.uniform(0.8, 1.2))
+            if self._stop.is_set():
+                return
+            if woke:
+                self._nudge.clear()
+                self._stop.wait(_NUDGE_DEBOUNCE_SECS)
+                if self._stop.is_set():
+                    return
+            try:
+                self.run_reconcile_once()
+            except Exception as e:
+                print(f"[ffsfs] placement reconcile failed: {e}")
+
+    # triggers ----------------------------------------------------------
+
+    def note_commit(self, vpath: str) -> None:
+        """On-commit trigger: wake the sweep soon if the path has an rf target."""
+        target = placement_target(class_for_path(vpath, self.cfg))
+        if target:
+            self._nudge.set()
+
+    def has_rf_targets(self) -> bool:
+        classes = [self.cfg["default"], *self.cfg["overrides"].values()]
+        return any(parse_rf(c) for c in classes)
+
+    # status ------------------------------------------------------------
+
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "running": bool(self._thread and self._thread.is_alive()),
+                "interval_secs": self.interval,
+                "last_sweep": dict(self._last_stats),
+                "recent": list(self._recent),
+            }
+
+    # the sweep ---------------------------------------------------------
+
+    def _rf_targeted_work(self) -> Dict[str, dict]:
+        """Local current versions whose class is rf:N, keyed by content hash:
+        {hash: {vpath, name, size, target}}. mirror (None) and cache (0) paths
+        are never driven (§9.4/§9.11)."""
+        index = dict(getattr(self.peers, "_local_file_index", {}) or {})
+        work: Dict[str, dict] = {}
+        for vpath, versions in index.items():
+            if (not vpath or vpath == NODE_STATUS_DIR
+                    or vpath.startswith(NODE_STATUS_DIR + "/")):
+                continue
+            best = None  # (ts, parsed, name, size)
+            for v in versions or ():
+                name = v.get("name", "")
+                parsed = parse_versioned_filename(name)
+                if not parsed:
+                    continue
+                if best is None or parsed["timestamp"] > best[0]:
+                    best = (parsed["timestamp"], parsed, name,
+                            int(v.get("size", 0) or 0))
+            if best is None:
+                continue
+            _ts, parsed, name, size = best
+            chash = parsed.get("content_hash")
+            if parsed["mode"] in _SKIP_MODES or not chash or chash == NULL_HASH:
+                continue
+            target = placement_target(class_for_path(vpath, self.cfg))
+            if not target:
+                continue
+            cur = work.get(chash)
+            if cur is None or target > cur["target"]:
+                work[chash] = {"vpath": vpath, "name": name, "size": size,
+                               "target": target}
+        return work
+
+    def _donor_descriptors(self, node_ids: Iterable[str]) -> List[dict]:
+        """Best-effort descriptors for the reachable peers (they answered the
+        confirm round-trip, so alive=True), enriched with storage profile and
+        free space from the synced federated node statuses when available.
+        Unknown profile defaults to 'limited' (a durable donor) — wrong at
+        worst costs an extra refused hint, never a lost copy."""
+        from ffsvolumes import DEFAULT_NODE_STORAGE_PROFILE
+        profile: Dict[str, str] = {}
+        free: Dict[str, int] = {}
+        try:
+            statuses = self.peers._collect_federated_nodes() or []
+        except Exception:
+            statuses = []
+        for st in statuses:
+            if not isinstance(st, dict):
+                continue
+            nid = str((st.get("holdings") or {}).get("node_id") or "").strip()
+            if not nid:
+                continue
+            if st.get("storage_profile"):
+                profile[nid] = str(st["storage_profile"])
+            free[nid] = sum(int(b.get("free_bytes") or 0)
+                            for b in (st.get("backends") or [])
+                            if isinstance(b, dict))
+        return [{"node_id": nid,
+                 "storage_profile": profile.get(nid, DEFAULT_NODE_STORAGE_PROFILE),
+                 "free_bytes": free.get(nid, 0),
+                 "alive": True}
+                for nid in node_ids]
+
+    def run_reconcile_once(self) -> dict:
+        if not self.has_rf_targets():
+            stats = {"skipped": "no rf classes configured", "at": int(time.time())}
+            with self._lock:
+                self._last_stats = stats
+            return stats
+
+        peers = self.peers
+        self_id = str(getattr(peers, "_INSTANCE_ID", "") or "")
+        work = self._rf_targeted_work()
+        stats = {"at": int(time.time()), "checked": len(work), "under": 0,
+                 "over": 0, "hints_sent": 0, "hints_failed": 0,
+                 "peers_asked": 0, "peers_answered": 0}
+        if not work or not self_id:
+            with self._lock:
+                self._last_stats = stats
+            return stats
+
+        # one bulk confirm round-trip per known peer (§9.3: only a confirmed
+        # answer counts; an unreachable peer is assumed absent)
+        all_hashes = set(work)
+        holders: Dict[str, Set[str]] = {h: {self_id} for h in all_hashes}
+        addr_by_node: Dict[str, str] = {}
+        for addr in list(getattr(peers, "_known_peers", []) or []):
+            stats["peers_asked"] += 1
+            resp = peers.confirm_held_hashes(addr, all_hashes)
+            if resp is None:
+                continue
+            stats["peers_answered"] += 1
+            nid = str(resp.get("node_id") or "").strip()
+            if not nid or nid == self_id:
+                continue
+            addr_by_node[nid] = addr
+            for h in resp.get("held") or ():
+                if h in holders:
+                    holders[h].add(nid)
+
+        over_paths: List[str] = []
+        for chash, info in sorted(work.items(), key=lambda kv: kv[1]["vpath"]):
+            confirmed = holders[chash]
+            state = placement_status(len(confirmed), info["target"])
+            if state == "over":
+                stats["over"] += 1
+                over_paths.append(info["vpath"])  # flag only — never drop (§9.10)
+                continue
+            if state != "under":
+                continue
+            stats["under"] += 1
+            if owner_for_hash(confirmed) != self_id:
+                continue  # another confirmed holder drives this hash (§9.5)
+            donors = select_donors(self._donor_descriptors(addr_by_node),
+                                   confirmed,
+                                   info["target"] - len(confirmed))
+            for nid in donors:
+                if stats["hints_sent"] + stats["hints_failed"] >= self.max_hints:
+                    break
+                suffix = get_suffix_from_path(info["name"])
+                resp = peers.send_replicate_hint(
+                    addr_by_node[nid], info["vpath"], suffix, chash,
+                    size=info["size"])
+                ok = bool(resp and resp.get("ok"))
+                stats["hints_sent" if ok else "hints_failed"] += 1
+                if resp and resp.get("already_present"):
+                    result = "already_present"
+                else:
+                    result = "pulled" if ok else "failed"
+                with self._lock:
+                    self._recent.append({
+                        "at": int(time.time()), "vpath": info["vpath"],
+                        "hash": chash, "donor": nid, "ok": ok, "result": result,
+                    })
+            if stats["hints_sent"] + stats["hints_failed"] >= self.max_hints:
+                break
+
+        stats["over_paths"] = over_paths[:20]
+        with self._lock:
+            self._last_stats = stats
+        return stats
