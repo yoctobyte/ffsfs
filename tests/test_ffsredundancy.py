@@ -569,3 +569,169 @@ def test_worker_note_commit_nudges_only_rf_paths():
 def test_worker_malformed_config_falls_back_to_noop():
     w = R.PlacementWorker(FakePeersModule({}), {"default": "bogus-class"})
     assert w.has_rf_targets() is False
+
+
+# ---- Phase 2: availability-weighted counting + tier/domain donors -------------
+
+def _holder(nid, tier=None, online=True, last=None):
+    return {"node_id": nid, "availability": tier, "online": online,
+            "last_confirmed": last}
+
+
+@pytest.mark.unit
+def test_evaluate_placement_availability_floor():
+    import ffsvolumes as V
+    # two online intermittent copies: durable at target, availability unmet
+    ev = R.evaluate_placement([_holder("a"), _holder("b")], 2)
+    assert ev["status"] == "at" and ev["needed"] == 0
+    assert ev["need_always_on"] is True
+    # one online always_online copy satisfies the floor
+    ev = R.evaluate_placement(
+        [_holder("a", V.NODE_AVAILABILITY_ALWAYS_ON), _holder("b")], 2)
+    assert ev["need_always_on"] is False
+    # an OFFLINE always_online holder is a failure, not a tier: counts nothing
+    ev = R.evaluate_placement(
+        [_holder("a"), _holder("b", V.NODE_AVAILABILITY_ALWAYS_ON,
+                               online=False, last=1)], 2, now=100)
+    assert ev["need_always_on"] is True
+    assert ev["durable_copies"] == 1
+
+
+@pytest.mark.unit
+def test_evaluate_placement_one_graced_cold_slot():
+    import ffsvolumes as V
+    now = 1_000_000.0
+    cold_ok = _holder("nas", V.NODE_AVAILABILITY_ON_DEMAND, online=False,
+                      last=now - 3600)
+    cold_ok2 = _holder("nas2", V.NODE_AVAILABILITY_ON_DEMAND, online=False,
+                       last=now - 7200)
+    cold_stale = _holder("nas3", V.NODE_AVAILABILITY_ON_DEMAND, online=False,
+                         last=now - 30 * 86400)
+    on = _holder("a", V.NODE_AVAILABILITY_ALWAYS_ON)
+    # offline on_demand within grace counts toward durability...
+    ev = R.evaluate_placement([on, cold_ok], 2, now=now)
+    assert ev["durable_copies"] == 2 and ev["needed"] == 0
+    assert ev["cold_slot_used"] is True
+    # ...but only ONE such slot
+    ev = R.evaluate_placement([on, cold_ok, cold_ok2], 3, now=now)
+    assert ev["durable_copies"] == 2 and ev["needed"] == 1
+    # ...and never past the grace window
+    ev = R.evaluate_placement([on, cold_stale], 2, now=now)
+    assert ev["durable_copies"] == 1 and ev["needed"] == 1
+    # offline intermittent never counts
+    ev = R.evaluate_placement(
+        [on, _holder("b", online=False, last=now - 60)], 2, now=now)
+    assert ev["durable_copies"] == 1
+
+
+@pytest.mark.unit
+def test_select_donors_always_on_filter_and_domain_deprioritization():
+    import ffsvolumes as V
+    peers = [
+        dict(_peer("inter", profile=V.NODE_STORAGE_BULK, free=900),
+             availability=V.NODE_AVAILABILITY_INTERMITTENT),
+        dict(_peer("alwayson", profile=V.NODE_STORAGE_BULK, free=10),
+             availability=V.NODE_AVAILABILITY_ALWAYS_ON),
+    ]
+    # availability-floor repair only accepts always_online donors
+    assert R.select_donors(peers, [], 1, require_always_on=True) == ["alwayson"]
+    # domain: donor on a host that already holds a copy ranks last...
+    peers = [
+        dict(_peer("samehost", profile=V.NODE_STORAGE_BULK, free=900), host_id="H1"),
+        dict(_peer("otherhost", profile=V.NODE_STORAGE_BULK, free=10), host_id="H2"),
+    ]
+    assert R.select_donors(peers, [], 1, holder_hosts={"H1"}) == ["otherhost"]
+    # ...but is still used when nobody else can take the copy (add-only)
+    assert R.select_donors(peers[:1], [], 1, holder_hosts={"H1"}) == ["samehost"]
+
+
+@pytest.mark.unit
+def test_worker_availability_repair_targets_always_on_donor():
+    import ffsvolumes as V
+    chash = "C" * 16
+    # self + zz-peer hold it (rf:2 satisfied) but both are intermittent;
+    # aa-don is always_online and must receive the availability copy.
+    # self_id "aa-a" is lowest holder -> we own the repair.
+    peers = FakePeersModule(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        self_id="aa-a",
+        peers=["10.0.0.2:1", "10.0.0.3:1"],
+        confirms={"10.0.0.2:1": {"node_id": "zz-peer", "held": {chash}},
+                  "10.0.0.3:1": {"node_id": "bb-don", "held": set()}},
+        statuses=[{"holdings": {"node_id": "bb-don"},
+                   "availability": V.NODE_AVAILABILITY_ALWAYS_ON,
+                   "storage_profile": V.NODE_STORAGE_BULK, "backends": []}])
+    w = R.PlacementWorker(peers, RF2_CFG)
+    stats = w.run_reconcile_once()
+    assert stats["under"] == 0                  # durability is fine
+    assert stats["availability_under"] == 1     # floor unmet
+    assert [h["addr"] for h in peers.hints] == ["10.0.0.3:1"]
+    assert stats["hints_sent"] == 1
+
+
+@pytest.mark.unit
+def test_worker_counts_offline_cold_holder_within_grace():
+    import ffsvolumes as V
+    chash = "C" * 16
+    nas_status = {"holdings": {"node_id": "nas-id"},
+                  "availability": V.NODE_AVAILABILITY_ON_DEMAND,
+                  "storage_profile": V.NODE_STORAGE_BULK, "backends": []}
+
+    class SelfAlwaysOn(FakePeersModule):
+        def node_profile(self):
+            return {"availability": V.NODE_AVAILABILITY_ALWAYS_ON,
+                    "host_id": "HSELF"}
+
+    # sweep 1: NAS online, confirms the hash -> recorded in history
+    peers = SelfAlwaysOn(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        peers=["10.0.0.9:1"],
+        confirms={"10.0.0.9:1": {"node_id": "nas-id", "held": {chash}}},
+        statuses=[nas_status])
+    w = R.PlacementWorker(peers, RF2_CFG)
+    assert w.run_reconcile_once()["under"] == 0
+
+    # sweep 2: NAS asleep (unreachable) -> graced cold slot keeps rf:2 met
+    peers._confirms = {"10.0.0.9:1": None}
+    stats = w.run_reconcile_once()
+    assert stats["under"] == 0
+    assert stats["availability_under"] == 0  # self is always_online
+    assert peers.hints == []
+    assert stats["at_risk"] == []
+
+
+@pytest.mark.unit
+def test_worker_at_risk_lists_unrepairable_paths():
+    chash = "C" * 16
+    peers = FakePeersModule(   # rf:2, nobody reachable to donate
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        peers=["10.0.0.2:1"],
+        confirms={"10.0.0.2:1": None})
+    w = R.PlacementWorker(peers, RF2_CFG)
+    stats = w.run_reconcile_once()
+    risk = stats["at_risk"]
+    assert len(risk) == 1
+    assert risk[0]["vpath"] == "docs/a.txt"
+    assert risk[0]["durable"] == 1 and risk[0]["target"] == 2
+    assert risk[0]["need_always_on"] is True
+
+
+@pytest.mark.unit
+def test_worker_counts_domain_conflict_when_forced_same_host():
+    chash = "C" * 16
+
+    class SelfHosted(FakePeersModule):
+        def node_profile(self):
+            return {"availability": "always_online", "host_id": "H1"}
+
+    peers = SelfHosted(   # only donor lives on OUR host -> placed anyway, flagged
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        self_id="aa-a",
+        peers=["10.0.0.2:1"],
+        confirms={"10.0.0.2:1": {"node_id": "zz-don", "held": set()}},
+        statuses=[{"holdings": {"node_id": "zz-don"}, "host_id": "H1",
+                   "backends": []}])
+    w = R.PlacementWorker(peers, RF2_CFG)
+    stats = w.run_reconcile_once()
+    assert stats["hints_sent"] == 1
+    assert stats["domain_conflicts"] == 1

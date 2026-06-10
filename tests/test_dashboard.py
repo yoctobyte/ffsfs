@@ -179,3 +179,35 @@ def test_dashboard_shows_placement_sweep_and_world_map(dash, monkeypatch):
     assert "World map" in body
     assert "123" in body
     assert "bulk_storage" in body
+
+
+@pytest.mark.unit
+def test_dashboard_shows_at_risk_and_tier(dash, monkeypatch):
+    class FakeWorker:
+        def status(self):
+            return {
+                "running": True, "interval_secs": 300,
+                "last_sweep": {"at": int(time.time()), "checked": 3, "under": 1,
+                               "over": 0, "availability_under": 1,
+                               "domain_conflicts": 0, "hints_sent": 0,
+                               "hints_failed": 0, "peers_asked": 1,
+                               "peers_answered": 0,
+                               "at_risk": [{"vpath": "docs/fragile.txt",
+                                            "target": 3, "online": 1,
+                                            "durable": 1,
+                                            "need_always_on": True}]},
+                "recent": [],
+            }
+    monkeypatch.setattr(ffspeers, "_placement_worker", FakeWorker())
+    monkeypatch.setattr(ffspeers, "_collect_federated_nodes", lambda: [
+        {"node": "nas", "storage_profile": "bulk_storage",
+         "availability": "on_demand", "host_id": "abc123def456",
+         "node_role": "replica_storage",
+         "holdings": {"node_id": "nas-instance", "count": 7}},
+    ])
+    resp = dash.get("/dashboard")
+    body = resp.get_data(as_text=True)
+    assert "At risk" in body
+    assert "docs/fragile.txt" in body
+    assert "on_demand" in body          # tier column in world map
+    assert "no-always-on 1" in body

@@ -1899,12 +1899,27 @@ def _placement_panel_html(e) -> str:
             else:
                 sweep = (f"last sweep: checked {last.get('checked', 0)}"
                          f" · under {last.get('under', 0)}"
+                         f" · no-always-on {last.get('availability_under', 0)}"
                          f" · over {last.get('over', 0)}"
                          f" · hints {last.get('hints_sent', 0)}"
                          f" (+{last.get('hints_failed', 0)} failed)"
+                         f" · domain conflicts {last.get('domain_conflicts', 0)}"
                          f" · peers {last.get('peers_answered', 0)}"
                          f"/{last.get('peers_asked', 0)}")
             parts.append(f"<div class=\"meta\">{sweep}</div>")
+        risk = (last or {}).get("at_risk") or []
+        if risk:
+            rows = "\n".join(
+                f"<tr><td><code>{e(str(r.get('vpath')))}</code></td>"
+                f"<td>{e(str(r.get('durable')))} / {e(str(r.get('target')))}</td>"
+                f"<td>{e(str(r.get('online')))}</td>"
+                f"<td>{'yes' if r.get('need_always_on') else ''}</td></tr>"
+                for r in risk)
+            parts.append(
+                "<h3>At risk</h3>"
+                "<table><thead><tr><th>Path</th><th>Durable / target</th>"
+                "<th>Online copies</th><th>Needs always-on</th></tr></thead>"
+                f"<tbody>{rows}</tbody></table>")
         recent = st.get("recent") or []
         if recent:
             rows = "\n".join(
@@ -1933,12 +1948,15 @@ def _placement_panel_html(e) -> str:
             f"<td><code>{e(str(h.get('node_id'))[:12])}</code></td>"
             f"<td>{e(str(h.get('count', '?')))}</td>"
             f"<td>{e(str(s.get('storage_profile') or '?'))}</td>"
+            f"<td>{e(str(s.get('availability') or '?'))}</td>"
+            f"<td><code>{e(str(s.get('host_id') or '?'))}</code></td>"
             f"<td>{e(str(s.get('node_role') or '?'))}</td></tr>")
     if world_rows:
         parts.append(
             "<h3>World map (self-reported holdings)</h3>"
             "<table><thead><tr><th>Node</th><th>Instance</th><th>Current files"
-            "</th><th>Storage profile</th><th>Role</th></tr></thead>"
+            "</th><th>Storage profile</th><th>Tier</th><th>Host</th>"
+            "<th>Role</th></tr></thead>"
             f"<tbody>{''.join(world_rows)}</tbody></table>")
     return "\n".join(parts)
 
@@ -2328,22 +2346,48 @@ def confirm_held_hashes(peer: str, hashes) -> Optional[dict]:
 
 _NODE_ROLE: Optional[str] = None
 _NODE_STORAGE_PROFILE: Optional[str] = None
+_NODE_AVAILABILITY: Optional[str] = None
+_HOST_ID: Optional[str] = None
 
 
 def set_node_profile(node_role: Optional[str],
-                     storage_profile: Optional[str]) -> None:
-    global _NODE_ROLE, _NODE_STORAGE_PROFILE
+                     storage_profile: Optional[str],
+                     availability: Optional[str] = None) -> None:
+    global _NODE_ROLE, _NODE_STORAGE_PROFILE, _NODE_AVAILABILITY
     _NODE_ROLE = (node_role or "").strip() or None
     _NODE_STORAGE_PROFILE = (storage_profile or "").strip() or None
+    _NODE_AVAILABILITY = (availability or "").strip() or None
+
+
+def _host_id() -> str:
+    """Stable, non-reversible failure-domain id for this machine (Phase 2,
+    design §11.1): hashed machine-id, hostname as fallback. Two ffsfs
+    instances on one box share it — placement avoids stacking copies there."""
+    global _HOST_ID
+    if _HOST_ID:
+        return _HOST_ID
+    raw = ""
+    try:
+        with open("/etc/machine-id", "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+    except OSError:
+        pass
+    if not raw:
+        raw = socket.gethostname()
+    _HOST_ID = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+    return _HOST_ID
 
 
 def node_profile() -> dict:
-    """This node's role/storage profile for node-status (falls back to the
-    ffsvolumes defaults when the config never set them)."""
-    from ffsvolumes import DEFAULT_NODE_ROLE, DEFAULT_NODE_STORAGE_PROFILE
+    """This node's role/storage profile/availability tier + failure domain for
+    node-status (ffsvolumes defaults when the config never set them)."""
+    from ffsvolumes import (DEFAULT_NODE_AVAILABILITY, DEFAULT_NODE_ROLE,
+                            DEFAULT_NODE_STORAGE_PROFILE)
     return {
         "node_role": _NODE_ROLE or DEFAULT_NODE_ROLE,
         "storage_profile": _NODE_STORAGE_PROFILE or DEFAULT_NODE_STORAGE_PROFILE,
+        "availability": _NODE_AVAILABILITY or DEFAULT_NODE_AVAILABILITY,
+        "host_id": _host_id(),
     }
 
 

@@ -37,6 +37,9 @@ from ffsutils import (
     parse_versioned_filename,
 )
 from ffsvolumes import (
+    DEFAULT_NODE_AVAILABILITY,
+    NODE_AVAILABILITY_ALWAYS_ON,
+    NODE_AVAILABILITY_ON_DEMAND,
     NODE_ROLE_REPLICA,
     NODE_ROLE_SHARED,
     NODE_STORAGE_BULK,
@@ -491,17 +494,21 @@ def owner_for_hash(holder_ids: Iterable[str]) -> Optional[str]:
 
 
 def select_donors(peers: Iterable[dict], holder_ids: Iterable[str],
-                  needed: int) -> List[str]:
-    """Pick donor node_ids for an under-target hash (§9.6). `peers` are plain
-    descriptors {node_id, storage_profile, free_bytes?, alive?}.
+                  needed: int, require_always_on: bool = False,
+                  holder_hosts: Iterable[str] = ()) -> List[str]:
+    """Pick donor node_ids for an under-target hash (§9.6, tiers/domains §11.3).
+    `peers` are plain descriptors {node_id, storage_profile, free_bytes?,
+    alive?, availability?, host_id?}.
 
     Filters: durable + donating storage profile (never cache-only), not already
-    a holder (Phase 1 failure domain = distinct node), and currently alive so
-    the copy can land now. Prefers most free space (matches the existing
-    write-target preference); returns at most `needed`. The donor still
-    enforces its own capacity floor when it pulls — this list is a preference,
-    not a reservation."""
+    a holder, currently alive so the copy can land now; with
+    `require_always_on`, only always_online donors qualify (availability-floor
+    repair). Donors whose host_id matches an existing holder's failure domain
+    are deprioritized but still eligible — add-only: a same-host extra copy
+    beats staying under target. Then prefers most free space. Returns at most
+    `needed`; the donor still enforces its own capacity floor at pull time."""
     holders = {str(h) for h in (holder_ids or ())}
+    taken_hosts = {str(h) for h in (holder_hosts or ()) if h}
     ranked = []
     for p in peers or ():
         nid = str(p.get("node_id") or "").strip()
@@ -512,9 +519,72 @@ def select_donors(peers: Iterable[dict], holder_ids: Iterable[str],
         profile = p.get("storage_profile") or ""
         if not (is_durable_replica(profile) and donates_storage(profile)):
             continue
-        ranked.append((-(int(p.get("free_bytes") or 0)), nid))
+        if require_always_on and not is_always_on(
+                p.get("availability") or DEFAULT_NODE_AVAILABILITY):
+            continue
+        host = str(p.get("host_id") or "")
+        domain_conflict = bool(host and host in taken_hosts)
+        ranked.append((domain_conflict, -(int(p.get("free_bytes") or 0)), nid))
     ranked.sort()
-    return [nid for _neg_free, nid in ranked[:max(0, int(needed))]]
+    return [nid for _conflict, _neg_free, nid in ranked[:max(0, int(needed))]]
+
+
+# ---- Phase 2: availability-weighted counting (design §11.2) -------------------
+# Raw copy count lies: 3 copies on flaky nodes < 2 on always-on (§5). A
+# placement is healthy when BOTH hold: the availability floor (>=1 confirmed
+# copy on an online always_online node) and the durability target (>=N counting
+# online holders plus at most ONE recently-confirmed offline on_demand holder).
+
+DEFAULT_OFFLINE_GRACE_SECS = 7 * 86400   # how long an offline on_demand copy
+                                          # keeps counting toward durability
+
+
+def is_always_on(availability: Optional[str]) -> bool:
+    return (availability or DEFAULT_NODE_AVAILABILITY) == NODE_AVAILABILITY_ALWAYS_ON
+
+
+def is_on_demand(availability: Optional[str]) -> bool:
+    return (availability or DEFAULT_NODE_AVAILABILITY) == NODE_AVAILABILITY_ON_DEMAND
+
+
+def evaluate_placement(holders: Iterable[dict], target: int,
+                       now: Optional[float] = None,
+                       offline_grace: float = DEFAULT_OFFLINE_GRACE_SECS) -> dict:
+    """Phase 2 health of one hash's holder set against an rf target (§11.2).
+
+    `holders`: [{node_id, availability?, online: bool, last_confirmed?: ts}].
+    Online holders count toward durability unconditionally. Offline holders
+    count ONLY when on_demand AND confirmed within `offline_grace` — and only
+    one such cold slot (more would trust unverifiable state; the asymmetry law
+    says lean to extra copies). Offline intermittent/always_online holders
+    never count: an always-on node that is *down* is a failure, not a tier.
+
+    Returns {status, available, online_copies, durable_copies, needed,
+    need_always_on, cold_slot_used}. `needed`/`need_always_on` describe the
+    repair: copies to add for durability / whether one must land always-on."""
+    now = time.time() if now is None else now
+    online = [h for h in (holders or ()) if h.get("online")]
+    available = any(is_always_on(h.get("availability")) for h in online)
+    durable = len(online)
+    cold_slot_used = False
+    for h in holders or ():
+        if h.get("online") or cold_slot_used:
+            continue
+        if not is_on_demand(h.get("availability")):
+            continue
+        last = float(h.get("last_confirmed") or 0)
+        if last and (now - last) <= offline_grace:
+            durable += 1
+            cold_slot_used = True
+    return {
+        "status": placement_status(durable, target),
+        "available": available,
+        "online_copies": len(online),
+        "durable_copies": durable,
+        "needed": max(0, int(target) - durable),
+        "need_always_on": not available,
+        "cold_slot_used": cold_slot_used,
+    }
 
 
 # ---- Phase 1: placement worker (reconcile sweep + commit nudges) -------------
@@ -538,7 +608,8 @@ class PlacementWorker:
 
     def __init__(self, peers_module, redundancy_cfg: Optional[dict] = None,
                  interval_secs: Optional[float] = None,
-                 max_hints_per_sweep: int = DEFAULT_MAX_HINTS_PER_SWEEP):
+                 max_hints_per_sweep: int = DEFAULT_MAX_HINTS_PER_SWEEP,
+                 offline_grace_secs: Optional[float] = None):
         self.peers = peers_module
         try:
             self.cfg = normalize_redundancy_config(redundancy_cfg)
@@ -548,12 +619,16 @@ class PlacementWorker:
             self.cfg = normalize_redundancy_config(None)
         self.interval = float(interval_secs or DEFAULT_RECONCILE_INTERVAL_SECS)
         self.max_hints = int(max_hints_per_sweep)
+        self.offline_grace = float(offline_grace_secs or DEFAULT_OFFLINE_GRACE_SECS)
         self._stop = threading.Event()
         self._nudge = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._last_stats: dict = {}
         self._recent: deque = deque(maxlen=50)  # placement log for the dashboard
+        # Phase 2 (§11.2): when each node last positively confirmed each hash.
+        # In-memory only — a restart forgets and over-replicates briefly (safe).
+        self._confirm_history: Dict[str, Dict[str, float]] = {}
 
     # lifecycle ---------------------------------------------------------
 
@@ -649,15 +724,15 @@ class PlacementWorker:
                                "target": target}
         return work
 
-    def _donor_descriptors(self, node_ids: Iterable[str]) -> List[dict]:
-        """Best-effort descriptors for the reachable peers (they answered the
-        confirm round-trip, so alive=True), enriched with storage profile and
-        free space from the synced federated node statuses when available.
-        Unknown profile defaults to 'limited' (a durable donor) — wrong at
-        worst costs an extra refused hint, never a lost copy."""
+    def _node_meta(self) -> Dict[str, dict]:
+        """Best-effort per-node metadata from the synced federated node
+        statuses: storage profile, availability tier, failure domain, free
+        space. Missing fields degrade to safe defaults — unknown profile is a
+        durable donor (worst case a refused hint), unknown tier is
+        'intermittent' (never satisfies the availability floor by accident),
+        unknown host is treated as a distinct domain."""
         from ffsvolumes import DEFAULT_NODE_STORAGE_PROFILE
-        profile: Dict[str, str] = {}
-        free: Dict[str, int] = {}
+        meta: Dict[str, dict] = {}
         try:
             statuses = self.peers._collect_federated_nodes() or []
         except Exception:
@@ -668,16 +743,42 @@ class PlacementWorker:
             nid = str((st.get("holdings") or {}).get("node_id") or "").strip()
             if not nid:
                 continue
-            if st.get("storage_profile"):
-                profile[nid] = str(st["storage_profile"])
-            free[nid] = sum(int(b.get("free_bytes") or 0)
-                            for b in (st.get("backends") or [])
-                            if isinstance(b, dict))
-        return [{"node_id": nid,
-                 "storage_profile": profile.get(nid, DEFAULT_NODE_STORAGE_PROFILE),
-                 "free_bytes": free.get(nid, 0),
-                 "alive": True}
-                for nid in node_ids]
+            meta[nid] = {
+                "storage_profile": str(st.get("storage_profile")
+                                       or DEFAULT_NODE_STORAGE_PROFILE),
+                "availability": str(st.get("availability")
+                                    or DEFAULT_NODE_AVAILABILITY),
+                "host_id": str(st.get("host_id") or ""),
+                "free_bytes": sum(int(b.get("free_bytes") or 0)
+                                  for b in (st.get("backends") or [])
+                                  if isinstance(b, dict)),
+            }
+        return meta
+
+    def _self_profile(self) -> dict:
+        try:
+            return self.peers.node_profile() or {}
+        except Exception:
+            return {}
+
+    def _donor_descriptors(self, node_ids: Iterable[str],
+                           meta: Dict[str, dict]) -> List[dict]:
+        """Descriptors for the reachable peers (they answered the confirm
+        round-trip, so alive=True), enriched from the node metadata."""
+        from ffsvolumes import DEFAULT_NODE_STORAGE_PROFILE
+        out = []
+        for nid in node_ids:
+            m = meta.get(nid, {})
+            out.append({
+                "node_id": nid,
+                "storage_profile": m.get("storage_profile",
+                                         DEFAULT_NODE_STORAGE_PROFILE),
+                "availability": m.get("availability", DEFAULT_NODE_AVAILABILITY),
+                "host_id": m.get("host_id", ""),
+                "free_bytes": m.get("free_bytes", 0),
+                "alive": True,
+            })
+        return out
 
     def run_reconcile_once(self) -> dict:
         if not self.has_rf_targets():
@@ -690,7 +791,8 @@ class PlacementWorker:
         self_id = str(getattr(peers, "_INSTANCE_ID", "") or "")
         work = self._rf_targeted_work()
         stats = {"at": int(time.time()), "checked": len(work), "under": 0,
-                 "over": 0, "hints_sent": 0, "hints_failed": 0,
+                 "over": 0, "availability_under": 0, "domain_conflicts": 0,
+                 "hints_sent": 0, "hints_failed": 0,
                  "peers_asked": 0, "peers_answered": 0}
         if not work or not self_id:
             with self._lock:
@@ -716,22 +818,80 @@ class PlacementWorker:
                 if h in holders:
                     holders[h].add(nid)
 
+        now = time.time()
+        meta = self._node_meta()
+        selfp = self._self_profile()
+
+        # confirm history (§11.2): record this sweep's positives, forget
+        # hashes that stopped being targeted
+        for h, nids in holders.items():
+            seen = self._confirm_history.setdefault(h, {})
+            for nid in nids:
+                seen[nid] = now
+        for h in list(self._confirm_history):
+            if h not in work:
+                self._confirm_history.pop(h, None)
+
+        def _tier(nid: str) -> Optional[str]:
+            if nid == self_id:
+                return selfp.get("availability")
+            return meta.get(nid, {}).get("availability")
+
+        def _host(nid: str) -> str:
+            if nid == self_id:
+                return str(selfp.get("host_id") or "")
+            return meta.get(nid, {}).get("host_id", "")
+
         over_paths: List[str] = []
+        at_risk: List[dict] = []
         for chash, info in sorted(work.items(), key=lambda kv: kv[1]["vpath"]):
-            confirmed = holders[chash]
-            state = placement_status(len(confirmed), info["target"])
-            if state == "over":
+            online_ids = holders[chash]
+            records = [{"node_id": nid, "availability": _tier(nid),
+                        "online": True} for nid in online_ids]
+            for nid, ts in (self._confirm_history.get(chash) or {}).items():
+                if nid in online_ids:
+                    continue
+                records.append({"node_id": nid, "availability": _tier(nid),
+                                "online": False, "last_confirmed": ts})
+            ev = evaluate_placement(records, info["target"], now=now,
+                                    offline_grace=self.offline_grace)
+            if ev["status"] == "over":
                 stats["over"] += 1
                 over_paths.append(info["vpath"])  # flag only — never drop (§9.10)
+            if ev["needed"] > 0:
+                stats["under"] += 1
+            if ev["need_always_on"]:
+                stats["availability_under"] += 1
+            if ev["needed"] > 0 or ev["need_always_on"]:
+                if len(at_risk) < 20:
+                    at_risk.append({"vpath": info["vpath"],
+                                    "target": info["target"],
+                                    "online": ev["online_copies"],
+                                    "durable": ev["durable_copies"],
+                                    "need_always_on": ev["need_always_on"]})
+            if ev["needed"] <= 0 and not ev["need_always_on"]:
                 continue
-            if state != "under":
-                continue
-            stats["under"] += 1
-            if owner_for_hash(confirmed) != self_id:
-                continue  # another confirmed holder drives this hash (§9.5)
-            donors = select_donors(self._donor_descriptors(addr_by_node),
-                                   confirmed,
-                                   info["target"] - len(confirmed))
+            if owner_for_hash(online_ids) != self_id:
+                continue  # another online confirmed holder drives (§9.5)
+
+            descriptors = self._donor_descriptors(addr_by_node, meta)
+            holder_hosts = {_host(nid) for nid in online_ids if _host(nid)}
+            donors: List[str] = []
+            remaining = ev["needed"]
+            if ev["need_always_on"]:
+                # the availability-floor repair must land always-on (§11.3)
+                first = select_donors(descriptors, online_ids, 1,
+                                      require_always_on=True,
+                                      holder_hosts=holder_hosts)
+                donors += first
+                remaining = max(0, remaining - len(first))
+            if remaining > 0:
+                donors += select_donors(descriptors,
+                                        set(online_ids) | set(donors),
+                                        remaining, holder_hosts=holder_hosts)
+            stats["domain_conflicts"] += sum(
+                1 for nid in donors
+                if _host(nid) and _host(nid) in holder_hosts)
             for nid in donors:
                 if stats["hints_sent"] + stats["hints_failed"] >= self.max_hints:
                     break
@@ -754,6 +914,7 @@ class PlacementWorker:
                 break
 
         stats["over_paths"] = over_paths[:20]
+        stats["at_risk"] = at_risk
         with self._lock:
             self._last_stats = stats
         return stats

@@ -2038,14 +2038,16 @@ def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool 
             # role participates in placement — default config = no-op.
             if hasattr(peers, "set_node_profile"):
                 peers.set_node_profile(cfg.get("node_role"),
-                                       cfg.get("node_storage_profile"))
+                                       cfg.get("node_storage_profile"),
+                                       cfg.get("node_availability"))
             if hasattr(peers, "register_placement_worker"):
                 import ffsredundancy
                 from ffsvolumes import DEFAULT_NODE_ROLE
                 rcfg = cfg.get("redundancy") or {}
                 worker = ffsredundancy.PlacementWorker(
                     peers, rcfg,
-                    interval_secs=rcfg.get("reconcile_interval"))
+                    interval_secs=rcfg.get("reconcile_interval"),
+                    offline_grace_secs=rcfg.get("offline_grace"))
                 peers.register_placement_worker(worker)
                 fs.placement_worker = worker
                 if ffsredundancy.participates_in_placement(

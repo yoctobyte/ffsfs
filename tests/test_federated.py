@@ -183,3 +183,21 @@ def test_status_dir_hidden_from_list_dir(tmp_path):
         assert NODE_STATUS_DIR not in dirs   # reserved dir hidden
     finally:
         ffspeers._local_backend, ffspeers._REALM = old_b, old_r
+
+
+@pytest.mark.unit
+def test_node_status_advertises_profile_tier_and_host(fs, monkeypatch):
+    monkeypatch.setattr(ffspeers, "_NODE_ROLE", None)
+    monkeypatch.setattr(ffspeers, "_NODE_STORAGE_PROFILE", None)
+    monkeypatch.setattr(ffspeers, "_NODE_AVAILABILITY", None)
+    status = fs._build_node_status()
+    # defaults when never configured
+    assert status["node_role"] == "cache_limited"
+    assert status["storage_profile"] == "limited"
+    assert status["availability"] == "intermittent"
+    assert len(status["host_id"]) == 12
+    # configured values flow through
+    ffspeers.set_node_profile("replica_storage", "bulk_storage", "always_online")
+    status = fs._build_node_status()
+    assert status["availability"] == "always_online"
+    assert status["storage_profile"] == "bulk_storage"
