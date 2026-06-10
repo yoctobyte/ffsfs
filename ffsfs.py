@@ -36,6 +36,8 @@ from ffsutils import (
     is_version_file,
     is_deleted_file,
     is_hidden_mode,
+    is_symlink_mode,
+    MODE_SYMLINK,
 )
 
 from ffsvolumes import StoragePool, Volume, load_pool_config
@@ -669,6 +671,22 @@ class StorageBackend:
         if target_vol is None:
             raise OSError(errno.ENOSPC, "no storage volume accepts this file")
 
+        # Same-second commits are ordered by file mtime (pick_latest /
+        # latest_version_path tie-break). On coarse-clock VMs two commits can
+        # land in one timer tick with identical mtimes, making "latest"
+        # arbitrary — fatal for replace flows (rm+write, ln -sfn = delete
+        # tombstone + new version in the same second). Record the previous
+        # latest so we can force a strictly greater mtime after the rename.
+        prev_mtime_ns = -1
+        prev_latest = self.pick_latest(vpath)
+        if prev_latest:
+            prev_parsed = parse_versioned_filename(os.path.basename(prev_latest))
+            if prev_parsed and int(prev_parsed["timestamp"]) == ts:
+                try:
+                    prev_mtime_ns = os.lstat(prev_latest).st_mtime_ns
+                except OSError:
+                    pass
+
         final_abspath = self._version_path_for_volume(target_vol, vpath, final_name)
         make_dirs(os.path.dirname(final_abspath))
         if os.path.dirname(os.path.abspath(temp_abspath)) == os.path.dirname(os.path.abspath(final_abspath)):
@@ -686,6 +704,14 @@ class StorageBackend:
                         os.remove(tmp_final)
                 except Exception:
                     pass
+
+        if prev_mtime_ns >= 0:
+            try:
+                if os.lstat(final_abspath).st_mtime_ns <= prev_mtime_ns:
+                    bump = prev_mtime_ns + 1
+                    os.utime(final_abspath, ns=(bump, bump))
+            except OSError:
+                pass
 
         # metadata + peer notify
         self.meta.append(vpath, final_name, size)
@@ -1293,9 +1319,14 @@ class FFSFS(Operations):
                 local_delete_ts = int(parsed["timestamp"])
             else:
                 st = os.lstat(final)
-                return {k: getattr(st, k) for k in (
+                out = {k: getattr(st, k) for k in (
                     "st_mode", "st_size", "st_ctime", "st_mtime", "st_atime",
                     "st_nlink", "st_uid", "st_gid")}
+                if parsed and is_symlink_mode(parsed.get("mode")):
+                    # stored as a regular version file; presented as a link
+                    # (st_size from lstat = len(target), the POSIX contract)
+                    out["st_mode"] = stat.S_IFLNK | 0o777
+                return out
 
         # Case 3: no committed version yet — expose an in-progress TEMP if present
         # Temps live in the *same* dir and look like: "<logical>.NULL_HASH.(tmp-)?STAMP"
@@ -1345,8 +1376,10 @@ class FFSFS(Operations):
 
                 # Build a synthetic stat for a regular file (read-only until opened)
                 mtime = int(info.get("mtime") or info["timestamp"])
+                st_mode = (stat.S_IFLNK | 0o777) if is_symlink_mode(
+                    info.get("mode") or "") else (stat.S_IFREG | 0o444)
                 return {
-                    "st_mode": (stat.S_IFREG | 0o444),  # visible, read-only prefetch
+                    "st_mode": st_mode,  # visible, read-only prefetch
                     "st_nlink": 1,
                     "st_size": int(info.get("size", 0)),
                     "st_ctime": mtime,
@@ -1934,6 +1967,70 @@ class FFSFS(Operations):
                 print(f"[ffsfs] peer notify_move failed: {e}")
 
         return 0
+
+    # symlinks --------------------------------------------------------------
+    # Stored as ordinary versioned files: content = target string, mode token
+    # = "symlink". They version, sync, mirror and hash like any other file;
+    # only this layer presents them as S_IFLNK. The one hard rule: a target
+    # never points outside the realm.
+
+    def _validate_symlink_target(self, link_vpath: str, target: str) -> None:
+        """Reject targets that could leave the realm. Absolute targets are
+        always rejected (the mountpoint differs per node, so an absolute path
+        is meaningless on every other node even when it happens to point
+        inside this one); relative targets must not resolve above the realm
+        root from the link's directory."""
+        if not target or "\x00" in target:
+            raise FuseOSError(errno.EINVAL)
+        t = target.replace("\\", "/")
+        if t.startswith("/") or (len(t) >= 2 and t[1] == ":"):
+            raise FuseOSError(errno.EPERM)
+        resolved = os.path.normpath(
+            os.path.join(os.path.dirname(link_vpath), t)).replace("\\", "/")
+        if resolved == ".." or resolved.startswith("../"):
+            raise FuseOSError(errno.EPERM)
+
+    def symlink(self, target, source):
+        # fusepy semantics: `ln -s source target` → `target` is the new
+        # link's path INSIDE the fs, `source` is the string it points to.
+        vpath = normalize_vpath(target)
+        if not vpath or vpath.startswith(NODE_STATUS_DIR):
+            raise FuseOSError(errno.EPERM)
+        self._validate_symlink_target(vpath, source)
+        temp = self.backend.create_temp_for(vpath)
+        try:
+            with open(temp, "wb") as f:
+                f.write(source.encode("utf-8"))
+            self.backend.commit_temp(vpath, temp, MODE_SYMLINK)
+        finally:
+            try:
+                if os.path.exists(temp):
+                    os.remove(temp)
+            except OSError:
+                pass
+        return 0
+
+    def readlink(self, path):
+        vpath = normalize_vpath(path)
+        final = self.backend.pick_latest(vpath)
+        if not (final and os.path.exists(final)) and peers and \
+                hasattr(peers, "get_newer_or_missing"):
+            # remote-only link: fetch the (tiny) version like a lazy read
+            try:
+                res = peers.get_newer_or_missing(vpath, 0, fetch=True)
+            except Exception:
+                res = False
+            if res and res is not True and os.path.exists(str(res)):
+                final = str(res)
+        if not (final and os.path.exists(final)):
+            raise FuseOSError(errno.ENOENT)
+        parsed = parse_versioned_filename(os.path.basename(final))
+        if not parsed or is_hidden_mode(parsed.get("mode")):
+            raise FuseOSError(errno.ENOENT)
+        if not is_symlink_mode(parsed.get("mode")):
+            raise FuseOSError(errno.EINVAL)  # not a symlink
+        with open(final, "rb") as f:
+            return f.read().decode("utf-8", "replace")
 
     # mkdir/rmdir ----------------------------------------------------------
 

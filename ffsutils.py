@@ -193,6 +193,17 @@ def is_hidden_mode(mode: str) -> bool:
     return mode in ("delete", "moved")
 
 
+# A symlink is stored as an ordinary versioned file whose CONTENT is the
+# (realm-relative) target path and whose mode token is "symlink". It versions,
+# syncs, mirrors and hashes exactly like any other file; only the FUSE layer
+# presents it as S_IFLNK. Targets never leave the realm (enforced at create).
+MODE_SYMLINK = "symlink"
+
+
+def is_symlink_mode(mode: str) -> bool:
+    return mode == MODE_SYMLINK
+
+
 def get_suffix_from_path(filename: str) -> str:
     """
     Return the suffix portion "<hash>.<mode>.<flags>.<ts>" from a versioned filename,

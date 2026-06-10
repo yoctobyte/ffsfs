@@ -1042,7 +1042,7 @@ def get_remote_head_meta(vpath: str):
     ts, size, mtime, mode = best
     if is_hidden_mode(mode):
         return {"deleted": True, "timestamp": ts}
-    return {"timestamp": ts, "size": size, "mtime": mtime}
+    return {"timestamp": ts, "size": size, "mtime": mtime, "mode": mode}
 
 
 # -------------------- Client-side notify/actions --------------------

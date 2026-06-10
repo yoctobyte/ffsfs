@@ -345,9 +345,23 @@ For a mount point at `~/myrealm/` containing files `docs/notes.txt` and `photo.j
 Each file version is stored as:
 `<logical_basename>.<HASH>.<mode>.<uid>.<timestamp>`
 - **HASH**: Crockford Base32 representation of the content hash.
-- **mode**: `write` for regular content, `delete` for a tombstone.
+- **mode**: `write` for regular content, `delete` for a tombstone, `moved`
+  for a move hint, `symlink` for a symbolic link.
 - **uid**: Revision index or author identifier (defaults to `0`).
 - **timestamp**: Unix epoch time of creation.
+
+### Symlinks
+
+A symlink is stored as an ordinary versioned file with mode `symlink` whose
+content is the target string — it versions, syncs, mirrors, hashes, and
+replicates exactly like any other file; only the FUSE layer presents it as
+`S_IFLNK`. Replacing a link (`ln -sfn`) creates a new version; deleting one
+leaves a normal tombstone. Targets are restricted to the realm: absolute
+targets are rejected with `EPERM` (mountpoints differ per node), and relative
+targets must not resolve above the realm root from the link's directory.
+Dangling links (target missing or not yet synced) are legal, as on any POSIX
+filesystem. The reserved `.ffsfs-nodes/` dir never hosts links. The Windows
+WinFsp adapter does not map symlinks yet.
 
 ### Durability Guarantees
 - Local write operations (`flush`, `fsync`, `release`, and `rename`) are synchronous. If the underlying disk is full (`ENOSPC`) or write permissions are lost (`EACCES`), the error propagates up to FUSE and is raised in the calling application.

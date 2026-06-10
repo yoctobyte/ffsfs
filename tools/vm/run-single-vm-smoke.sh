@@ -26,6 +26,27 @@ mountpoint -q /tmp/ffsfs-mount
 printf hello > /tmp/ffsfs-mount/hello.txt
 sync /tmp/ffsfs-mount/hello.txt || true
 test "$(cat /tmp/ffsfs-mount/hello.txt)" = hello
+
+# symlinks: realm-relative links through the kernel (ln/readlink/stat/cat)
+mkdir -p /tmp/ffsfs-mount/music /tmp/ffsfs-mount/views
+printf tune > /tmp/ffsfs-mount/music/song.mp3
+ln -s ../music/song.mp3 /tmp/ffsfs-mount/views/fav
+test -L /tmp/ffsfs-mount/views/fav
+test "$(readlink /tmp/ffsfs-mount/views/fav)" = "../music/song.mp3"
+test "$(cat /tmp/ffsfs-mount/views/fav)" = tune        # kernel resolves
+ln -sfn ../music/other.mp3 /tmp/ffsfs-mount/views/fav  # replace = new version
+test "$(readlink /tmp/ffsfs-mount/views/fav)" = "../music/other.mp3"
+if ln -s /etc/passwd /tmp/ffsfs-mount/views/evil 2>/dev/null; then
+    echo "ABSOLUTE SYMLINK TARGET WAS ACCEPTED" >&2
+    exit 1
+fi
+if ln -s ../../escape /tmp/ffsfs-mount/views/evil2 2>/dev/null; then
+    echo "ESCAPING SYMLINK TARGET WAS ACCEPTED" >&2
+    exit 1
+fi
+rm /tmp/ffsfs-mount/views/fav
+test ! -e /tmp/ffsfs-mount/views/fav
+
 rm /tmp/ffsfs-mount/hello.txt
 sleep 1
 find /tmp/ffsfs-storage -maxdepth 5 -type f -print

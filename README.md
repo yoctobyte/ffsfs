@@ -372,6 +372,35 @@ The mounted filesystem retries pending mirror copies periodically.
 See [agents/operator_guide.md](agents/operator_guide.md) for detailed backend
 configuration examples and the JSON schema.
 
+## Symlinks & Views
+
+Symlinks work inside a realm and are versioned, synced, and mirrored like any
+other file (a link is stored as a tiny versioned file whose content is the
+target path):
+
+```bash
+ln -s ../music/song.mp3 ~/myrealm/views/fav      # create
+readlink ~/myrealm/views/fav                      # inspect
+ln -sfn ../music/other.mp3 ~/myrealm/views/fav    # replace (new version)
+```
+
+One hard rule: **targets never leave the realm.** Absolute targets are
+rejected (`EPERM`) — a mountpoint differs per node, so an absolute path is
+meaningless everywhere else — and relative targets must not resolve above the
+realm root. Links to paths that don't (yet) exist are allowed, like on any
+POSIX filesystem; they sync as links and resolve wherever the target exists.
+
+This enables a cheap **views** convention: a folder of symlinks acting as a
+virtual collection that cross-cuts your canonical folder hierarchy — e.g.
+`views/print3d/` linking the printer tool, the models, and the slicer
+profiles that live in three different places, or `views/car-music/` as a
+curated playlist. Views are plain folders: any file manager can build them,
+and every node sees them. (Routing storage devices by view — "this USB
+carries `views/car-music`, dereferenced" — is planned future work.)
+
+Windows note: the WinFsp adapter does not map symlinks yet; links appear as
+small files containing the target path.
+
 ## Peers
 
 For two or more hosts on the same LAN:

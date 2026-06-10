@@ -142,11 +142,19 @@ stopping for features/fixes/logs.
   tool is the answer; automatic retention policy is a possible later layer on
   top, off by default.
 
-- [P1] **Storage-policy enforcement (queue #2).** Intent fields now exist
-  (device_class, job/job_prefix, collaboration); enforcement does not. Needed:
-  media/role/prefix-aware write-target selection, job/prefix write routing,
-  "high-prio-small" preference for removable devices. (`max_file_size` is
-  already enforced.)
+- [P1] **Storage-policy enforcement (queue #2) — RE-FRAMED around views.**
+  Intent fields exist (device_class, job/job_prefix); enforcement does not.
+  Decision (2026-06-10): do NOT build per-extension/filetype routing.
+  Foundation shipped first: **symlinks** (mode `symlink`, realm-contained
+  targets), which make "views" possible — plain folders of relative symlinks
+  acting as curated virtual collections (`views/car-music/` linking chosen
+  albums). The enforcement primitive then becomes: *a device carries the
+  dereferenced closure of a path* — and a view IS a path, so one mechanism
+  covers "whole `music/` folder USB" and "curated playlist USB". Needs:
+  closure walk (bounded depth, loop-safe), pin the closure's hashes onto the
+  device, respect device caps (report "view doesn't fit", never trim
+  silently), dereferenced export mode for non-FFSFS readers (car stereo).
+  Placement (where) stays orthogonal to redundancy class (how many).
 - [P2] **Disk rotation UX + by-id backend discovery.** Removable mirror disks
   (alternating USB/external) as a backup workflow: rotate, catch-up on reattach,
   operator visibility. Two cases beyond the single-disk eject/attach already
