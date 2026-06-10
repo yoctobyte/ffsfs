@@ -664,6 +664,13 @@ class PlacementWorker:
         self.interval = float(interval_secs or DEFAULT_RECONCILE_INTERVAL_SECS)
         self.max_hints = int(max_hints_per_sweep)
         self.offline_grace = float(offline_grace_secs or DEFAULT_OFFLINE_GRACE_SECS)
+        # configured default for reduction hysteresis (§12.2); a per-run
+        # --margin still overrides, and the floor of 1 always applies
+        try:
+            self.reduction_margin = int((redundancy_cfg or {}).get(
+                "reduction_margin") or DEFAULT_REDUCTION_MARGIN)
+        except (TypeError, ValueError):
+            self.reduction_margin = DEFAULT_REDUCTION_MARGIN
         self._stop = threading.Event()
         self._nudge = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -1002,7 +1009,7 @@ class PlacementWorker:
                        limit: Optional[int] = None) -> dict:
         """Dry-run (§12.3): which local copies COULD this node drop, and why
         not for the rest. Touches nothing. Counting is fresh confirms only."""
-        margin = max(1, int(margin or DEFAULT_REDUCTION_MARGIN))
+        margin = max(1, int(margin or self.reduction_margin))
         limit = max(1, int(limit or MAX_REDUCTION_DROPS_PER_RUN))
         out = {"at": int(time.time()), "margin": margin, "limit": limit,
                "candidates": [], "skipped": []}
@@ -1048,7 +1055,7 @@ class PlacementWorker:
         plan is discarded, never trusted), then the local copy is removed, the
         index fixed in-process, and the hash unpinned. Add-only machinery is
         untouched; this is the only code path that deletes anything."""
-        margin = max(1, int(margin or DEFAULT_REDUCTION_MARGIN))
+        margin = max(1, int(margin or self.reduction_margin))
         limit = max(1, int(limit or MAX_REDUCTION_DROPS_PER_RUN))
         plan = self.plan_reduction(margin=margin, limit=limit)
         stats = {"at": int(time.time()), "margin": margin,

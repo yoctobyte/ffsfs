@@ -141,6 +141,11 @@ two_peer_stop_servers() {
     vm_ssh "$ssh_port" '
 pkill -f "[s]tart-peer-a.py" >/dev/null 2>&1 || true
 pkill -f "[s]tart-peer-b.py" >/dev/null 2>&1 || true
+# auth-enabled peers started by the redundancy scenario (different script
+# names; without this, their ports stay bound and break later scenarios
+# in an "all" run)
+pkill -f "[s]tart-rpeer-a.py" >/dev/null 2>&1 || true
+pkill -f "[s]tart-rpeer-b.py" >/dev/null 2>&1 || true
 '
 }
 
@@ -149,8 +154,10 @@ two_peer_reset_guest_state() {
     vm_ssh "$ssh_port" '
 set -euo pipefail
 rm -rf '"$peer_a_data_base"' '"$peer_b_data_base"' \
-       /tmp/ffsfs-pool-secondary /tmp/ffsfs-offline-secondary
-rm -f /tmp/ffsfs-peer-a.log /tmp/ffsfs-peer-b.log
+       /tmp/ffsfs-pool-secondary /tmp/ffsfs-offline-secondary \
+       /tmp/ffsfs-state-ra /tmp/ffsfs-state-rb
+rm -f /tmp/ffsfs-peer-a.log /tmp/ffsfs-peer-b.log \
+      /tmp/ffsfs-rpeer-a.log /tmp/ffsfs-rpeer-b.log
 '
 }
 

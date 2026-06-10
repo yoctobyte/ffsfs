@@ -899,3 +899,23 @@ def test_reduction_never_runs_from_the_sweep():
     stats = w.run_reconcile_once()
     assert stats["over"] == 1          # flagged...
     assert peers.drops == []           # ...but the sweep never deletes
+
+
+@pytest.mark.unit
+def test_reduction_margin_config_knob():
+    chash = "C" * 16
+    # rf:1 + 2 confirmed copies: droppable at margin 1, not at the default 2.
+    # reduction_margin in the redundancy config sets the per-realm default.
+    cfg = dict(RF1_CFG, reduction_margin=1)
+    peers = ReducPeers(
+        {"docs/a.txt": [_idx_entry("docs/a.txt", chash)]},
+        self_id="zz-self",
+        peers=["10.0.0.2:1"],
+        confirms={"10.0.0.2:1": {"node_id": "aa-peer", "held": {chash}}})
+    w = R.PlacementWorker(peers, cfg)
+    assert w.reduction_margin == 1
+    assert len(w.plan_reduction()["candidates"]) == 1
+    # explicit per-run margin still overrides the configured default
+    assert w.plan_reduction(margin=2)["candidates"] == []
+    # default stays 2 when unconfigured
+    assert R.PlacementWorker(peers, RF1_CFG).reduction_margin == 2
