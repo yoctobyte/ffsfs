@@ -31,12 +31,17 @@ from ffsfs import StorageBackend
 
 backend = StorageBackend("'"$peer_a_data_base"'", "'"$realm"'")
 for vpath, payload in (("shared/precious.txt", b"keep me twice"),
-                       ("iso/big.iso", b"cache-class, do not replicate")):
+                       ("iso/big.iso", b"cache-class, do not replicate"),
+                       ("dup/twice.txt", b"over-replicated rf:1 file")):
     temp = backend.create_temp_for(vpath)
     with open(temp, "wb") as f:
         f.write(payload)
     print(backend.commit_temp(vpath, temp, "write"))
 PY
+# pre-seed the SAME dup version on peer B too (an over-replicated rf:1 file,
+# 2 confirmed copies) so the Phase 3 reduction act has something to drop
+mkdir -p '"$data_b"'/dup
+cp '"$data_a"'/dup/twice.txt.* '"$data_b"'/dup/
 '
 two_peer_run_a "$seed_a" | tee "$log_dir/$name_a.seed.log"
 
@@ -60,7 +65,8 @@ ffspeers.start_local_peer_server('"$peer_a_port"')
 
 worker = ffsredundancy.PlacementWorker(
     ffspeers,
-    {"default": "mirror", "overrides": {"shared": "rf:2", "iso": "cache"}},
+    {"default": "mirror",
+     "overrides": {"shared": "rf:2", "iso": "cache", "dup": "rf:1"}},
     interval_secs=5)
 ffspeers.register_placement_worker(worker)
 worker.start()
@@ -87,6 +93,15 @@ ffspeers.register_local_backend(SimpleNamespace(data_path="'"$data_b"'"))
 ffspeers._upsert_peer("127.0.0.1:'"$peer_a_port"'")
 ffspeers._init_instance_id()
 ffspeers.start_local_peer_server('"$peer_b_port"')
+
+# register (but do not start) a placement worker so the loopback
+# /redundancy/reduce route works on this node too
+import ffsredundancy
+worker = ffsredundancy.PlacementWorker(
+    ffspeers,
+    {"default": "mirror",
+     "overrides": {"shared": "rf:2", "iso": "cache", "dup": "rf:1"}})
+ffspeers.register_placement_worker(worker)
 while True:
     time.sleep(60)
 PY
@@ -164,5 +179,67 @@ print("cache-class file correctly not replicated")
 PY
 '
 two_peer_run_b "$replication_check" | tee "$log_dir/$name_b.replication.log"
+
+# 3) Phase 3 guarded reduction over the signed path: dup/twice.txt is rf:1
+#    with 2 confirmed copies. Exactly ONE node (the highest instance id) may
+#    plan a drop; applying there must remove only that node's local copy.
+reduction_check='
+cd /home/'"$FFSFS_VM_USER"'/work/ffsfs
+PYTHONPATH=/home/'"$FFSFS_VM_USER"'/work/ffsfs python3 - <<PY
+import glob
+import json
+import os
+import urllib.parse
+import urllib.request
+
+from ffspeer_auth import sign_request
+
+realm = "'"$realm"'"
+secret = "'"$r_secret"'"
+ports = {"a": '"$peer_a_port"', "b": '"$peer_b_port"'}
+data_dirs = {"a": "'"$data_a"'", "b": "'"$data_b"'"}
+
+def reduce_call(port, method, params):
+    path = "/redundancy/reduce"
+    headers = sign_request(secret, method, path, params, b"", realm, "operator")
+    qs = urllib.parse.urlencode(params)
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}?{qs}",
+                                 method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.load(resp)
+
+params = {"margin": "1", "limit": "10"}
+plans = {n: reduce_call(p, "GET", params) for n, p in ports.items()}
+droppers = [n for n, plan in plans.items()
+            if any(c["vpath"] == "dup/twice.txt" for c in plan["candidates"])]
+assert len(droppers) == 1, f"exactly one dropper expected: {plans}"
+dropper = droppers[0]
+keeper = "b" if dropper == "a" else "a"
+print(f"dry-run: only peer-{dropper} may drop (serialized highest-id rule)")
+
+# the keeper must list it as skipped with the not-this-round reason
+keeper_skips = {s.get("vpath"): s.get("reason", "")
+                for s in plans[keeper].get("skipped", [])}
+assert "not this round" in keeper_skips.get("dup/twice.txt", ""), keeper_skips
+
+result = reduce_call(ports[dropper], "POST", params)
+assert [d["vpath"] for d in result["dropped"]] == ["dup/twice.txt"], result
+print(f"applied on peer-{dropper}:", result["dropped"])
+
+gone = glob.glob(os.path.join(data_dirs[dropper], "dup", "twice.txt.*"))
+kept = glob.glob(os.path.join(data_dirs[keeper], "dup", "twice.txt.*"))
+assert not gone, f"dropper still holds copies: {gone}"
+assert kept, "keeper lost its copy — reduction touched the wrong node!"
+with open(kept[0], "rb") as f:
+    assert f.read() == b"over-replicated rf:1 file"
+print("reduction dropped exactly one copy; the realm still holds the file")
+
+# a second apply on the same node must be a no-op (it no longer holds it)
+again = reduce_call(ports[dropper], "POST", params)
+assert again["dropped"] == [], again
+print("second apply is a no-op (node no longer a holder)")
+PY
+'
+two_peer_run_a "$reduction_check" | tee "$log_dir/$name_a.reduction.log"
 
 echo "redundancy-rf2 scenario assertions passed"

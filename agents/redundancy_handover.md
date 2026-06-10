@@ -15,7 +15,7 @@ operator opts in.
 | 0 | class model + size/type suggestion + per-prefix config + setup/dashboard surfacing + scan walk | **SHIPPED** |
 | 1 | approximate placement (add-only): holdings map, target enforcement, hint-pull replication | **SHIPPED** (design `redundancy_design.md §9`) |
 | 2 | availability-weighted counting, graced on-demand/cold slot, host failure domains, at-risk surfacing | **SHIPPED** (design `redundancy_design.md §11`) |
-| 3 | guarded copy *reduction* (the dangerous direction) | not designed |
+| 3 | guarded copy *reduction*: operator-gated dry-run-first drop tool, unpin, pull-gating | **SHIPPED** (design `redundancy_design.md §12`) |
 
 ## Commit arc
 
@@ -35,6 +35,8 @@ f7ffb90 feat: Phase 1b — world-map merge + bulk copy-confirm (/has-hashes)
 77d4f54 test: two-peer VM scenario with HMAC on (redundancy-rf2)
 2ffbd61 docs: Phase 2 detailed design (§11)
 37476aa feat: Phase 2 — availability-weighted placement
+42c9708 docs: Phase 3 detailed design (§12)
+aa1e5d6 feat: Phase 3 — guarded reduction + pull-gating + ffsctl tool
 ```
 
 ## Phase 0 — what shipped (where to look)
@@ -141,6 +143,37 @@ Still add-only. Design `redundancy_design.md §11`.
 - **Tests**: `test_ffsredundancy.py` (61), `test_federated.py` (+1),
   `test_dashboard.py` (+1). Full suite **365 passing**.
 
+## Phase 3 — what shipped (where to look)
+
+Design `redundancy_design.md §12`. The ONLY delete-capable path; operator-
+gated, dry-run first, never called by the sweep.
+
+- **Eligibility** — `ffsredundancy.evaluate_reduction` (pure, §12.2): rf:N
+  only; counts ONLY holders confirmed online this run (never world map, never
+  graced cold); C ≥ target + `reduction margin` (default
+  `DEFAULT_REDUCTION_MARGIN` = 2, floor 1 — dead band vs placement, no flap);
+  serialized dropper = HIGHEST node_id holder (placement owner = lowest);
+  never breaks the availability floor; never the last copy. Paths with local
+  history are skipped (dropping current must not resurface an old version).
+- **Plan/apply** — `PlacementWorker.plan_reduction` (touches nothing) /
+  `apply_reduction` (re-confirms each hash fresh immediately before its drop;
+  stale plan discarded). Drop = `ffspeers.drop_local_version` (traversal-
+  rejecting, removes from all online data roots, fixes `_local_file_index`
+  in-process so /has-hashes stops advertising instantly) + `unpin_hash`
+  (the ONLY unpin path — Q11 decided). Logged as `reduced` in recent log.
+- **Surface** — `/redundancy/reduce` (GET plan / POST apply,
+  margin/limit params), loopback-gated even with HMAC on. CLI:
+  `ffsctl redundancy-reduce <realm> [--apply] [--margin M] [--limit K]`
+  (signed like other ffsctl calls; needs the node running).
+- **§12.5 prerequisite** — SyncWorker active pull skips non-mirror classes
+  (so drops stick; cache never blind-pulled); tombstones still propagate; no
+  placement config = all mirror = unchanged.
+- **VM scenario act 3** — over-replicated rf:1 file on both peers: exactly
+  one node (highest instance id) plans the drop, apply removes only its
+  copy, the realm keeps the file, second apply is a no-op.
+- **Tests**: `test_ffsredundancy.py` (67), `test_ffspeers_api.py` (+4),
+  `test_sync_worker.py` (+1). Full suite **376 passing**.
+
 ## DECISIONS taken (was: open questions 1–7)
 
 Implemented per the doc's own recommendations; revisit only with new evidence:
@@ -171,28 +204,40 @@ Implemented per the doc's own recommendations; revisit only with new evidence:
     fallback. Per-physical-disk inside a node stays with local pool
     mirroring.
 
-## OPEN QUESTIONS (decide before Phase 3)
+## DECISIONS taken in Phase 3 (was: open questions 11–12)
 
-11. **Reduction safety** — §6 guards (confirm-before-rely, hysteresis,
-    serialized drops, tombstone-intent, never-last-copy); Phase 3, own design
-    pass, must reuse the prune tool's machinery. Also: unpin semantics.
-12. **Erasure coding** — parked (readable-tier invariant); cold tier only, if
-    ever.
+11. **Reduction safety** → §12: operator-gated manual tool with
+    fresh-confirm-only counting, N+margin hysteresis, highest-node-id
+    serialized dropper, floor protection, in-process index fixup. The prune
+    tool never shipped, so this is the first §6-grade machinery — a future
+    prune tool should reuse IT. Unpin = part of operator-gated drop only.
+    §6.4 tombstone-the-intent + quiet period deferred until/unless reduction
+    ever becomes automatic (explicitly out of scope, §12.6).
+12. **Erasure coding** → stays parked (readable-tier invariant); cold tier
+    only, if ever.
+
+## OPEN QUESTIONS
+
+None blocking. Future-work pool: observed-uptime scoring (§11.5), waking
+on-demand nodes for repair (cold-archive workflow), automatic reduction
+(needs §6.4), mirror-at-scale soft cap, /has-hashes over historical versions,
+persistent confirm history.
 
 ## Suggested next steps
 
+All four phases are shipped. What remains is hardening + real-fleet
+validation:
+
 1. Keep the VM scenario green: `tools/vm/run-two-peer-scenario.sh
-   redundancy-rf2` (signed-path replication; re-run after sweep changes).
-   Possible follow-up scenario: availability repair (intermittent holders +
-   one always-on donor) over the signed path.
-2. Hardening candidates: `/has-hashes` answer from *any* held version (not
-   just current) if restore-from-history matters; sweep-time refresh of a
-   stale local index; persist confirm history if 7-day grace across restarts
-   ever matters (today restart = forget = over-replicate, safe).
-3. Phase 3 design pass (guarded reduction) — §6 guards + prune-tool reuse +
-   unpin semantics (questions 11–12). Observability now exists (§7 mostly
-   covered by the dashboard panel); validate counting on a real fleet before
-   trusting any reduction.
+   redundancy-rf2` (now: HMAC replication + cache exclusion + reduction).
+   Possible additions: availability-repair scenario (intermittent holders +
+   always-on donor); reduction race scenario (two nodes applying
+   simultaneously — margin must absorb it).
+2. Run the policy on a real fleet before trusting reduction routinely;
+   watch the dashboard at-risk list and the recent-placement log.
+3. Hardening pool: `/has-hashes` over historical versions; sweep-time index
+   refresh; persistent confirm history; observed-uptime scoring; mirror
+   soft-cap. Pick by real-use pain, not speculation.
 
 ## Watch-outs
 
