@@ -14,7 +14,7 @@ operator opts in.
 |-------|------|-------|
 | 0 | class model + size/type suggestion + per-prefix config + setup/dashboard surfacing + scan walk | **SHIPPED** |
 | 1 | approximate placement (add-only): holdings map, target enforcement, hint-pull replication | **SHIPPED** (design `redundancy_design.md §9`) |
-| 2 | availability-weighting, on-demand/cold tier, per-disk failure domains | not designed |
+| 2 | availability-weighted counting, graced on-demand/cold slot, host failure domains, at-risk surfacing | **SHIPPED** (design `redundancy_design.md §11`) |
 | 3 | guarded copy *reduction* (the dangerous direction) | not designed |
 
 ## Commit arc
@@ -32,6 +32,9 @@ f7ffb90 feat: Phase 1b — world-map merge + bulk copy-confirm (/has-hashes)
 59b754a feat: Phase 1d — replicate-hint, pinned set, eviction exemption
 1aa0657 feat: Phase 1e — placement worker (reconcile sweep + nudges)
 2e8b9b9 feat: Phase 1f — dashboard placement panel
+77d4f54 test: two-peer VM scenario with HMAC on (redundancy-rf2)
+2ffbd61 docs: Phase 2 detailed design (§11)
+37476aa feat: Phase 2 — availability-weighted placement
 ```
 
 ## Phase 0 — what shipped (where to look)
@@ -110,6 +113,34 @@ node role participates in placement — default config is a no-op.
   `test_sync_worker.py` (+2), `test_federated.py` (+2), `test_dashboard.py`
   (+1). Full suite **356 passing**.
 
+## Phase 2 — what shipped (where to look)
+
+Still add-only. Design `redundancy_design.md §11`.
+
+- **Counting (§11.2)** — `ffsredundancy.evaluate_placement(holders, target,
+  now, offline_grace)`: availability floor = ≥1 *online* `always_online`
+  confirmed copy; durability = online holders + at most ONE offline
+  `on_demand` holder confirmed within `redundancy.offline_grace` (default
+  `DEFAULT_OFFLINE_GRACE_SECS` = 7 d). Offline intermittent/always-on never
+  count. Worker keeps `_confirm_history` (hash → node_id → last-confirm ts)
+  in memory only — restart forgets → brief over-replication → safe.
+- **Tier/domain advertisement (§11.1)** — node-status carries `availability`
+  (from `node_availability` config via extended `set_node_profile`) and
+  `host_id` (sha256(machine-id)[:12], hostname fallback). Unconfigured
+  defaults: `intermittent`, distinct domain.
+- **Donor selection v2 (§11.3)** — `select_donors(..., require_always_on,
+  holder_hosts)`: availability repairs require an always-on donor; same-host
+  donors rank last but stay eligible (add-only fallback, counted as
+  `domain_conflicts`).
+- **Sweep changes** — per-hash holder records (online + graced cold) →
+  `evaluate_placement`; availability repair picks the always-on donor first;
+  stats gain `availability_under`, `domain_conflicts`, `at_risk` (capped 20).
+  Owner election unchanged (lowest *online* holder).
+- **Dashboard (§11.4)** — At-risk table, Tier + Host columns in world map,
+  extra sweep counters.
+- **Tests**: `test_ffsredundancy.py` (61), `test_federated.py` (+1),
+  `test_dashboard.py` (+1). Full suite **365 passing**.
+
 ## DECISIONS taken (was: open questions 1–7)
 
 Implemented per the doc's own recommendations; revisit only with new evidence:
@@ -129,14 +160,19 @@ Implemented per the doc's own recommendations; revisit only with new evidence:
 7. **mirror at scale** → unchanged in Phase 1 (mirror never consults
    placement); soft-cap / `rf:all-up-to-K` still flagged for Phase 2+.
 
-## OPEN QUESTIONS (cross-phase, decide before Phase 2/3)
+## DECISIONS taken in Phase 2 (was: open questions 8–10)
 
-8. **Availability weighting** — uptime scoring + "expected-available-copies"
-   target formula (Phase 2).
-9. **On-demand/cold tier as a durability slot** — does an offline on-demand
-   copy count? (Phase 2; maps onto `cold_archive_design.md`.)
-10. **Failure domains** — per-physical-disk / per-host diversity (Phase 2;
-    Phase 1 unit is "distinct node").
+8. **Availability weighting** → configured tier + live confirm, no observed-
+   uptime scoring yet (§11.5: revisit with real-fleet data).
+9. **On-demand/cold durability slot** → counts toward durability only (never
+   availability), at most one slot, grace-bounded (`offline_grace`, 7 d
+   default). Waking cold nodes to repair = cold-archive workflow, later.
+10. **Failure domains** → host (`host_id`), prefer-distinct with add-only
+    fallback. Per-physical-disk inside a node stays with local pool
+    mirroring.
+
+## OPEN QUESTIONS (decide before Phase 3)
+
 11. **Reduction safety** — §6 guards (confirm-before-rely, hysteresis,
     serialized drops, tombstone-intent, never-last-copy); Phase 3, own design
     pass, must reuse the prune tool's machinery. Also: unpin semantics.
@@ -145,14 +181,18 @@ Implemented per the doc's own recommendations; revisit only with new evidence:
 
 ## Suggested next steps
 
-1. Run/keep-green the VM scenario: `tools/vm/run-two-peer-scenario.sh
-   redundancy-rf2` (first signed-path replication test).
-2. Phase 1 hardening candidates: `/has-hashes` answer from *any* held version
-   (not just current) if restore-from-history matters; sweep-time refresh of a
-   stale local index; surface at-risk (under-target) paths as a dedicated
-   dashboard list with per-path counts.
-3. Phase 2 design pass (availability weighting, failure domains, on-demand
-   tier) — start from §9.16 and questions 8–10.
+1. Keep the VM scenario green: `tools/vm/run-two-peer-scenario.sh
+   redundancy-rf2` (signed-path replication; re-run after sweep changes).
+   Possible follow-up scenario: availability repair (intermittent holders +
+   one always-on donor) over the signed path.
+2. Hardening candidates: `/has-hashes` answer from *any* held version (not
+   just current) if restore-from-history matters; sweep-time refresh of a
+   stale local index; persist confirm history if 7-day grace across restarts
+   ever matters (today restart = forget = over-replicate, safe).
+3. Phase 3 design pass (guarded reduction) — §6 guards + prune-tool reuse +
+   unpin semantics (questions 11–12). Observability now exists (§7 mostly
+   covered by the dashboard panel); validate counting on a real fleet before
+   trusting any reduction.
 
 ## Watch-outs
 
