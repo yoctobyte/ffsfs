@@ -53,8 +53,10 @@ stopping for features/fixes/logs.
   venv; only libfuse must be a system package. TRIGGER to actually require a
   venv: the first dependency that is not a clean OS package or needs pinning
   (e.g. a richer web stack, a crypto lib for the HTTPS work, cloud/SDK backends,
-  watchdog). Until then, system Python is fine. A future systemd unit should
-  reference the resolved interpreter path explicitly.
+  watchdog). Until then, system Python is fine. The systemd unit
+  (`service.sh`, `ffsfs@<realm>.service`) calls `launch.sh`, which resolves the
+  interpreter (`./.venv` / `$VIRTUAL_ENV` / `FFSFS_PYTHON` / system), so the
+  service inherits the same resolution automatically.
 - [P3] **HTTPS at setup (rainy-afternoon).** http/https/both option. Deferred:
   moderate overhaul (self-signed cert lifecycle, server SSL context, client TLS,
   peer-url scheme, dual-listener "both"), low value on trusted LAN (HMAC already
