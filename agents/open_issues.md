@@ -40,12 +40,12 @@ stopping for features/fixes/logs.
 
 ## Infrastructure / robustness
 
-- [P1] **VM scenario with HMAC auth enabled.** The two-peer VM scenarios run
-  with auth DISABLED (no realm secret), so the signed-request path is never
-  exercised end-to-end over real HTTP. A case-sensitivity bug in header lookup
-  (fixed in d84d39b) broke ALL multi-host peering yet passed every test. Add a
-  two-peer scenario that sets a shared realm secret and asserts signed
-  fetch/notify succeed (and that an unsigned/mismatched-secret peer is 403'd).
+- [P1] **VM scenario with HMAC auth enabled — DONE** (`redundancy-rf2`).
+  Both peers run with a shared realm secret; the scenario asserts an unsigned
+  request is 403'd and exercises signed /has-hashes, /replicate-hint,
+  /get-file (replication pull) and /redundancy/reduce end-to-end over real
+  HTTP. Remaining nice-to-have: an explicit signed /notify assertion and a
+  mismatched-secret peer case.
 
 - [P3] **virtualenv path (groundwork DONE).** System Python stays the default.
   `requirements.txt` added; `setup.sh`/`launch.sh` auto-use `./.venv` or active
