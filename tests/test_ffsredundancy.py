@@ -1,10 +1,28 @@
+import os
+
 import pytest
 
 import ffsredundancy as R
+from ffsutils import DATA_DIR, NODE_STATUS_DIR, build_versioned_filename
 
 KB = 1024
 MB = 1024 * 1024
 GB = 1024 * 1024 * 1024
+
+_HASH = "A1B2C3D4E5F6G7H8J9K0MNPQRS"
+
+
+def _put(root, vdir, leaf, size, ts, mode="write"):
+    """Create a versioned file <root>/.ffsfs_data/<vdir>/<leaf>.<suffix> of the
+    given (sparse) size."""
+    d = os.path.join(root, DATA_DIR, vdir) if vdir else os.path.join(root, DATA_DIR)
+    os.makedirs(d, exist_ok=True)
+    name = build_versioned_filename(leaf, _HASH, mode, timestamp=ts, flags=0)
+    path = os.path.join(d, name)
+    with open(path, "wb") as f:
+        if size > 0:
+            f.truncate(size)   # sparse: cheap large size
+    return path
 
 
 @pytest.mark.unit
@@ -101,6 +119,50 @@ def test_class_for_path_longest_prefix_wins():
     assert R.class_for_path("photosX/a", cfg) == "rf:2"            # not a boundary match
     # no config -> mirror (unchanged behavior)
     assert R.class_for_path("anything", None) == "mirror"
+
+
+@pytest.mark.unit
+def test_walk_suggestions_latest_live_versions(tmp_path):
+    root = str(tmp_path)
+    _put(root, "src", "main.py", 5 * KB, ts=100)
+    _put(root, "photos", "a.jpg", 500 * KB, ts=100)
+    _put(root, "iso", "ubuntu.iso", 4 * GB, ts=100)
+    # two versions of one file -> only newest counted
+    _put(root, "docs", "readme.md", 1 * KB, ts=100)
+    _put(root, "docs", "readme.md", 2 * KB, ts=200)
+    # a deletion tombstone as the newest state -> excluded
+    _put(root, "old", "gone.txt", 1 * KB, ts=100)
+    _put(root, "old", "gone.txt", 0, ts=200, mode="delete")
+    # reserved node-status dir -> skipped
+    _put(root, NODE_STATUS_DIR, "borg.json", 1 * KB, ts=100)
+
+    sugg = R.walk_suggestions(root)
+    by = {s["vpath"]: s for s in sugg}
+    assert set(by) == {"src/main.py", "photos/a.jpg", "iso/ubuntu.iso", "docs/readme.md"}
+    assert "old/gone.txt" not in by                 # tombstone excluded
+    assert by["src/main.py"]["suggested"] == "rf:3"
+    assert by["iso/ubuntu.iso"]["suggested"] == "cache"
+    assert by["docs/readme.md"]["size"] == 2 * KB   # newest version's size
+
+
+@pytest.mark.unit
+def test_aggregate_by_prefix_majority_and_bytes(tmp_path):
+    root = str(tmp_path)
+    _put(root, "photos", "a.jpg", 400 * KB, ts=1)
+    _put(root, "photos", "b.jpg", 600 * KB, ts=1)
+    _put(root, "iso", "x.iso", 4 * GB, ts=1)
+    agg = R.aggregate_by_prefix(R.walk_suggestions(root))
+    rows = {r["prefix"]: r for r in agg}
+    assert rows["iso"]["suggested"] == "cache"
+    assert rows["photos"]["count"] == 2
+    assert rows["photos"]["suggested"] in ("rf:3", "rf:2")
+    # sorted by bytes desc -> iso (4 GB) first
+    assert agg[0]["prefix"] == "iso"
+
+
+@pytest.mark.unit
+def test_walk_suggestions_empty_root(tmp_path):
+    assert R.walk_suggestions(str(tmp_path)) == []
 
 
 @pytest.mark.unit

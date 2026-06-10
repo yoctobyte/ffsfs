@@ -732,6 +732,57 @@ def prompt_collaboration(realm: str) -> None:
     set_collaboration(realm, mode)
 
 
+def _fmt_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024.0
+    return f"{n:.1f}TB"
+
+
+def _redundancy_scan_offer(realm: str, data: dict, overrides: dict) -> dict:
+    """Walk the realm's primary backend, show suggested classes (a file sample +
+    a per-prefix roll-up), and let the operator adopt prefix overrides. Advisory:
+    scans nothing destructive, only proposes. Returns the (maybe updated)
+    overrides dict."""
+    pool_data = data.get("storage_pool")
+    if not pool_data:
+        print("No storage backend configured yet; nothing to scan.")
+        return overrides
+    try:
+        primary = StoragePool.from_dict(pool_data).primary
+        suggestions = ffsredundancy.walk_suggestions(primary.path)
+    except Exception as e:
+        print(f"Scan failed: {e}")
+        return overrides
+    if not suggestions:
+        print("No stored files found to analyze.")
+        return overrides
+
+    print(f"Scanned {len(suggestions)} file(s). Sample:")
+    for s in suggestions[:10]:
+        print(f"  {s['suggested']:>6}  {_fmt_size(s['size']):>8}  {s['vpath']}"
+              f"   ({s['reason']})")
+    if len(suggestions) > 10:
+        print(f"  … and {len(suggestions) - 10} more")
+
+    rollup = ffsredundancy.aggregate_by_prefix(suggestions)
+    print("\nPer-prefix roll-up (majority suggestion):")
+    for r in rollup:
+        print(f"  {r['suggested']:>6}  {_fmt_size(r['bytes']):>8}  "
+              f"{r['count']:>4} file(s)  {r['prefix'] or '(root)'}")
+
+    print("\nAdopt these as per-prefix overrides? (advisory; you confirm each)")
+    for r in rollup:
+        if not r["prefix"]:
+            continue  # don't auto-suggest a root-wide override
+        cur = overrides.get(ffsredundancy._norm_prefix(r["prefix"]))
+        label = f" (currently {cur})" if cur else ""
+        if _yes_no(f"  {r['prefix']} -> {r['suggested']}{label}?", False):
+            overrides[ffsredundancy._norm_prefix(r["prefix"])] = r["suggested"]
+    return overrides
+
+
 def prompt_redundancy(realm: str) -> None:
     """Ask the realm's redundancy policy: a default class + optional per-prefix
     overrides. Recorded only — Phase 0 enforces nothing yet."""
@@ -753,6 +804,10 @@ def prompt_redundancy(realm: str) -> None:
         print("Current per-prefix overrides:")
         for p, c in overrides.items():
             print(f"  {p or '(root)'} -> {c}")
+
+    if _yes_no("Scan stored files and suggest per-prefix classes?", False):
+        overrides = _redundancy_scan_offer(realm, data, overrides)
+
     if _yes_no("Add/replace a per-prefix override?", False):
         while True:
             prefix = _prompt("Path prefix (e.g. photos), blank to stop").strip()

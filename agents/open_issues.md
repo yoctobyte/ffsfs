@@ -211,8 +211,9 @@ stopping for features/fixes/logs.
   enforcement; node roles reuse the existing `node_role`/`node_storage_profile`
   taxonomy). Surfaced in the setup app (`prompt_redundancy` in the wizard +
   edit-menu item 15 + realm summary) and the dashboard (read-only Redundancy
-  panel). **Phase 0 DONE.** REMAINING (optional): show per-file `suggest_class`
-  proposals over a sample of real files (detect→suggest→confirm walk). Phases
+  panel), plus a detect→suggest→confirm scan walk (`walk_suggestions` /
+  `aggregate_by_prefix` over the primary backend; setup shows a file sample +
+  per-prefix roll-up and adopts overrides on confirm). **Phase 0 DONE.** Phases
   1–3 (placement, world map, guarded reduction) still need design sign-off
   before coding.
 

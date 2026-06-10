@@ -20,8 +20,15 @@ files are usually regenerable: ISOs, models, video). Extension refines it.
 
 import math
 import os
-from typing import Optional, Tuple
+from collections import Counter
+from typing import List, Optional, Tuple
 
+from ffsutils import (
+    DATA_DIR,
+    NODE_STATUS_DIR,
+    normalize_vpath,
+    parse_versioned_filename,
+)
 from ffsvolumes import (
     NODE_ROLE_REPLICA,
     NODE_ROLE_SHARED,
@@ -203,3 +210,74 @@ def class_for_path(vpath: str, cfg: Optional[dict]) -> str:
             if best_prefix is None or len(prefix) > len(best_prefix):
                 best_prefix, best_cls = prefix, cls
     return best_cls
+
+
+# ---- suggestion walk over real stored files ---------------------------------
+# Scan a backend's on-disk data tree, find the latest live version of each
+# logical file, and run the suggestion heuristic on it. Read-only; advisory.
+
+_SKIP_MODES = ("delete", "moved")
+
+
+def walk_suggestions(data_root: str) -> List[dict]:
+    """Walk <data_root>/.ffsfs_data and return one suggestion per live logical
+    file: {"vpath", "size", "suggested", "reason"}. Skips deletion/move
+    tombstones and the reserved node-status dir. Keeps only the newest version
+    of each path. Read-only."""
+    root = os.path.join(data_root, DATA_DIR)
+    # vpath -> (timestamp, mode, size) of the newest version seen
+    latest: dict = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        # never descend into the reserved node-status dir
+        dirnames[:] = [d for d in dirnames if d != NODE_STATUS_DIR]
+        rel = os.path.relpath(dirpath, root)
+        rel = "" if rel == "." else rel
+        for fn in filenames:
+            parsed = parse_versioned_filename(fn)
+            if not parsed:
+                continue
+            vpath = normalize_vpath(os.path.join(rel, parsed["logical_name"]))
+            if not vpath:
+                continue
+            ts = int(parsed["timestamp"])
+            prev = latest.get(vpath)
+            if prev is not None and ts <= prev[0]:
+                continue
+            try:
+                size = os.path.getsize(os.path.join(dirpath, fn))
+            except OSError:
+                size = 0
+            latest[vpath] = (ts, parsed["mode"], size)
+
+    out = []
+    for vpath, (_ts, mode, size) in latest.items():
+        if mode in _SKIP_MODES:
+            continue  # latest state is a tombstone -> file is gone
+        suggested, reason = suggest_class(vpath, size)
+        out.append({"vpath": vpath, "size": size,
+                    "suggested": suggested, "reason": reason})
+    out.sort(key=lambda r: r["vpath"])
+    return out
+
+
+def aggregate_by_prefix(suggestions: List[dict], depth: int = 1) -> List[dict]:
+    """Roll suggestions up to a top-level prefix (first `depth` path segments).
+    Returns per-prefix {"prefix", "count", "bytes", "suggested", "classes"}
+    where `suggested` is the majority class — a candidate per-prefix override.
+    Sorted by descending byte size."""
+    groups: dict = {}
+    for s in suggestions:
+        segs = s["vpath"].split("/")
+        prefix = "/".join(segs[:depth]) if len(segs) > depth else (
+            segs[0] if len(segs) > 1 else "")
+        g = groups.setdefault(prefix, {"count": 0, "bytes": 0, "classes": Counter()})
+        g["count"] += 1
+        g["bytes"] += s["size"]
+        g["classes"][s["suggested"]] += 1
+    rows = []
+    for prefix, g in groups.items():
+        majority = g["classes"].most_common(1)[0][0]
+        rows.append({"prefix": prefix, "count": g["count"], "bytes": g["bytes"],
+                     "suggested": majority, "classes": dict(g["classes"])})
+    rows.sort(key=lambda r: r["bytes"], reverse=True)
+    return rows
