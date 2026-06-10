@@ -40,6 +40,7 @@ from ffsvolumes import (
     MEDIA_NETWORK,
     MEDIA_SSD,
     ROLE_ARCHIVE,
+    ROLE_CACHE,
     ROLE_PRIMARY,
     StoragePool,
     Volume,
@@ -1223,7 +1224,12 @@ def prompt_edit_backend(realm: str) -> None:
 
     role_in = _prompt(f"Role archive/cache (current: {v.role})", "")
     if role_in:
-        v.role = role_in
+        if v is pool.primary:
+            print("The primary volume's role cannot change; keeping primary.")
+        elif role_in in (ROLE_ARCHIVE, ROLE_CACHE):
+            v.role = role_in
+        else:
+            print(f"Unknown role {role_in!r} (archive or cache); keeping.")
     media_in = _prompt(f"Media ssd/hdd/network (current: {v.media or 'none'})", "")
     if media_in:
         if media_in in (MEDIA_SSD, MEDIA_HDD, MEDIA_NETWORK):

@@ -274,3 +274,87 @@ def test_backend_remove_not_found(tmp_path, monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert "Not found" in captured.out
+
+
+def _set_args(realm, target, **kw):
+    base = dict(action="set", realm=realm, path=target, id_or_path=None,
+                id=None, role=None, mirror=False, no_mirror=False, media=None,
+                max_bytes=None, max_file_size=None, reserve_bytes=None,
+                device_class=None, job=None)
+    base.update(kw)
+    return Namespace(**base)
+
+
+def _add_backend(tmp_path, monkeypatch, label="hdd", realm="test-realm"):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    backend_path = tmp_path / label
+    cmd_backend(Namespace(action="add", realm=realm, path=str(backend_path),
+                          id_or_path=None, id=label, role="archive",
+                          mirror=False, media=None, max_bytes=None,
+                          max_file_size=None, reserve_bytes=None))
+    return backend_path
+
+
+@pytest.mark.unit
+def test_backend_set_updates_fields(tmp_path, monkeypatch, capsys):
+    _add_backend(tmp_path, monkeypatch)
+    cmd_backend(_set_args("test-realm", "hdd", role="cache", mirror=True,
+                          media="hdd", max_bytes=2000, reserve_bytes=50,
+                          device_class="usb", job="/music"))
+    out = capsys.readouterr().out
+    assert "Updated backend hdd" in out
+    pool = load_pool_config(_realm_config_path("test-realm"))
+    vol = pool.find_by_label("hdd")
+    assert vol.role == "cache"
+    assert vol.mirror is True
+    assert vol.media == "hdd"
+    assert vol.max_bytes == 2000
+    assert vol.reserve_bytes == 50
+    assert vol.device_class == "usb"
+    assert vol.job_prefix == "/music"
+
+
+@pytest.mark.unit
+def test_backend_set_zero_clears_caps_and_no_mirror(tmp_path, monkeypatch):
+    _add_backend(tmp_path, monkeypatch)
+    cmd_backend(_set_args("test-realm", "hdd", mirror=True, max_bytes=1000))
+    cmd_backend(_set_args("test-realm", "hdd", no_mirror=True, max_bytes=0))
+    pool = load_pool_config(_realm_config_path("test-realm"))
+    vol = pool.find_by_label("hdd")
+    assert vol.mirror is False
+    assert vol.max_bytes is None  # 0 = clear
+
+
+@pytest.mark.unit
+def test_backend_set_rejects_bad_values(tmp_path, monkeypatch, capsys):
+    _add_backend(tmp_path, monkeypatch)
+    cmd_backend(_set_args("test-realm", "hdd", role="primarry"))
+    assert "Unknown role" in capsys.readouterr().out
+    cmd_backend(_set_args("test-realm", "hdd", media="floppy"))
+    assert "Unknown media" in capsys.readouterr().out
+    cmd_backend(_set_args("test-realm", "hdd", device_class="tape"))
+    assert "Unknown device class" in capsys.readouterr().out
+    cmd_backend(_set_args("test-realm", "hdd", mirror=True, no_mirror=True))
+    assert "mutually exclusive" in capsys.readouterr().out
+    # nothing changed by the rejected calls
+    pool = load_pool_config(_realm_config_path("test-realm"))
+    vol = pool.find_by_label("hdd")
+    assert vol.role == "archive" and vol.media is None
+
+
+@pytest.mark.unit
+def test_backend_set_refuses_primary_role_change(tmp_path, monkeypatch, capsys):
+    _add_backend(tmp_path, monkeypatch)
+    pool = load_pool_config(_realm_config_path("test-realm"))
+    primary_label = pool.primary.label
+    cmd_backend(_set_args("test-realm", primary_label, role="cache"))
+    assert "primary" in capsys.readouterr().out.lower()
+    pool = load_pool_config(_realm_config_path("test-realm"))
+    assert pool.primary.role == "primary"
+
+
+@pytest.mark.unit
+def test_backend_set_nothing_to_change_hint(tmp_path, monkeypatch, capsys):
+    _add_backend(tmp_path, monkeypatch)
+    cmd_backend(_set_args("test-realm", "hdd"))
+    assert "Nothing to change" in capsys.readouterr().out

@@ -169,3 +169,25 @@ def test_explicit_args_override_assumptions(realm, tmp_path):
         mirror=False, max_file_size=1234)
     assert vol.mirror is False
     assert vol.max_file_size == 1234
+
+
+@pytest.mark.unit
+def test_edit_backend_rejects_bad_role_and_primary_change(realm, tmp_path, monkeypatch, capsys):
+    ffssetup.add_backend(realm, str(tmp_path / "ext2"), device_class="external")
+    # backend #2 (the secondary): role answer is garbage -> must be kept
+    answers = iter(["2", "primarry", "", "", "", "", "", ""])
+    monkeypatch.setattr(ffssetup, "_prompt", lambda *a, **k: next(answers))
+    monkeypatch.setattr(ffssetup, "_yes_no", lambda *a, **k: False)
+    ffssetup.prompt_edit_backend(realm)
+    assert "Unknown role" in capsys.readouterr().out
+    pool = StoragePool.from_dict(ffssetup.load_realm(realm)["storage_pool"])
+    assert pool.find_by_path(str(tmp_path / "ext2")).role == "archive"
+
+    # backend #1 (the primary): role change must be refused even with a
+    # valid role string
+    answers = iter(["1", "cache", "", "", "", "", "", ""])
+    monkeypatch.setattr(ffssetup, "_prompt", lambda *a, **k: next(answers))
+    ffssetup.prompt_edit_backend(realm)
+    assert "primary" in capsys.readouterr().out.lower()
+    pool = StoragePool.from_dict(ffssetup.load_realm(realm)["storage_pool"])
+    assert pool.primary.role == "primary"

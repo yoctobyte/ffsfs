@@ -23,7 +23,8 @@ import os, sys, argparse, subprocess, time, requests, json, socket
 
 from ffsvolumes import (
     Volume, StoragePool, load_pool_config, save_pool_config,
-    ROLE_PRIMARY, ROLE_ARCHIVE, VOLUME_ID_FILE,
+    ROLE_PRIMARY, ROLE_ARCHIVE, ROLE_CACHE, VOLUME_ID_FILE,
+    MEDIA_SSD, MEDIA_HDD, MEDIA_NETWORK, DEVICE_CLASSES, JOB_GENERAL,
 )
 
 CONF_DEFAULT = os.path.expanduser("~/.ffsfs/.storage/peers.conf")
@@ -230,6 +231,74 @@ def cmd_backend(args):
         print(f"Registered backend: {vol.label} ({vol.vol_id})")
         print(f"  path: {vol.path}")
         print(f"  role: {vol.role}")
+
+    elif action == "set":
+        pool, cfg = _load_or_create_pool(realm)
+        target = args.id_or_path or args.path
+        if not target:
+            print("volume ID, label, or path required")
+            return
+        vol = pool.find_by_id(target) or pool.find_by_path(target) or pool.find_by_label(target)
+        if not vol:
+            print(f"Not found in pool: {target}")
+            return
+        changed = []
+        if args.role is not None:
+            if vol is pool.primary:
+                print("Cannot change the primary volume's role.")
+                return
+            if args.role not in (ROLE_ARCHIVE, ROLE_CACHE):
+                print(f"Unknown role: {args.role} (use {ROLE_ARCHIVE} or {ROLE_CACHE})")
+                return
+            vol.role = args.role
+            changed.append(f"role={vol.role}")
+        if getattr(args, "mirror", False) and getattr(args, "no_mirror", False):
+            print("--mirror and --no-mirror are mutually exclusive")
+            return
+        if getattr(args, "mirror", False):
+            vol.mirror = True
+            changed.append("mirror=yes")
+        if getattr(args, "no_mirror", False):
+            vol.mirror = False
+            changed.append("mirror=no")
+        if args.media is not None:
+            if args.media not in (MEDIA_SSD, MEDIA_HDD, MEDIA_NETWORK):
+                print(f"Unknown media: {args.media} "
+                      f"(use {MEDIA_SSD}, {MEDIA_HDD} or {MEDIA_NETWORK})")
+                return
+            vol.media = args.media
+            changed.append(f"media={vol.media}")
+        # size caps: 0 = clear (unlimited / no reserve)
+        for attr, flag in (("max_bytes", args.max_bytes),
+                           ("max_file_size", args.max_file_size),
+                           ("reserve_bytes", args.reserve_bytes)):
+            if flag is not None:
+                setattr(vol, attr, None if flag == 0 else int(flag))
+                changed.append(f"{attr}={getattr(vol, attr) or 'unlimited'}")
+        if getattr(args, "device_class", None) is not None:
+            if args.device_class not in DEVICE_CLASSES:
+                print(f"Unknown device class: {args.device_class} "
+                      f"(one of: {', '.join(sorted(DEVICE_CLASSES))})")
+                return
+            vol.device_class = args.device_class
+            changed.append(f"device_class={vol.device_class}")
+        if getattr(args, "job", None) is not None:
+            if args.job.lower() == "none":
+                vol.job_prefix = None
+                vol.job = JOB_GENERAL
+                changed.append("job=general")
+            else:
+                vol.job_prefix = args.job
+                vol.job = args.job
+                changed.append(f"job={args.job}")
+        if not changed:
+            print("Nothing to change. Settable: --role --mirror/--no-mirror "
+                  "--media --max-bytes --max-file-size --reserve-bytes "
+                  "--device-class --job (size caps: 0 = clear)")
+            return
+        save_pool_config(cfg, pool, realm=realm)
+        print(f"Updated backend {vol.label} ({vol.vol_id}): {', '.join(changed)}")
+        print("  A running service applies this on its next restart.")
 
     elif action in ("eject", "attach"):
         pool, cfg = _load_or_create_pool(realm)
@@ -983,17 +1052,20 @@ def main():
     srestart.set_defaults(func=cmd_restart)
 
     sb = sub.add_parser("backend", help="manage storage backends")
-    sb.add_argument("action", choices=["list", "add", "remove", "register", "eject", "attach"])
+    sb.add_argument("action", choices=["list", "add", "remove", "register", "set", "eject", "attach"])
     sb.add_argument("realm", help="realm name")
     sb.add_argument("path", nargs="?", help="backend path (for add/register)")
-    sb.add_argument("id_or_path", nargs="?", help="volume ID, label, or path (for remove/eject/attach)")
+    sb.add_argument("id_or_path", nargs="?", help="volume ID, label, or path (for remove/set/eject/attach)")
     sb.add_argument("--id", default=None, help="label for the new backend")
     sb.add_argument("--role", default=None, help="backend role (archive, cache)")
     sb.add_argument("--mirror", action="store_true", help="replicate committed writes to this backend")
+    sb.add_argument("--no-mirror", action="store_true", help="stop replicating committed writes (for set)")
     sb.add_argument("--media", default=None, help="storage media hint (ssd, hdd, network)")
-    sb.add_argument("--max-bytes", type=int, default=None, help="maximum bytes this backend should use")
-    sb.add_argument("--max-file-size", type=int, default=None, help="largest file this backend should accept")
-    sb.add_argument("--reserve-bytes", type=int, default=None, help="free bytes to reserve on this backend")
+    sb.add_argument("--max-bytes", type=int, default=None, help="maximum bytes this backend should use (set: 0 = unlimited)")
+    sb.add_argument("--max-file-size", type=int, default=None, help="largest file this backend should accept (set: 0 = unlimited)")
+    sb.add_argument("--reserve-bytes", type=int, default=None, help="free bytes to reserve on this backend (set: 0 = clear)")
+    sb.add_argument("--device-class", default=None, help="device class (for set)")
+    sb.add_argument("--job", default=None, help="themed job prefix, 'none' to clear (for set)")
     sb.set_defaults(func=cmd_backend)
 
     sr = sub.add_parser("realm", help="manage realm configuration")
