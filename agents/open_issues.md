@@ -90,6 +90,18 @@ stopping for features/fixes/logs.
 
 ## Features
 
+- [P1] **Workload modes: versioning policy, live data, dedup.** FFSFS has one
+  storage model (immutable version per close) and no per-path way out, so an
+  archive drive, a live working directory, and many identical copies of the same
+  bytes all get the same treatment. Evidence: 324 permanent versions of a
+  904-byte node-status heartbeat in two days on the `testff` realm. Proposed: a
+  `versioned` / `latest:N` / `scratch` policy axis reusing the redundancy
+  class-resolver shape, plus content-hash dedup (the hash is already in every
+  committed filename, and committed versions are immutable, so hardlinking is
+  safe here in a way it is not on an ordinary filesystem). Full design, phasing
+  and open questions in `agents/workload_modes_design.md`. NOTE: the
+  correctness fix that motivates it (§2) has shipped; the policy work has not.
+
 - [P2] **Manual-approval "pending peers" (known but not whitelisted).** Today
   with peer_trust=manual, an unapproved peer is 403'd at verify() and never
   recorded, so the operator can't see/approve it. Make an authenticated-but-

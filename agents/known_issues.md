@@ -70,6 +70,21 @@
       - ffsctl sync status queries running FUSE process for live failure/conflict data.
       - Falls back gracefully when service is not running.
 
+  11. Partial writes committed only the new bytes — RESOLVED.
+      - open() for write/append and the no-fh branch of truncate() built an
+        EMPTY temp and never seeded it from the latest committed version, so an
+        in-place write, an append, or a shrink committed a version holding only
+        that session's bytes with NUL holes for the rest.
+      - Corrupted every random-access writer (SQLite and other embedded DBs),
+        append-only logs, `dd conv=notrunc`, torrent clients, VM images.
+      - Recoverable (the prior version survives), but the file readers saw
+        immediately after the write was wrong.
+      - Missed by the whole suite because every test wrote via fs.create(), the
+        one path where an empty temp is correct.
+      - Fixed by FFSFS._seed_temp_from_latest(); 12 regression tests in
+        tests/test_inplace_write.py. Remaining gap: opening a REMOTE-only file
+        for write still starts empty (Q6 in agents/workload_modes_design.md).
+
   Top To-Dos
 
   VM harness note: two-peer scenarios now run inside a single disposable VM

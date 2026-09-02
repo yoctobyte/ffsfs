@@ -1709,6 +1709,16 @@ class FFSFS(Operations):
 
         # for write/append, create a temp in the same directory
         temp = self.backend.create_temp_for(vpath)
+
+        # Seed the temp with the current contents unless the caller asked for a
+        # truncating open. The temp starts empty, so without this an in-place
+        # write (O_RDWR, no O_TRUNC) or an append would commit a version holding
+        # ONLY the bytes written this session, with NUL holes where the rest of
+        # the file used to be — i.e. silent corruption for SQLite and every
+        # other random-access or append writer. See agents/workload_modes_design.md.
+        if not (flags & os.O_TRUNC):
+            self._seed_temp_from_latest(vpath, temp)
+
         # open read/write binary
         f = open(temp, "r+b")
         if mode == "append":
@@ -1716,6 +1726,38 @@ class FFSFS(Operations):
         fh = self._alloc_fh(f)
         self.fh_meta[fh] = {"mode": mode, "vpath": vpath, "temp_path": temp, "last_write_ts": 0.0}
         return fh
+
+    def _seed_temp_from_latest(self, vpath: str, temp: str) -> bool:
+        """Copy the latest committed version of vpath into a fresh temp.
+
+        Returns True if bytes were copied. A missing file, or a latest version
+        that is a delete tombstone / other hidden mode, seeds nothing and leaves
+        the temp empty — the write is creating the file.
+
+        Only the local store is consulted. Opening a remote-only file for write
+        still starts from empty; closing that gap is Q6 in
+        agents/workload_modes_design.md.
+        """
+        latest = self.backend.pick_latest(vpath)
+        if not latest:
+            return False
+        parsed = parse_versioned_filename(os.path.basename(latest))
+        if not parsed or is_hidden_mode(parsed.get("mode")):
+            return False
+        try:
+            self.backend._copy_file_chunked(latest, temp, self.rate_limits.disk_fg)
+        except OSError as e:
+            # Fail loudly rather than hand back a half-seeded temp that would
+            # commit as a corrupt version. The temp was created moments ago and
+            # holds nothing the caller needs, so drop it instead of leaving an
+            # orphan for the startup scan.
+            ffslog.warn(f"seed-on-open failed for {vpath} from {latest}: {e}")
+            try:
+                os.remove(temp)
+            except OSError:
+                pass
+            raise FuseOSError(e.errno or errno.EIO)
+        return True
 
     def create(self, path, mode, fi=None):
         # behave like open(path, O_WRONLY|O_CREAT|O_TRUNC)
@@ -1829,6 +1871,12 @@ class FFSFS(Operations):
             # best-effort: open temp for write and truncate
             vpath = normalize_vpath(path)
             temp = self.backend.create_temp_for(vpath)
+            # Seed first: the temp starts empty, so truncating it straight to
+            # `length` would produce `length` NUL bytes instead of the first
+            # `length` bytes of the file. Truncating to 0 discards everything
+            # anyway, so skip the copy in that case.
+            if length > 0:
+                self._seed_temp_from_latest(vpath, temp)
             with open(temp, "r+b") as f:
                 f.truncate(length)
             # commit immediately (truncate is explicit)
