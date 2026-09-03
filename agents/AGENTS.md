@@ -13,6 +13,9 @@ Read these files before changing behavior:
 - `public_internet_exposure.md`: unsupported public-IP boundary and hardening
   blockers.
 - `vm_testing_plan.md`: VM-first strategy for FUSE and peer-network tests.
+- `workload_modes_design.md`: the archive-vs-live-data-vs-dedup tension, the
+  proposed versioning policy axis, and the write-path corruption bug that
+  motivated it. Read §2 before touching the write path.
 - `../README.md`: user-facing install and quick-start notes.
 - `../tech_doc.md`: storage layout, peer API, discovery, and tunables.
 
@@ -147,6 +150,15 @@ node names are user configuration.
 - Keep workstation-hostile tests out of normal local runs.
 - Run FUSE and peer-network tests in disposable VMs by default.
 - Keep changes small and covered by tests where practical.
+- For data paths (write/commit/delete/rename/sync), test against an EXTERNAL
+  oracle, not against the implementation's own idea of correctness. The
+  in-place-write corruption bug survived 393 green tests because every write
+  test used the one code path that happened to be correct. `tests/
+  test_write_oracle.py` compares FFSFS to a plain file on the host filesystem;
+  extend that pattern rather than adding more self-referential assertions.
+- When fixing a bug, first confirm the new test FAILS against the unfixed code
+  (`git checkout HEAD~1 -- <file>`, run, restore). A regression test that never
+  saw red proves nothing.
 - Do not commit `.storage/`, `__pycache__/`, VM images, logs, or local env files.
 - Avoid broad restructuring until the test foundation exists.
 - Preserve the vdir-preserving storage model unless explicitly changing the
@@ -169,7 +181,10 @@ node names are user configuration.
 
 ```bash
 python3 -m py_compile *.py
-pytest                          # unit tests, <1s
+pytest                          # unit tests, ~18s
+
+# Longer differential soak of the write path (OS as oracle, not a model):
+FFSFS_ORACLE_OPS=2000 pytest tests/test_write_oracle.py
 ```
 
 VM checks (each boots QEMU; two-peer smoke/all reuse one VM per batch):

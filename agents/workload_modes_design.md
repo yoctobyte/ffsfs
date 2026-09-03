@@ -297,8 +297,12 @@ allowed to cancel each other out**:
 
 ## 8. Phasing
 
-- **Phase 0 — DONE (this change).** Seed temp on open-for-write; regression
-  tests for in-place patch and append.
+- **Phase 0 — DONE.** Seed temp on open-for-write and on truncate; targeted
+  regression tests (`tests/test_inplace_write.py`, 9 of 13 confirmed red
+  against the unfixed code) plus a differential test against the host
+  filesystem (`tests/test_write_oracle.py`) that catches this whole class of
+  bug without naming it — it diverges from the oracle within 3-4 random
+  operations on every seed when the fix is reverted.
 - **Phase 1.** Versioning policy config + resolver (reusing the redundancy
   class-resolver shape), `versioned` and `latest:N` only. Apply `latest:1` to
   `.ffsfs-nodes` and watch the heartbeat problem disappear.
