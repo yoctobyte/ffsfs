@@ -413,6 +413,26 @@ def temp_name_for(logical_name: str) -> str:
     return f"{logical_name}.{NULL_HASH}.{stamp}X{uniq}"
 
 
+def _apply_flag_perms(st_mode: int, parsed: dict) -> int:
+    """Overlay permission bits recorded in a version filename's `flags` field.
+
+    `flags` is the schema's reserved int. 0 means "unset", in which case the
+    underlying file's own mode is used — so stores written before chmod support
+    behave exactly as they did. Only the permission bits are taken; the file
+    type comes from the real file.
+    """
+    if not parsed:
+        return st_mode
+    try:
+        flags = int(parsed.get("flags") or 0)
+    except (TypeError, ValueError):
+        return st_mode
+    perm = flags & 0o7777
+    if not perm:
+        return st_mode
+    return (st_mode & ~0o7777) | perm
+
+
 def make_dirs(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
@@ -682,11 +702,26 @@ class StorageBackend:
         b32hash = base32_crockford(int.from_bytes(h.digest(), "big"))[:HASH_BASE32_LEN]
         ts = int(time.time())
 
+        # Inherit permission bits from the version being superseded, so a
+        # `chmod +x` survives the next edit. `flags` is the schema's reserved
+        # int field; 0 means "unset" and getattr falls back to the underlying
+        # file's mode, which keeps pre-policy stores working unchanged.
+        prev_latest = self.pick_latest(vpath)
+        prev_parsed = (parse_versioned_filename(os.path.basename(prev_latest))
+                       if prev_latest else None)
+        inherited_flags = 0
+        if prev_parsed and not is_hidden_mode(prev_parsed.get("mode")):
+            try:
+                inherited_flags = int(prev_parsed.get("flags") or 0)
+            except (TypeError, ValueError):
+                inherited_flags = 0
+
         final_name = build_versioned_filename(
             logical_name=logical_name,
             content_hash=b32hash,
             mode=mode,
             timestamp=ts,
+            flags=inherited_flags,
         )
         
         
@@ -701,9 +736,7 @@ class StorageBackend:
         # tombstone + new version in the same second). Record the previous
         # latest so we can force a strictly greater mtime after the rename.
         prev_mtime_ns = -1
-        prev_latest = self.pick_latest(vpath)
         if prev_latest:
-            prev_parsed = parse_versioned_filename(os.path.basename(prev_latest))
             if prev_parsed and int(prev_parsed["timestamp"]) == ts:
                 try:
                     prev_mtime_ns = os.lstat(prev_latest).st_mtime_ns
@@ -769,6 +802,77 @@ class StorageBackend:
                     dirpath, logical_name, keep, protect=(protect_path,))
         except Exception as e:
             ffslog.warn(f"retention failed for {vpath}: {e}")
+
+    def commit_metadata_version(self, vpath: str, flags: int,
+                                source_path: str = None) -> str:
+        """Record a metadata-only change (currently permission bits) as a new
+        committed version, WITHOUT duplicating the file's bytes.
+
+        The new version is a hardlink to the existing content. That is safe here
+        precisely because committed versions are never modified in place — the
+        same property that makes content-hash dedup safe
+        (workload_modes_design.md §5). Cost is O(1) regardless of file size, so
+        `chmod +x` on a 4 GB file is free.
+
+        Falls back to a byte copy if the link cannot be made (cross-device, or a
+        filesystem without hardlinks).
+        """
+        from ffsutils import build_versioned_filename
+
+        logical_name = os.path.basename(vpath)
+        src = source_path or self.pick_latest(vpath)
+        if not src:
+            raise FuseOSError(errno.ENOENT)
+        parsed = parse_versioned_filename(os.path.basename(src))
+        if not parsed or is_hidden_mode(parsed.get("mode")):
+            raise FuseOSError(errno.ENOENT)
+
+        ts = int(time.time())
+        final_name = build_versioned_filename(
+            logical_name=logical_name,
+            content_hash=parsed["content_hash"],
+            mode="write",
+            timestamp=ts,
+            flags=int(flags),
+        )
+        # Destination is derived from vpath, NOT from the source directory —
+        # link() passes a source under a different logical path.
+        dirpath = real_dir_for_vpath(self._write_base(), vpath)
+        make_dirs(dirpath)
+        final_abspath = os.path.join(dirpath, final_name)
+        if os.path.abspath(final_abspath) == os.path.abspath(src):
+            return src            # nothing changed
+
+        try:
+            os.link(src, final_abspath)
+        except FileExistsError:
+            return final_abspath
+        except OSError:
+            self._copy_file_chunked(src, final_abspath, self.rate_limits.disk_fg)
+
+        # Force a strictly greater mtime so pick_latest's (ts, mtime) tie-break
+        # sees this as the newer version even within the same second.
+        try:
+            prev_ns = os.lstat(src).st_mtime_ns
+            if os.lstat(final_abspath).st_mtime_ns <= prev_ns:
+                os.utime(final_abspath, ns=(prev_ns + 1, prev_ns + 1))
+        except OSError:
+            pass
+
+        try:
+            size = os.lstat(final_abspath).st_size
+        except OSError:
+            size = 0
+        self.meta.append(vpath, final_name, size)
+        if peers and hasattr(peers, "notify_commit_safe"):
+            try:
+                peers.notify_commit_safe(vpath=vpath, final_name=final_name,
+                                         size=size, mtime=ts)
+            except Exception as e:
+                ffslog.warn(f"peer notify (metadata version) failed: {e}")
+        self._apply_retention(vpath, os.path.dirname(final_abspath),
+                              logical_name, final_abspath)
+        return final_abspath
 
     def commit_delete(self, vpath: str) -> str:
         """
@@ -1362,6 +1466,8 @@ class FFSFS(Operations):
                     # stored as a regular version file; presented as a link
                     # (st_size from lstat = len(target), the POSIX contract)
                     out["st_mode"] = stat.S_IFLNK | 0o777
+                else:
+                    out["st_mode"] = _apply_flag_perms(out["st_mode"], parsed)
                 return out
 
         # Case 3: no committed version yet — expose an in-progress TEMP if present
@@ -1794,6 +1900,86 @@ class FFSFS(Operations):
                 pass
             raise FuseOSError(e.errno or errno.EIO)
         return True
+
+    # ---- permissions and hardlinks (local_parity_design.md §6) -------------
+
+    def _latest_live(self, vpath: str):
+        """(path, parsed) of the latest non-hidden version, or ENOENT."""
+        latest = self.backend.pick_latest(vpath)
+        if not latest:
+            raise FuseOSError(errno.ENOENT)
+        parsed = parse_versioned_filename(os.path.basename(latest))
+        if not parsed or is_hidden_mode(parsed.get("mode")):
+            raise FuseOSError(errno.ENOENT)
+        return latest, parsed
+
+    def chmod(self, path, mode):
+        """Record permission bits in the version filename's `flags` field.
+
+        Previously EROFS, so `chmod +x build.sh` simply failed on a mount. The
+        bits go in the name rather than on the underlying file so they survive
+        a peer fetch, a copy to another filesystem, and inspection without a
+        running service — the self-describing-filenames principle.
+
+        This commits a new version (a metadata change IS a change), but as a
+        hardlink to the existing content, so no bytes are duplicated.
+        """
+        vpath = normalize_vpath(path)
+        with self._lock:
+            latest, _parsed = self._latest_live(vpath)
+            perm = int(mode) & 0o7777
+            if perm == 0:
+                # 0 is the schema's "unset" sentinel; a real chmod 000 would be
+                # indistinguishable from "inherit", so refuse rather than lie.
+                raise FuseOSError(errno.EINVAL)
+            self.backend.commit_metadata_version(vpath, perm, source_path=latest)
+        return 0
+
+    def chown(self, path, uid, gid):
+        """Ownership is not modelled.
+
+        FFSFS presents every file as owned by the user running the mount; there
+        is no per-file uid/gid in the storage format and no cross-node identity
+        to map one onto. Accepting a no-op change keeps `cp -p` and `tar -x`
+        working (they chown to the current owner); a real change is EPERM, which
+        is what an unprivileged user gets on a local mount anyway.
+
+        EPERM rather than the previous EROFS: the filesystem is writable, this
+        particular attribute is not.
+        """
+        st = self.getattr(path)
+        if uid in (-1, st.get("st_uid")) and gid in (-1, st.get("st_gid")):
+            return 0
+        raise FuseOSError(errno.EPERM)
+
+    def link(self, target, source):
+        """Hardlink: publish the same content at a second logical path.
+
+        Committed versions are immutable, so sharing an inode between two
+        logical paths cannot leak a mutation from one to the other — the write
+        model that makes versioning expensive is what makes this safe. O(1) and
+        no bytes copied, whatever the file size.
+
+        Note this links the CONTENT, not the identity: a later write to either
+        path commits a new version there and the two diverge, where a local
+        mount would keep them the same inode. Real link identity needs the
+        working-copy model (local_parity_design.md §5).
+        """
+        tvpath = normalize_vpath(target)
+        svpath = normalize_vpath(source)
+        with self._lock:
+            src, parsed = self._latest_live(svpath)
+            try:
+                flags = int(parsed.get("flags") or 0)
+            except (TypeError, ValueError):
+                flags = 0
+            existing = self.backend.pick_latest(tvpath)
+            if existing:
+                ep = parse_versioned_filename(os.path.basename(existing))
+                if ep and not is_hidden_mode(ep.get("mode")):
+                    raise FuseOSError(errno.EEXIST)
+            self.backend.commit_metadata_version(tvpath, flags, source_path=src)
+        return 0
 
     def create(self, path, mode, fi=None):
         # behave like open(path, O_WRONLY|O_CREAT|O_TRUNC)

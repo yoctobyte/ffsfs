@@ -1,9 +1,10 @@
 # Local Parity — "as good as any local mount"
 
-> Status: **GOAL + MEASUREMENT, not built.** Sets the target, records what an
-> FFSFS mount actually does today against it, and proposes the one
-> architectural change that would make the target reachable. Decide §5 before
-> building anything from §6.
+> Status: **GOAL + MEASUREMENT.** §6.1 (chmod/chown/link) is BUILT; everything
+> else here is measurement and proposal. Sets the target, records what an FFSFS
+> mount actually does against it, and proposes the one architectural change
+> that would make the rest reachable. §5 needs an explicit decision before any
+> of it is built.
 
 ## 0. The goal, as stated
 
@@ -51,23 +52,27 @@ Testable properties, roughly in order of how much a developer notices:
 Probed directly against the `FFSFS` operations object:
 
 ```
-chmod     -> EROFS          chown     -> EROFS
-link      -> EROFS          mknod     -> EROFS
-getxattr  -> ENOTSUP        setxattr  -> ENOTSUP
-lock      -> not implemented (no `lock` op at all)
-access    -> OK             getattr   -> st_mode/uid/gid/nlink/size/times present
+                            BEFORE          NOW
+chmod                       EROFS           OK   (flags field, §6.1)
+chown                       EROFS           OK for no-op, else EPERM
+link                        EROFS           OK   (hardlink, §6.1)
+mknod                       EROFS           EROFS
+getxattr / setxattr         ENOTSUP         ENOTSUP
+lock                        not implemented not implemented — deliberate, see §6.3
+access                      OK              OK
 ```
 
 Implemented FUSE ops: `statfs getattr readdir open create read write flush
-release fsync truncate unlink rename symlink readlink mkdir rmdir utimens`.
+release fsync truncate unlink rename symlink readlink mkdir rmdir utimens
+chmod chown link`.
 
-Not implemented: `chmod chown link mknod lock access* getxattr setxattr
-listxattr removexattr ioctl bmap fsyncdir opendir releasedir`.
+Not implemented: `mknod lock getxattr setxattr listxattr removexattr ioctl
+bmap fsyncdir opendir releasedir`.
 
-So today: **P3, P5, P7, P8 fail outright.** `chmod +x` on an FFSFS mount
-returns a read-only-filesystem error. A checked-out repo cannot have its
-executable bits set. SQLite has no advisory locks, so two processes have
-nothing stopping them from interleaving writes.
+**P5 and P7 are now closed** (§6.1). **P8 (xattrs) still fails.** P3 is subtler
+than first written — see §6.3.
+
+P1, P2, P4 and P6 are untouched by any of this; they need §5.
 
 ### 2.1 A concurrency bug found while measuring (FIXED)
 
@@ -85,7 +90,7 @@ Regression tests confirmed red against the old code.
 Note what the fix does **not** do: two writers still get separate temps, so the
 result is last-writer-wins across whole files rather than the shared-inode
 interleave a local mount gives (P6). That divergence is inherent to
-copy-on-open and only §6 removes it.
+copy-on-open; only the working-copy model in §5 removes it.
 
 ---
 
@@ -132,8 +137,9 @@ That single fact produces P1, P2, P6 and most of P3/P4 failures at once:
 - versioning is a consequence of `close()` → churn is proportional to opens,
   not to changes (the 324-version heartbeat, `workload_modes_design.md` §1)
 
-Adding `chmod`, `link` and `lock` as FUSE ops is straightforward and worth
-doing regardless. It would move P5/P7/P8 to "works". It would not move P1–P4.
+Adding `chmod` and `link` was straightforward and worth doing regardless — it
+closed P5 and P7 (§6.1). It did nothing for P1, P2, P4 or P6, and it could not:
+those follow from the storage model above, not from missing operations.
 
 ---
 
@@ -196,16 +202,56 @@ Open questions to settle first:
 
 Worth doing whether or not working copies happen:
 
-1. **`chmod`/`chown`.** Mode is already in the version filename schema. This is
-   a small change and removes a hard EROFS failure.
-2. **`link`.** Committed versions are immutable, so hardlinks are safe here in
-   a way they are not on an ordinary filesystem (same argument as dedup,
-   `workload_modes_design.md` §5).
-3. **`lock`.** Even node-local advisory locking is better than none, and it is
-   what SQLite on a single machine actually needs.
-4. **xattrs.** Either implement or return something more honest than ENOTSUP.
-5. **Extend the differential oracle** (`tests/test_write_oracle.py`) to cover
-   these ops as they land, so parity is measured rather than asserted.
+### 6.1 chmod / chown / link — DONE
+
+Permission bits go in the version filename's **`flags`** field, which the
+schema reserved as an int. Not on the underlying inode: bits in the name
+survive a peer fetch, a copy to a filesystem that does not preserve modes, and
+inspection with no service running — the self-describing-filenames principle.
+`flags == 0` means "unset" and getattr falls back to the real file mode, so
+stores written before this behave exactly as they did.
+
+- `chmod` commits a new version, because a metadata change *is* a change — but
+  as a **hardlink** to the existing content, so no bytes are duplicated and
+  `chmod +x` on a 4 GB file is O(1). Safe for the same reason dedup is safe:
+  committed versions are never modified in place.
+- Commits inherit `flags` from the version they supersede, so `chmod +x`
+  survives the next edit.
+- `chmod 000` is refused with EINVAL — 0 is the "unset" sentinel and cannot be
+  distinguished from "inherit". A wart of using 0 as the sentinel; revisit if
+  it ever matters.
+- `chown` accepts a no-op (what `cp -p` and `tar -x` actually do) and returns
+  **EPERM** otherwise, not EROFS: the filesystem is writable, this attribute
+  simply is not modelled.
+- `link` publishes existing content at a second logical path via hardlink. It
+  shares CONTENT, not identity: a write to either path commits a new version
+  there and the two diverge, where a local mount keeps one inode. Asserted in
+  `tests/test_linked_paths_diverge_on_write` so it stays deliberate.
+
+### 6.2 Still open
+
+- **xattrs** — either implement or return something more honest than ENOTSUP.
+- **`mknod`** — still EROFS.
+- **Extend the differential oracle** (`tests/test_write_oracle.py`) to cover
+  these ops, so parity stays measured rather than asserted.
+
+### 6.3 `lock` — do NOT implement naively
+
+Revised from an earlier draft of this document, which listed node-local locking
+as a cheap win. It is not, and implementing it would likely make things worse.
+
+When a FUSE filesystem does **not** provide a `lock` operation, the kernel
+handles POSIX advisory locks itself, in the VFS layer, local to the machine.
+FFSFS mounts with no special options (`FUSE(fs, mountpoint,
+foreground=..., nothreads=False)`), so that default applies: SQLite and git on a
+single node most likely already get correct advisory locking *because* `lock`
+is absent. Providing a half-correct implementation would replace working kernel
+semantics with a worse approximation — and a lock that reports success without
+providing exclusion is worse than no lock at all.
+
+What is genuinely missing is **cross-node** locking, and that is not a `lock`
+op — it is the single-writer lease in §7.2. Confirm the kernel-local behaviour
+in a VM before touching this either way.
 
 ---
 

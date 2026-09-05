@@ -46,7 +46,11 @@
 ```
 - `content_hash` = SHA-256 → **Crockford Base32** (truncated, default 26 chars; hex accepted but not preferred).
 - `mode` = `[a-z]+` (`write|append|copy|delete|moved|...`).
-- `flags` = non-negative int (reserved).
+- `flags` = non-negative int: **POSIX permission bits** (`& 0o7777`), 0 = unset.
+  Set by `chmod`; inherited by the next commit so `chmod +x` survives an edit.
+  When 0, `getattr` falls back to the underlying file's own mode, so stores
+  written before this are unaffected. Bits live in the name, not the inode, so
+  they survive peer fetch and copies to filesystems that do not preserve modes.
 - `timestamp` = UNIX seconds.
 
 ### Temps

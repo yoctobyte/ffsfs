@@ -95,9 +95,14 @@ stopping for features/fixes/logs.
   one-byte in-place write to a 100 MB file costs ~1.3 s vs ~0.17 ms local
   (~7,576x) because the model is O(filesize) twice — seed on open, hash+commit
   on close. `chmod`/`chown`/`link`/`mknod` return EROFS; xattrs ENOTSUP; no
-  `lock` op at all. Cheap wins available now (chmod/chown, link, node-local
-  lock) do not touch the performance wall; only the working-copy proposal (§5)
-  does, and that needs an explicit decision first. Sync intelligence (§7:
+  `lock` op at all. SHIPPED: chmod/chown/link (§6.1) —
+  permission bits in the filename `flags` field, chmod as an O(1) hardlink so
+  it is free on huge files, inherited across commits so `chmod +x` survives an
+  edit. `lock` deliberately NOT implemented (§6.3): the kernel handles advisory
+  locks locally when a FUSE fs omits the op, so a naive implementation would
+  replace working semantics with worse ones; cross-node locking needs the lease
+  design, not a `lock` op. None of this touches the performance wall; only the
+  working-copy proposal (§5) does, and that needs an explicit decision first. Sync intelligence (§7:
   delta transfer, single-writer leases) is necessary but addresses a different
   axis — the measured cost above involves no network.
   FIXED along the way: overlapping opens of one file shared a temp path
