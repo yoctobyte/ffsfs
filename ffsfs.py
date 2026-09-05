@@ -44,6 +44,7 @@ from ffsvolumes import StoragePool, Volume, load_pool_config
 from ffssync import SyncPolicy, SyncWorker
 from ffsratelimit import RateLimits
 import ffslog
+import ffsversioning
 
 try:
     import ffspeers as peers
@@ -435,7 +436,13 @@ class StorageBackend:
     to the primary, reads scan all online backends for the newest version.
     """
     def __init__(self, base_path: str, realm: str, pool: StoragePool = None,
-                 rate_limits: RateLimits = None):
+                 rate_limits: RateLimits = None,
+                 versioning_config: dict = None):
+        # Already-normalized versioning config (ffsversioning). Defaults to the
+        # built-in set (everything `versioned`, .ffsfs-nodes `latest:1`) so the
+        # disposable-metadata rule applies even when no realm config is loaded.
+        self.versioning_config = (
+            versioning_config or ffsversioning.normalize_versioning_config(None))
         if pool:
             self.pool = pool
             self.base = os.path.abspath(pool.primary.path)
@@ -722,7 +729,30 @@ class StorageBackend:
             except Exception as e:
                 print(f"[ffsfs] peer notify_commit failed: {e}")
 
+        # Versioning policy (workload_modes_design.md §4). Hooked here, at the
+        # single commit chokepoint, rather than at each of the eight callers —
+        # a retention rule that some write paths skip is worse than none.
+        self._apply_retention(vpath, dirpath, logical_name, final_abspath)
+
         return final_abspath
+
+    def _apply_retention(self, vpath: str, dirpath: str, logical_name: str,
+                         protect_path: str) -> None:
+        """Enforce a `latest:N` versioning policy after a commit, if configured.
+
+        Never raises: retention is housekeeping, and a failure to tidy history
+        must not fail the write that just succeeded.
+        """
+        norm = getattr(self, "versioning_config", None)
+        if not norm:
+            return
+        try:
+            keep = ffsversioning.keep_count(ffsversioning.resolve(vpath, norm))
+            if keep:
+                ffsversioning.apply_retention(
+                    dirpath, logical_name, keep, protect=(protect_path,))
+        except Exception as e:
+            ffslog.warn(f"retention failed for {vpath}: {e}")
 
     def commit_delete(self, vpath: str) -> str:
         """
@@ -862,12 +892,14 @@ class FFSFS(Operations):
     
     
     def __init__(self, mount_root: str, base_path: str = DEFAULT_DATA_ROOT, realm: str = None, pool: StoragePool = None,
-                 sync_policy: SyncPolicy = None, rate_limits: RateLimits = None):
+                 sync_policy: SyncPolicy = None, rate_limits: RateLimits = None,
+                 versioning_config: dict = None):
         self.mount_root = os.path.abspath(mount_root)
         self.base = os.path.abspath(base_path)
         self.rate_limits = rate_limits or RateLimits.unlimited()
         self.backend = StorageBackend(self.base, realm, pool=pool,
-                                      rate_limits=self.rate_limits)
+                                      rate_limits=self.rate_limits,
+                                      versioning_config=versioning_config)
         self._lock = threading.RLock()
         self.realm = realm or MAGIC_REALM
 
@@ -1069,32 +1101,20 @@ class FFSFS(Operations):
         self.backend.commit_temp(vpath, temp, "write")
 
     def _prune_node_status(self) -> None:
-        """Keep only the newest version of each .ffsfs-nodes/* file (disposable
-        metadata); drop older versions so they never accumulate."""
-        for root in self.backend.data_roots():
-            ndir = os.path.join(root, NODE_STATUS_DIR)
-            if not os.path.isdir(ndir):
-                continue
-            newest = {}  # logical_name -> (ts, path)
-            versions = {}  # logical_name -> [paths]
-            try:
-                with os.scandir(ndir) as it:
-                    for de in it:
-                        parsed = parse_versioned_filename(de.name)
-                        if not parsed:
-                            continue
-                        ln = parsed["logical_name"]
-                        ts = int(parsed["timestamp"])
-                        versions.setdefault(ln, []).append((ts, de.path))
-            except OSError:
-                continue
-            for ln, items in versions.items():
-                items.sort()  # oldest first
-                for ts, path in items[:-1]:  # all but newest
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
+        """Enforce bounded versioning policies across the stored tree.
+
+        Was a hardcoded "keep only the newest .ffsfs-nodes/* version". That rule
+        is now just the built-in `latest:1` override in ffsversioning, and this
+        sweep enforces whatever the operator configured — including for versions
+        that arrived from a peer via the sync worker, which never pass through
+        the commit hook. With the default config it walks only .ffsfs-nodes, so
+        the cost is unchanged.
+        """
+        try:
+            ffsversioning.sweep(self.backend.data_roots(),
+                                self.backend.versioning_config)
+        except Exception as e:
+            ffslog.warn(f"retention sweep failed: {e}")
 
     def _monitor_node_status(self):
         # Small initial delay so the backend/peer server are up first.
@@ -2124,8 +2144,17 @@ class FFSFS(Operations):
 # Convenience runner (optional)
 def mount(mountpoint: str, base_path: str = DEFAULT_DATA_ROOT, foreground: bool = True, realm: str = None, pool: StoragePool = None,
           sync_policy: SyncPolicy = None, rate_limits: RateLimits = None, realm_config: dict = None):
+    # Validate the versioning block before mounting: a policy typo should stop
+    # startup, not silently keep every version of a database forever.
+    _vcfg = ffsversioning.normalize_versioning_config(
+        (realm_config or {}).get("versioning"))
     fs = FFSFS(mount_root=mountpoint, base_path=base_path, realm=realm, pool=pool,
-               sync_policy=sync_policy, rate_limits=rate_limits)
+               sync_policy=sync_policy, rate_limits=rate_limits,
+               versioning_config=_vcfg)
+    _nondefault = {p: v for p, v in _vcfg["overrides"].items()
+                   if ffsversioning.BUILTIN_OVERRIDES.get(p) != v}
+    if _vcfg["default"] != ffsversioning.DEFAULT_POLICY or _nondefault:
+        print(f"[ffsfs] versioning: default={_vcfg['default']} overrides={_vcfg['overrides']}")
     # --- Start peer HTTP server (optional if ffspeers available) ---
     try:
         if peers:

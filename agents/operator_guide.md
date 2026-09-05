@@ -661,6 +661,49 @@ running; the realm always keeps at least the target number of copies.
 
 ---
 
+## 3c) Versioning Policy (how much history a path keeps)
+
+Separate axis from redundancy. Redundancy is how many COPIES exist across
+nodes; versioning is how much HISTORY one node keeps of a logical file.
+
+| policy | effect |
+|---|---|
+| `versioned` | keep every committed version (default) |
+| `latest:N` | keep the N newest versions, drop the rest |
+| `scratch` | designed, not implemented — rejected by the validator |
+
+By default FFSFS keeps every version forever, which is right for an archive
+drive and wrong for anything that rewrites itself. A database, an index, or a
+status file committed every few minutes accumulates a permanent version per
+close. (Measured: 324 permanent versions of a 904-byte node-status file in two
+days.)
+
+```bash
+ffsctl versioning <realm> show
+ffsctl versioning <realm> set projects/db latest:3
+ffsctl versioning <realm> unset projects/db
+ffsctl versioning <realm> default versioned
+```
+
+Longest matching prefix wins, so `projects` = `latest:5` and `projects/db` =
+`latest:1` behave as you would expect. `.ffsfs-nodes` is bounded to `latest:1`
+as a built-in; override it like any other prefix.
+
+Restart the realm for a running service to pick up a change.
+
+**Read this before setting `latest:N`:**
+
+- It DELETES committed history. That is the point, and it is the one place
+  FFSFS auto-deletes anything. Every removal is logged.
+- It never drops the newest version, never touches in-flight temps, and never
+  reduces a logical file to nothing (`latest:0` is refused).
+- It is LOCAL. A peer still holding older versions may re-introduce them on the
+  next sync. Set the same policy on every node that stores the prefix.
+- A bounded `default` applies to the whole realm and makes the retention sweep
+  walk the entire tree. Prefer prefixes.
+- Retention is enforced at commit and by a periodic sweep, so versions pulled
+  from a peer are bounded too.
+
 ## 4) VM Testing Procedure
 
 To prevent mounting experimental FUSE systems directly on your developer workstation, FFSFS uses a QEMU-based VM test harness.

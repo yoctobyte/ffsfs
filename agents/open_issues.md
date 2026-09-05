@@ -99,8 +99,13 @@ stopping for features/fixes/logs.
   class-resolver shape, plus content-hash dedup (the hash is already in every
   committed filename, and committed versions are immutable, so hardlinking is
   safe here in a way it is not on an ordinary filesystem). Full design, phasing
-  and open questions in `agents/workload_modes_design.md`. NOTE: the
-  correctness fix that motivates it (§2) has shipped; the policy work has not.
+  and open questions in `agents/workload_modes_design.md`.
+  SHIPPED: §2 correctness fix; Phase 1 (`ffsversioning.py`, `versioned` /
+  `latest:N`, commit-time retention + policy sweep, `ffsctl versioning`).
+  REMAINING: Phase 2 `scratch` (mount-visible unversioned tree — the escape
+  hatch for node_modules/.git/build output), Phase 3 content-hash dedup, and
+  Phase 4 detection/suggestion. Q1 and Q4 (where `scratch` lives, how it
+  interacts with a peer holding the same vpath) still need deciding first.
 
 - [P2] **Manual-approval "pending peers" (known but not whitelisted).** Today
   with peer_trust=manual, an unapproved peer is 403'd at verify() and never

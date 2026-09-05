@@ -211,6 +211,35 @@ Expected behaviors:
 
 ---
 
+## 7b) Versioning Policy (ffsversioning)
+
+Per-prefix control over how much history a logical file keeps. Realm config:
+
+```json
+"versioning": {"default": "versioned", "overrides": {"var/db": "latest:3"}}
+```
+
+- `versioned` (default) — every committed version kept.
+- `latest:N` — keep N newest, drop the rest. N >= 1.
+- `scratch` — designed (workload_modes_design.md §4), NOT implemented; the
+  validator rejects it rather than silently ignoring it.
+
+Resolution is longest-prefix-wins, identical to `ffsredundancy.class_for_path`.
+Built-in override: `.ffsfs-nodes` = `latest:1` (disposable node status).
+
+Enforcement:
+- `StorageBackend.commit_temp()` applies retention after every local commit —
+  one chokepoint, so no write path can skip it.
+- `ffsversioning.sweep()` runs periodically and covers versions written by the
+  sync worker, which never pass through commit. Cost is scoped: only subtrees
+  under a bounded prefix are walked (default config: just `.ffsfs-nodes`).
+
+Retention ordering is `(timestamp, mtime_ns, path)` descending — it MUST match
+`latest_version_path()` / `pick_latest()`, or retention could drop the version a
+reader currently sees.
+
+CLI: `ffsctl versioning <realm> show|set <prefix> <policy>|unset <prefix>|default <policy>`
+
 ## 8) Error Semantics (HTTP)
 - `403` realm mismatch; `400` bad input; `404` not found; `409` conflict; `500` backend failure.
 - `/get-file` always sets ASCII fallback + RFC5987 UTF-8 filename in headers.

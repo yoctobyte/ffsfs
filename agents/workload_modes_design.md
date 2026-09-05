@@ -303,9 +303,16 @@ allowed to cancel each other out**:
   filesystem (`tests/test_write_oracle.py`) that catches this whole class of
   bug without naming it — it diverges from the oracle within 3-4 random
   operations on every seed when the fix is reverted.
-- **Phase 1.** Versioning policy config + resolver (reusing the redundancy
-  class-resolver shape), `versioned` and `latest:N` only. Apply `latest:1` to
-  `.ffsfs-nodes` and watch the heartbeat problem disappear.
+- **Phase 1 — DONE.** `ffsversioning.py`: policy model, longest-prefix
+  resolver mirroring `ffsredundancy.class_for_path`, and retention. Enforced at
+  the single `commit_temp()` chokepoint (not at each of the eight callers) plus
+  a periodic `sweep()` that catches versions the sync worker wrote, which never
+  pass through commit. `ffsctl versioning <realm> show|set|unset|default`.
+  `latest:1` on `.ffsfs-nodes` is a built-in override, which subsumes the
+  hardcoded `FFSFS._prune_node_status()` special case — that method now just
+  runs the general sweep. `scratch` is REJECTED by the validator until Phase 2
+  rather than silently accepted. Q2 resolved: retention runs at commit time
+  (bounded, synchronous), with the sweep as the backstop for foreign writes.
 - **Phase 2.** `scratch` mode — mount-visible unversioned tree, excluded from
   sync, redundancy and the meta log.
 - **Phase 3.** Dedup sweep by `content_hash` within a volume, with the `rf`

@@ -649,6 +649,90 @@ def cmd_role(args):
     print(f"Set node_role = {args.role}")
 
 
+def cmd_versioning(args):
+    """Show or edit the per-prefix versioning policy (how much history a path
+    keeps). Orthogonal to redundancy, which is about how many COPIES exist
+    across nodes. See agents/workload_modes_design.md."""
+    import ffsversioning as fv
+
+    realm = args.realm
+    data = _load_realm_config(realm)
+    if not data:
+        print(f"No config found for realm '{realm}'. Run: ffsctl realm init {realm}")
+        return
+
+    raw = data.get("versioning") or {}
+
+    if args.action == "show":
+        try:
+            norm = fv.normalize_versioning_config(raw)
+        except ValueError as e:
+            print(f"Stored versioning config is invalid: {e}")
+            return
+        print(f"default: {norm['default']}")
+        if norm["overrides"]:
+            print("overrides (longest prefix wins):")
+            for prefix, policy in sorted(norm["overrides"].items()):
+                builtin = " [built-in]" if fv.BUILTIN_OVERRIDES.get(prefix) == policy else ""
+                print(f"  {prefix or '/'}: {policy}{builtin}")
+        print(f"policies: versioned | latest:N   "
+              f"(scratch is designed but not implemented)")
+        print("NOTE: latest:N deletes superseded versions on this node. It never "
+              "drops the newest version, and it is local-only — a peer that "
+              "still holds older versions may re-introduce them.")
+        return
+
+    if args.action == "default":
+        # "default" takes one argument, which lands in the `prefix` positional.
+        spec = args.value or args.prefix
+        if not spec:
+            print("Usage: ffsctl versioning <realm> default <versioned|latest:N>")
+            return
+        try:
+            policy = fv.normalize_policy(spec)
+        except ValueError as e:
+            print(f"Rejected: {e}")
+            return
+        raw["default"] = policy
+        data["versioning"] = raw
+        _save_realm_config(realm, data)
+        print(f"Set versioning default = {policy}")
+        if fv.keep_count(policy) is not None:
+            print("WARNING: a bounded DEFAULT means every path in the realm "
+                  "drops history, and the retention sweep walks the whole tree.")
+        return
+
+    if args.action == "set":
+        if not args.prefix or not args.value:
+            print("Usage: ffsctl versioning <realm> set <prefix> <versioned|latest:N>")
+            return
+        try:
+            policy = fv.normalize_policy(args.value)
+        except ValueError as e:
+            print(f"Rejected: {e}")
+            return
+        raw.setdefault("overrides", {})[args.prefix.strip().strip("/")] = policy
+        data["versioning"] = raw
+        _save_realm_config(realm, data)
+        print(f"Set versioning override {args.prefix} = {policy}")
+        print("Restart the realm for the running service to apply it.")
+        return
+
+    if args.action == "unset":
+        if not args.prefix:
+            print("Usage: ffsctl versioning <realm> unset <prefix>")
+            return
+        key = args.prefix.strip().strip("/")
+        if key in (raw.get("overrides") or {}):
+            del raw["overrides"][key]
+            data["versioning"] = raw
+            _save_realm_config(realm, data)
+            print(f"Removed versioning override for {key}")
+        else:
+            print(f"No versioning override configured for {key}")
+        return
+
+
 def _configure_peer_auth(peers_mod, data: dict) -> None:
     """Load the realm secret into the peer module so CLI-driven peer requests
     (refresh, sync) are HMAC-signed — otherwise an auth-enabled peer rejects
@@ -1111,6 +1195,15 @@ def main():
     srl.add_argument("key", nargs="?", help="rate-limit key (disk_fg_bps|disk_bg_bps|net_fg_bps|net_bg_bps)")
     srl.add_argument("value", nargs="?", help="bytes/sec (for set)")
     srl.set_defaults(func=cmd_ratelimit)
+
+    sv = sub.add_parser("versioning",
+                        help="show or set how much history a path keeps "
+                             "(versioned | latest:N)")
+    sv.add_argument("realm", help="realm name")
+    sv.add_argument("action", choices=["show", "set", "unset", "default"])
+    sv.add_argument("prefix", nargs="?", help="vpath prefix (for set/unset)")
+    sv.add_argument("value", nargs="?", help="policy (for set/default)")
+    sv.set_defaults(func=cmd_versioning)
 
     srr = sub.add_parser(
         "redundancy-reduce",
