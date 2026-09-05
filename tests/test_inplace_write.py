@@ -225,3 +225,51 @@ def test_seed_failure_raises_and_leaves_no_orphan_temp(fs, monkeypatch):
     assert not [n for n in os.listdir(data_dir) if ".NULL_HASH." in n]
     # the committed version is untouched
     assert _read_all(fs, "/j.txt") == b"important-bytes"
+
+
+@pytest.mark.unit
+def test_overlapping_opens_get_distinct_temps(fs, monkeypatch):
+    """Two writers open the same file inside one second.
+
+    temp_name_for() used to be base32(now_ts()) alone, so both opens got the
+    SAME temp path: the writers' bytes mixed into one file, the first release
+    renamed it away, and the second release raised FileNotFoundError (EIO to
+    the caller) with one write lost. Two processes opening one file is ordinary
+    in a shared dev filesystem.
+    """
+    _create(fs, "/shared.txt", b"hello!", monkeypatch, 100)
+
+    monkeypatch.setattr(ffsfs.time, "time", lambda: 101)   # same second
+    fh1 = fs.open("/shared.txt", os.O_RDWR)
+    fh2 = fs.open("/shared.txt", os.O_RDWR)
+
+    t1 = fs.fh_meta[fh1]["temp_path"]
+    t2 = fs.fh_meta[fh2]["temp_path"]
+    assert t1 != t2, "overlapping opens shared one temp file"
+
+    fs.write("/shared.txt", b"AAA", 0, fh1)
+    fs.write("/shared.txt", b"BBB", 3, fh2)
+
+    fs.release("/shared.txt", fh1)
+    fs.release("/shared.txt", fh2)      # must not raise
+
+    # Last writer wins, and it sees its own view of the file, not a mixture.
+    # (A local mount would share one inode and give b'AAABBB' — that divergence
+    # is inherent to copy-on-open; see agents/local_parity_design.md.)
+    assert _read_all(fs, "/shared.txt") == b"helBBB"
+
+
+@pytest.mark.unit
+def test_many_overlapping_opens_all_commit(fs, monkeypatch):
+    """No temp collisions across many opens pinned to one second."""
+    _create(fs, "/busy.txt", b"x" * 16, monkeypatch, 100)
+    monkeypatch.setattr(ffsfs.time, "time", lambda: 101)
+
+    handles = [fs.open("/busy.txt", os.O_RDWR) for _ in range(25)]
+    temps = {fs.fh_meta[h]["temp_path"] for h in handles}
+    assert len(temps) == 25, f"only {len(temps)} distinct temps for 25 opens"
+
+    for i, h in enumerate(handles):
+        fs.write("/busy.txt", bytes([65 + (i % 26)]), 0, h)
+    for h in handles:
+        fs.release("/busy.txt", h)      # none may raise

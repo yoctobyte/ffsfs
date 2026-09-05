@@ -16,6 +16,8 @@ import threading
 import sys
 import json
 import shutil
+import random
+import itertools
 from typing import Dict, List, Optional, Tuple
 from crossfuse import FUSE, Operations, FuseOSError
 
@@ -390,11 +392,25 @@ def latest_version_path(dirpath: str, logical_name: str) -> Optional[str]:
     return best[2] or None
 
 
+_TEMP_SEQ = itertools.count()
+
+
 def temp_name_for(logical_name: str) -> str:
     # Any filename that *contains* .<NULL_HASH>. is a temp in our model.
-    # Keep it obvious and unique per open: add a small time suffix.
+    #
+    # This MUST be unique per open, not per second. It used to be
+    # base32(now_ts()) alone, so two overlapping opens of the same file within
+    # one second got the SAME temp path: both writers' bytes landed in one
+    # file, the first release renamed it away on commit, and the second release
+    # raised FileNotFoundError — an EIO to the caller plus a lost write. Two
+    # processes opening one file is ordinary in a shared dev filesystem.
+    #
+    # The stamp stays uppercase-alphanumeric because ffsutils._TEMP_RE requires
+    # it; nothing parses it back into a timestamp.
     stamp = base32_crockford(int(now_ts()))
-    return f"{logical_name}.{NULL_HASH}.{stamp}"
+    uniq = base32_crockford(
+        (os.getpid() << 40) | (next(_TEMP_SEQ) & 0xFFFFF) << 20 | random.getrandbits(20))
+    return f"{logical_name}.{NULL_HASH}.{stamp}X{uniq}"
 
 
 def make_dirs(path: str) -> None:

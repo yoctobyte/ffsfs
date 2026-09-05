@@ -90,6 +90,21 @@ stopping for features/fixes/logs.
 
 ## Features
 
+- [P1] **Local parity: "as good as any local mount" (shared dev fs).** New
+  goal, new design doc `agents/local_parity_design.md`. Measured today: a
+  one-byte in-place write to a 100 MB file costs ~1.3 s vs ~0.17 ms local
+  (~7,576x) because the model is O(filesize) twice — seed on open, hash+commit
+  on close. `chmod`/`chown`/`link`/`mknod` return EROFS; xattrs ENOTSUP; no
+  `lock` op at all. Cheap wins available now (chmod/chown, link, node-local
+  lock) do not touch the performance wall; only the working-copy proposal (§5)
+  does, and that needs an explicit decision first. Sync intelligence (§7:
+  delta transfer, single-writer leases) is necessary but addresses a different
+  axis — the measured cost above involves no network.
+  FIXED along the way: overlapping opens of one file shared a temp path
+  (whole-second stamp), mixing two writers' bytes and raising EIO on the
+  second close.
+
+
 - [P1] **Workload modes: versioning policy, live data, dedup.** FFSFS has one
   storage model (immutable version per close) and no per-path way out, so an
   archive drive, a live working directory, and many identical copies of the same

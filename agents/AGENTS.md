@@ -16,6 +16,10 @@ Read these files before changing behavior:
 - `workload_modes_design.md`: the archive-vs-live-data-vs-dedup tension, the
   proposed versioning policy axis, and the write-path corruption bug that
   motivated it. Read §2 before touching the write path.
+- `local_parity_design.md`: the "as good as any local mount" goal, the measured
+  semantic and performance gaps against it, and the working-copy proposal.
+  NOTE: it contradicts the single-user line under Product Direction below —
+  that is a live decision, not settled.
 - `../README.md`: user-facing install and quick-start notes.
 - `../tech_doc.md`: storage layout, peer API, discovery, and tunables.
 
