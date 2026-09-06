@@ -34,7 +34,7 @@ from typing import Iterable, List, Optional, Sequence
 import os
 
 import ffslog
-from ffsutils import NODE_STATUS_DIR, parse_versioned_filename
+from ffsutils import NODE_STATUS_DIR, is_hidden_mode, parse_versioned_filename
 
 # ---- policy model -----------------------------------------------------------
 
@@ -148,12 +148,17 @@ def resolve(vpath: str, norm: dict) -> str:
 # or retention could remove the very version a reader currently sees.
 
 def _sort_key(entry) -> tuple:
-    ts, mtime_ns, path = entry
+    ts, mtime_ns, path = entry[0], entry[1], entry[2]
     return (ts, mtime_ns, path)
 
 
 def collect_versions(dirpath: str, logical_name: str) -> List[tuple]:
-    """Return [(ts, mtime_ns, path)] for committed versions of logical_name.
+    """Return [(ts, mtime_ns, path, is_marker)] for committed versions.
+
+    `is_marker` is True for hidden-mode versions — delete tombstones and `moved`
+    markers. They carry no content (they are zero-byte) and are counted
+    separately by select_prunable, because a tombstone must never be allowed to
+    displace the bytes it hides.
 
     In-flight temps (.NULL_HASH.) and unparseable names are skipped: retention
     never touches a file it cannot positively identify as a committed version of
@@ -176,7 +181,8 @@ def collect_versions(dirpath: str, logical_name: str) -> List[tuple]:
                     mtime_ns = de.stat().st_mtime_ns
                 except OSError:
                     mtime_ns = 0
-                out.append((ts, mtime_ns, de.path))
+                out.append((ts, mtime_ns, de.path,
+                            bool(is_hidden_mode(parsed.get("mode")))))
     except (FileNotFoundError, NotADirectoryError):
         return []
     except OSError as e:
@@ -189,15 +195,34 @@ def select_prunable(versions: Sequence[tuple], keep: int,
                     protect: Iterable[str] = ()) -> List[str]:
     """Choose which committed versions to drop, newest-first ordering.
 
-    Never returns the newest `keep` versions, never returns anything in
-    `protect`, and returns nothing at all when `keep` < 1 — retention must not
-    be able to empty a logical file.
+    Content-bearing versions and hidden-mode markers (delete tombstones, `moved`
+    markers) are counted SEPARATELY, each keeping its own newest `keep`.
+
+    That separation is the safety property. Counted together, a delete tombstone
+    is the newest version of a logical file, so `latest:1` + delete left nothing
+    but a zero-byte tombstone — every byte reclaimed the instant a user pressed
+    delete, on every node that saw the tombstone. Retention bounds HISTORY. It
+    must never be the mechanism that destroys the last copy of the content, and
+    a deleted file is exactly when a user is most likely to want it back.
+
+    Reclaiming bytes behind a tombstone is a separate, local, resource-driven
+    decision with a grace period — see agents/data_lifecycle_design.md — not
+    something a propagated delete may trigger.
+
+    Never returns the newest `keep` of either class, never returns anything in
+    `protect`, and returns nothing when `keep` < 1.
     """
     if keep is None or keep < 1:
         return []
     protected = set(protect)
-    ordered = sorted(versions, key=_sort_key, reverse=True)
-    return [p for (_ts, _mt, p) in ordered[keep:] if p not in protected]
+    content, markers = [], []
+    for entry in versions:
+        (markers if (len(entry) > 3 and entry[3]) else content).append(entry)
+    out = []
+    for group in (content, markers):
+        ordered = sorted(group, key=_sort_key, reverse=True)
+        out.extend(e[2] for e in ordered[keep:] if e[2] not in protected)
+    return out
 
 
 def apply_retention(dirpath: str, logical_name: str, keep: Optional[int],
@@ -213,6 +238,8 @@ def apply_retention(dirpath: str, logical_name: str, keep: Optional[int],
     versions = collect_versions(dirpath, logical_name)
     if len(versions) <= keep:
         return []
+    # NB: cannot early-return on total count alone beyond this cheap case —
+    # content and markers are bounded separately below.
     removed: List[str] = []
     for path in select_prunable(versions, keep, protect):
         try:

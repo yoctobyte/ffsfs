@@ -90,6 +90,19 @@ stopping for features/fixes/logs.
 
 ## Features
 
+- [P1] **Data lifecycle: reclamation, grace period, anomaly brake, thinning.**
+  Design in `agents/data_lifecycle_design.md`. The load-bearing idea: namespace
+  removal (tombstone, propagates instantly) and byte reclamation (local,
+  autonomous, never commanded by a peer) are different operations, which is how
+  "a user may organize freely" and "no single node may destroy the realm" stop
+  conflicting. Needs no format change — tombstones already work this way.
+  SHIPPED: the retention safety rule (§3) — markers and content are counted
+  separately, so a delete tombstone can never displace the bytes it hides.
+  REMAINING: reclamation with a grace period, role-aware delete-refusal,
+  anomaly braking on implausible delete volume, the age-thinning curve, and an
+  operator-visible trash/undelete surface. Q1-Q5 in the doc need answers first.
+
+
 - [P1] **Local parity: "as good as any local mount" (shared dev fs).** New
   goal, new design doc `agents/local_parity_design.md`. Measured today: a
   one-byte in-place write to a 100 MB file costs ~1.3 s vs ~0.17 ms local

@@ -91,8 +91,8 @@ def test_bad_config_raises_at_normalization():
 
 # ---- selection safety -------------------------------------------------------
 
-def _v(ts, mtime, path):
-    return (ts, mtime, path)
+def _v(ts, mtime, path, marker=False):
+    return (ts, mtime, path, marker)
 
 
 @pytest.mark.unit
@@ -340,3 +340,63 @@ def test_ctl_rejects_bad_policy_without_writing_config(tmp_path, monkeypatch, ca
     cmd_versioning(_vargs("vtest", "set", "var", bad))
     assert "Rejected" in capsys.readouterr().out
     assert "var" not in (_load_realm_config("vtest").get("versioning") or {}).get("overrides", {})
+
+
+# ---- retention must never destroy the last content -------------------------
+
+@pytest.mark.unit
+def test_tombstone_does_not_displace_the_content_it_hides():
+    """latest:1 + delete used to leave ONLY the zero-byte tombstone.
+
+    Counting a tombstone as "the newest version to keep" meant a user pressing
+    delete reclaimed every byte instantly — on every node that saw the
+    tombstone propagate. Markers and content are bounded separately now.
+    """
+    versions = [_v(1, 0, "old.write"), _v(2, 0, "new.write"),
+                _v(3, 0, "tomb.delete", marker=True)]
+    prunable = fv.select_prunable(versions, 1)
+    assert "new.write" not in prunable, "retention dropped the deleted file's bytes"
+    assert "tomb.delete" not in prunable
+    assert prunable == ["old.write"]
+
+
+@pytest.mark.unit
+def test_markers_are_bounded_too(fs=None):
+    """Markers are zero-byte but must not accumulate without limit."""
+    versions = [_v(i, 0, f"m{i}", marker=True) for i in range(5)]
+    assert sorted(fv.select_prunable(versions, 2)) == ["m0", "m1", "m2"]
+
+
+@pytest.mark.unit
+def test_deleted_file_bytes_survive_retention_on_disk(fs, monkeypatch):
+    """End to end: delete a file under latest:1, bytes must still be there."""
+    f = fs({"overrides": {"photos": "latest:1"}})
+    f.mkdir("/photos", 0o755)
+    for i, ts in enumerate((100, 101)):
+        _write(f, "/photos/holiday.jpg", b"JPEG" * (i + 1), monkeypatch, ts)
+
+    monkeypatch.setattr(ffsfs.time, "time", lambda: 200)
+    f.unlink("/photos/holiday.jpg")
+
+    d = os.path.join(f.backend.data_path, "photos")
+    names = os.listdir(d)
+    content = [n for n in names if ".write." in n]
+    assert content, f"delete reclaimed the content: {names}"
+    assert sum(os.path.getsize(os.path.join(d, n)) for n in content) > 0
+
+    # and it is still hidden from the mount
+    with pytest.raises(OSError):
+        f.getattr("/photos/holiday.jpg")
+
+
+@pytest.mark.unit
+def test_moved_marker_does_not_displace_content(fs, monkeypatch):
+    """Same rule for rename's `moved` history hint."""
+    f = fs({"overrides": {"docs": "latest:1"}})
+    f.mkdir("/docs", 0o755)
+    _write(f, "/docs/a.txt", b"payload", monkeypatch, 100)
+
+    monkeypatch.setattr(ffsfs.time, "time", lambda: 101)
+    f.rename("/docs/a.txt", "/docs/b.txt")
+
+    assert _read(f, "/docs/b.txt") == b"payload"
