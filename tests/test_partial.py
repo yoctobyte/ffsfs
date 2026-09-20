@@ -95,3 +95,46 @@ def test_small_file_not_partial(partial_env, monkeypatch):
     assert not fs.fh_meta[fh].get("partial")     # whole fetch, not partial
     assert fs.read("/s.bin", 4, 0, fh) == content
     fs.release("/s.bin", fh)
+
+
+@pytest.mark.unit
+def test_read_in_flight_survives_concurrent_promotion(partial_env, monkeypatch):
+    """A read holding the prefix handle must not have it closed under it.
+
+    read() fetches the handle, then waits in the rate limiter. If another
+    thread's past-the-prefix read promotes the fh in that window, the first
+    read still owns the old prefix handle and preads its fd afterwards. The
+    limiter below performs that promotion from inside consume(), deterministically.
+    """
+    fs, tmp_path = partial_env
+    content = b"0123456789ABCDEF"
+    name = build_versioned_filename("big.bin", "AAAAAAAA", "write", 100)
+    monkeypatch.setattr(ffspeers, "_peer_cache",
+                        {"peerA:1": {"files": {"big.bin": [{"name": name, "size": len(content)}]}}})
+    monkeypatch.setattr(ffspeers, "fetch_file_range",
+                        lambda peer, vp, s, e: content[s:e + 1])
+
+    def fake_whole(vpath, ts, fetch=False, **kw):
+        p = str(tmp_path / "whole.bin")
+        with open(p, "wb") as f:
+            f.write(content)
+        return p
+    monkeypatch.setattr(ffspeers, "get_newer_or_missing", fake_whole)
+
+    fh = fs.open("/big.bin", os.O_RDONLY)
+    prefix_f = fs.fh_map[fh]
+
+    class PromoteDuringConsume:
+        armed = True
+
+        def consume(self, n):
+            if self.armed:
+                self.armed = False
+                assert fs.read("/big.bin", 16, 0, fh) == content   # "other thread"
+
+    fs.rate_limits.disk_fg = PromoteDuringConsume()
+    assert fs.read("/big.bin", 4, 0, fh) == b"0123"
+    assert fs.fh_meta[fh]["partial"] is False
+
+    fs.release("/big.bin", fh)
+    assert prefix_f.closed                                      # closed at release

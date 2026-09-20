@@ -1772,10 +1772,10 @@ class FFSFS(Operations):
         oldf = self.fh_map.get(fh)
         self.fh_map[fh] = newf
         if oldf:
-            try:
-                oldf.close()
-            except Exception:
-                pass
+            # Don't close yet: a concurrent read() on this fh may hold oldf and
+            # be about to pread its fd; closing now could hand that fd number
+            # to an unrelated open. release() closes it.
+            meta.setdefault("retired", []).append(oldf)
         pp = meta.get("partial_path")
         if pp:
             try:
@@ -2002,18 +2002,27 @@ class FFSFS(Operations):
         f = self.fh_map.get(fh)
         if not f:
             raise FuseOSError(errno.EBADF)
-        f.seek(offset)
+        # Positional I/O, never seek()+read(): libfuse calls us from several
+        # threads, concurrent reads on one fh are normal (readahead), and
+        # consume() may sleep — a shared file position would be moved under us.
         self.rate_limits.disk_fg.consume(size)
-        return f.read(size)
+        return os.pread(f.fileno(), size, offset)
 
     def write(self, path, data, offset, fh):
         f = self.fh_map.get(fh)
         meta = self.fh_meta.get(fh) or {}
         if not f or meta.get("mode") not in ("write", "append", "copy"):
             raise FuseOSError(errno.EBADF)
-        f.seek(offset)
+        # Positional, like read(). All data I/O on a handle goes through
+        # pread/pwrite, so the buffered file object never holds unflushed data.
+        # Append handles are no exception: the temp fd is not O_APPEND, and the
+        # kernel already passes an O_APPEND write's offset as the file's end.
         self.rate_limits.disk_fg.consume(len(data))
-        n = f.write(data)
+        fd = f.fileno()
+        view = memoryview(data)
+        n = 0
+        while n < len(view):
+            n += os.pwrite(fd, view[n:], offset + n)
         meta["last_write_ts"] = now_ts()
         return n
 
@@ -2036,11 +2045,12 @@ class FFSFS(Operations):
             mode = meta.get("mode", "read")
             if mode == "read":
                 f = self.fh_map.pop(fh, None)
-                if f:
-                    try:
-                        f.close()
-                    except Exception:
-                        pass
+                for rf in [f] + meta.get("retired", []):
+                    if rf:
+                        try:
+                            rf.close()
+                        except Exception:
+                            pass
                 # remove a leftover partial-prefix temp, if any
                 pp = meta.get("partial_path")
                 if pp:
