@@ -183,6 +183,44 @@ Note the last line: FFSFS's own node-status heartbeat is the first customer.
 That alone closes the 324-version finding without touching the federated-metadata
 design question in `open_issues.md`.
 
+### 4.2 fsync — durability is not history (BUILT)
+
+`fsync(2)` says "make my data durable". It does not say "keep this forever",
+and FFSFS was reading it as both: fsync committed a version and then converted
+the handle to read-only, so the next `write()` on the same fd returned EBADF.
+Databases write → fsync → write on one fd, so the workload this document is
+about could not write through the mount at all. The two promises are now
+separated:
+
+- **Durability, unconditional.** flush + `fsync`/`fdatasync` on the temp, errors
+  propagated (the §2-era property that must not regress). A crash before the
+  commit leaves the temp on disk, and the startup orphan scan commits it.
+- **History, by policy.** Committing mid-session is not free: the handle can
+  only keep writing if it gets a fresh temp seeded from the version just
+  committed, which is a whole-file copy. So `should_snapshot_on_fsync()` gates
+  it on a combination of heuristics, none of which is trustworthy alone:
+
+  | signal | rule | why |
+  |---|---|---|
+  | versioning policy | `scratch` never snapshots | unversioned is unversioned |
+  | name | live-data suffixes/infixes (`.db`, `.sqlite`, `-wal`, `-journal`, `.log`, `.qcow2`, …) never snapshot | a young database is small; size alone would miss it |
+  | size | over `FSYNC_SNAPSHOT_MAX_BYTES` (4 MiB) never snapshots | the copy costs more than the history is worth |
+  | rate | at most one per handle per `FSYNC_SNAPSHOT_MIN_INTERVAL_SECS` (60s) | a floor under version churn whatever the name says |
+
+  A small hand-edited file therefore gets a version per save, which is what a
+  user saving in an editor expects. A 2 GB store fsyncing per transaction gets
+  none until close, which is what keeps the store from exploding.
+
+Nothing is lost by not snapshotting: the handle still commits at `release()`,
+and `dirty` tracking means a close right after a snapshot does not write a
+second identical version.
+
+**Q7 (open).** The name list is a heuristic and will miss things (a database
+with no extension, `.log` files a user actually wants versioned). Q5's
+detect → suggest → confirm flow is the real answer: notice a file being
+reopened-and-fsynced repeatedly and prompt for a per-prefix policy. The name
+list is the interim that keeps the common cases right.
+
 ### 4.1 Composition with redundancy classes
 
 The two axes multiply, and not every combination is meaningful:

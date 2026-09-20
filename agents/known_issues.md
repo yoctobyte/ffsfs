@@ -9,12 +9,20 @@
       - Two-peer VM scenarios cover delete-tombstone propagation.
       - /notify synthesizes delete tombstones with NULL_HASH (cosmetic; acceptable).
 
-  2. fsync() commit failures — RESOLVED.
-      - FFSFS.fsync (ffsfs.py:1503) calls _commit_fh_locked under the lock and
-        no longer wraps it in a swallowing try/except.
-      - _commit_fh_locked propagates commit_temp errors (e.g. ENOSPC); only the
-        post-commit f.close() is best-effort. FUSE maps the raised error to the
-        caller, so fsync no longer reports false durability.
+  2. fsync() semantics — RESOLVED (revised: see workload_modes_design.md §4.2).
+      - fsync always flushes and fsyncs (fdatasync when the caller asked for
+        it) and lets the error propagate, so it never reports false durability.
+      - It no longer commits a version unconditionally, and no longer retires
+        the handle to read-only. That combination made every write after an
+        fsync on the same fd fail EBADF — i.e. SQLite and every other database
+        could not write through the mount at all.
+      - Committing a version on fsync is now a policy decision
+        (ffsversioning.should_snapshot_on_fsync): small authored files yes,
+        live-data names and large files no, and at most one per handle per
+        interval. Everything still commits at release().
+      - _commit_fh_locked(keep_writable=True) reseeds a fresh temp from the
+        version it just committed, so a mid-session commit (fsync snapshot,
+        lazy-commit monitor) leaves the handle writable.
       - Background lazy-commit and orphan-temp scans still swallow by design
         (no caller to surface the error to); they log instead.
 

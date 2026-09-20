@@ -94,6 +94,65 @@ def keep_count(policy: str) -> Optional[int]:
     return parse_latest(policy)
 
 
+# ---- fsync snapshot heuristics ----------------------------------------------
+# fsync(2) means "make my data durable", not "keep this forever". FFSFS always
+# honours the durability half (flush + fsync of the temp, errors propagated).
+# Whether it ALSO commits a version is a policy question, because committing
+# keeps the handle writable only by copying the file again — and a database
+# fsyncs per transaction. Versioning every fsync of a 2GB SQLite store is the
+# write amplification this module exists to prevent; refusing to version a
+# small text file the user just saved loses history they expect to keep.
+#
+# So: version the cheap and precious, skip the expensive and churning, and put
+# a floor under the rate either way. Files that miss the cut are still durable
+# and still commit a version when the handle is closed.
+
+# Above this, copying per fsync costs more than the history is worth.
+FSYNC_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024
+
+# No more than one fsync-triggered version per handle per interval.
+FSYNC_SNAPSHOT_MIN_INTERVAL_SECS = 60.0
+
+# Names that mean "live data, rewritten in place, fsynced constantly". Matched
+# case-insensitively on the basename. Size alone would miss a young database.
+LIVE_DATA_SUFFIXES = (
+    ".db", ".db3", ".sqlite", ".sqlite3", ".mdb", ".accdb", ".dbf", ".ldb",
+    ".sst", ".log", ".journal", ".wal", ".shm", ".frm", ".ibd", ".myd", ".myi",
+    ".qcow2", ".vdi", ".vmdk", ".vhd", ".vhdx", ".img",
+)
+# SQLite/LMDB sidecars: "main.db-wal", "data.mdb-lock".
+LIVE_DATA_INFIXES = ("-wal", "-shm", "-journal", "-lock")
+
+
+def looks_like_live_data(vpath: str) -> bool:
+    """True for names that signal a file rewritten in place, not authored."""
+    name = os.path.basename(vpath or "").lower()
+    if name.endswith(LIVE_DATA_SUFFIXES):
+        return True
+    return any(marker in name for marker in LIVE_DATA_INFIXES)
+
+
+def should_snapshot_on_fsync(vpath: str, size: int, policy: str,
+                             last_snapshot_ts: float, now: float) -> bool:
+    """Should this fsync commit a version, on top of making data durable?
+
+    Returns False for unversioned paths, live-data names, files too big to copy
+    cheaply, and any handle that already snapshotted within the interval.
+    """
+    if policy == POLICY_SCRATCH:
+        return False
+    if looks_like_live_data(vpath):
+        return False
+    try:
+        if int(size) > FSYNC_SNAPSHOT_MAX_BYTES:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if last_snapshot_ts and (now - last_snapshot_ts) < FSYNC_SNAPSHOT_MIN_INTERVAL_SECS:
+        return False
+    return True
+
+
 # ---- per-realm / per-prefix config ------------------------------------------
 
 def _norm_prefix(prefix: str) -> str:

@@ -1269,7 +1269,9 @@ class FFSFS(Operations):
                         to_commit.append(fh)
                 for fh in to_commit:
                     try:
-                        self._commit_fh_locked(fh)
+                        # keep_writable: the application still holds this fd
+                        # and may write again after the idle commit.
+                        self._commit_fh_locked(fh, keep_writable=True)
                     except Exception:
                         pass
             self._stop_evt.wait(OPEN_MAP_MONITOR_PERIOD)
@@ -1314,8 +1316,17 @@ class FFSFS(Operations):
 
     # commit logic (handle-based)
 
-    def _commit_fh_locked(self, fh: int):
-        """Commit temp for fh and convert handle to read-open on the final."""
+    def _commit_fh_locked(self, fh: int, keep_writable: bool = False):
+        """Commit temp for fh.
+
+        Without `keep_writable` the handle becomes a read handle on the
+        committed version — right at release(), where the caller is done with
+        it. With it, the caller is STILL WRITING (an fsync mid-session, the
+        lazy-commit monitor): the version is committed and the handle is given
+        a fresh temp seeded from it, so the next write() continues the file
+        instead of failing EBADF. That reseed is a whole-file copy, which is
+        why should_snapshot_on_fsync() gates how often this path runs.
+        """
         f = self.fh_map.get(fh)
         meta = self.fh_meta.get(fh)
         if not f or not meta:
@@ -1335,6 +1346,32 @@ class FFSFS(Operations):
             self.fh_map.pop(fh, None)
 
         final_abspath = self.backend.commit_temp(vpath, temp_path, mode)
+
+        if keep_writable and mode in ("write", "append", "copy"):
+            new_temp = self.backend.create_temp_for(vpath)
+            try:
+                self.backend._copy_file_chunked(final_abspath, new_temp,
+                                                self.rate_limits.disk_fg)
+            except OSError as e:
+                # The version is safely committed; only the ability to keep
+                # writing is lost. Say so rather than hand back a temp holding
+                # a truncated copy that would commit over the good version.
+                ffslog.warn(f"fsync reseed failed for {vpath}: {e}")
+                try:
+                    os.remove(new_temp)
+                except OSError:
+                    pass
+                raise FuseOSError(e.errno or errno.EIO)
+            self.fh_map[fh] = open(new_temp, "r+b")
+            meta["temp_path"] = new_temp
+            meta["committed_once"] = True
+            meta["dirty"] = False
+            # Nothing written since this commit: stops the lazy monitor from
+            # re-committing the same bytes every time it wakes up.
+            meta["last_write_ts"] = 0.0
+            meta["last_snapshot_ts"] = now_ts()
+            return
+
         # re-open as read handle so subsequent reads (if any) still work
         rf = open(final_abspath, "rb")
         self.fh_map[fh] = rf
@@ -2024,6 +2061,7 @@ class FFSFS(Operations):
         while n < len(view):
             n += os.pwrite(fd, view[n:], offset + n)
         meta["last_write_ts"] = now_ts()
+        meta["dirty"] = True
         return n
 
     def flush(self, path, fh):
@@ -2063,7 +2101,18 @@ class FFSFS(Operations):
 
             # write/append/copy
             try:
-                if should_commit_now(mode):
+                if meta.get("committed_once") and not meta.get("dirty"):
+                    # An fsync already committed these exact bytes and nothing
+                    # was written since; a second identical version at close
+                    # would be pure write amplification.
+                    f = self.fh_map.get(fh)
+                    if f:
+                        f.flush()
+                        os.fsync(f.fileno())
+                    temp_path = meta.get("temp_path")
+                    if temp_path and os.path.exists(temp_path):
+                        os.remove(temp_path)
+                elif should_commit_now(mode):
                     self._commit_fh_locked(fh)
                 else:
                     # leave it to the lazy monitor; close actual OS handle to free FDs
@@ -2084,14 +2133,52 @@ class FFSFS(Operations):
 
     # fsync
     def fsync(self, path, fdatasync, fh):
-        # Mirror release()’s commit path, but do it *now* for open write-like fds.
+        """Make the caller's data durable; version it only when that is sane.
+
+        fsync used to commit a version and then retire the handle to read-only,
+        so the next write on the same fd failed EBADF. Every database does
+        write → fsync → write on one fd, which made FFSFS unusable for exactly
+        the workload (SQLite) the project keeps citing.
+
+        Durability is unconditional and its errors propagate, so an ENOSPC is
+        still reported to the application instead of a false success. Whether a
+        version is also committed is ffsversioning.should_snapshot_on_fsync():
+        a small hand-edited file is worth a version per save, a 2GB store that
+        fsyncs per transaction is not. Either way the handle stays writable,
+        and the data reaches a version at release() — or, after a crash, via
+        the startup orphan-temp scan, which commits the temp as it stood.
+        """
         meta = self.fh_meta.get(fh)
         if not meta:
             return 0
-        mode = meta.get("mode", "read")
-        if mode in ("write", "append", "copy"):
-            with self._lock:
-                self._commit_fh_locked(fh)
+        if meta.get("mode", "read") not in ("write", "append", "copy"):
+            return 0
+        f = self.fh_map.get(fh)
+        if not f:
+            raise FuseOSError(errno.EBADF)
+
+        f.flush()
+        fd = f.fileno()
+        if fdatasync:
+            os.fdatasync(fd)
+        else:
+            os.fsync(fd)
+
+        with self._lock:
+            if self.fh_map.get(fh) is not f:
+                return 0                      # committed by another thread
+            if not meta.get("dirty", True):
+                return 0                      # nothing new since the last version
+            try:
+                size = os.fstat(fd).st_size
+            except OSError:
+                return 0
+            policy = ffsversioning.resolve(meta["vpath"],
+                                           self.backend.versioning_config)
+            if ffsversioning.should_snapshot_on_fsync(
+                    meta["vpath"], size, policy,
+                    meta.get("last_snapshot_ts", 0.0), now_ts()):
+                self._commit_fh_locked(fh, keep_writable=True)
         return 0
     
 
@@ -2121,6 +2208,7 @@ class FFSFS(Operations):
         meta = self.fh_meta.get(fh)
         if meta:
             meta["last_write_ts"] = now_ts()
+            meta["dirty"] = True
         return 0
 
     # unlink/rename --------------------------------------------------------
