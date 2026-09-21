@@ -216,3 +216,143 @@ def test_live_data_names_are_recognised(name):
 ])
 def test_authored_names_are_not_live_data(name):
     assert not fv.looks_like_live_data(name)
+
+
+# ---- the handle must survive its own snapshot, concurrently ----------------
+
+@pytest.mark.unit
+def test_handle_stays_usable_throughout_a_snapshot():
+    """No EBADF window: an fsync snapshot must not unhook the caller's fd.
+
+    The first attempt at this feature committed the live temp and reseeded a
+    fresh one, which removed the fh from fh_map for the whole commit. Ops on a
+    valid fd failed EBADF for as long as the copy took. The limiter below makes
+    that window wide on purpose.
+    """
+    import tempfile, threading, time
+    import ffsfs as m
+
+    d = tempfile.mkdtemp()
+    fs = m.FFSFS("/unused-mount", base_path=d + "/realm", realm="test")
+    try:
+        vpath = "/notes.txt"
+        fh = fs.create(vpath, 0)
+        fs.write(vpath, b"A" * 4096, 0, fh)
+
+        class Slow:
+            def consume(self, n):
+                time.sleep(0.02)
+
+        fs.rate_limits.disk_fg = Slow()
+        errors = []
+
+        def hammer():
+            deadline = time.time() + 0.6
+            while time.time() < deadline:
+                try:
+                    fs.write(vpath, b"B" * 64, 4096, fh)
+                    fs.read(vpath, 64, 0, fh)
+                except BaseException as e:
+                    errors.append(f"{type(e).__name__}:{getattr(e, 'errno', e)}")
+                    return
+
+        t = threading.Thread(target=hammer)
+        t.start()
+        fs.fsync(vpath, False, fh)
+        t.join()
+        assert not errors, f"ops failed on a valid fd during snapshot: {errors[:3]}"
+        fs.release(vpath, fh)
+    finally:
+        fs._shutdown()
+
+
+@pytest.mark.unit
+def test_a_write_racing_the_snapshot_is_not_discarded(fs, monkeypatch):
+    """dirty must stay set for bytes written after the snapshot sampled it.
+
+    Otherwise release() sees "already committed, nothing since" and deletes the
+    temp holding those bytes — a write that returned success, silently lost.
+    """
+    vpath = "/notes.txt"
+    fh = fs.create(vpath, 0)
+    fs.write(vpath, b"AAAA", 0, fh)
+
+    real_copy = fs.backend._copy_file_chunked
+
+    def copy_then_write(src, dst, limiter):
+        out = real_copy(src, dst, limiter)
+        fs.write(vpath, b"BBBB", 4, fh)      # lands mid-snapshot
+        return out
+
+    monkeypatch.setattr(fs.backend, "_copy_file_chunked", copy_then_write)
+    fs.fsync(vpath, False, fh)
+    assert fs.fh_meta[fh]["dirty"] is True
+    fs.release(vpath, fh)
+    assert _read_back(fs, vpath) == b"AAAABBBB"
+
+
+@pytest.mark.unit
+def test_a_failed_snapshot_leaves_the_handle_usable(fs, monkeypatch):
+    """POSIX: a failed fsync does not invalidate the descriptor."""
+    import errno as _errno
+    vpath = "/notes.txt"
+    fh = fs.create(vpath, 0)
+    fs.write(vpath, b"important", 0, fh)
+
+    def full(*a, **k):
+        raise OSError(_errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(fs.backend, "_copy_file_chunked", full)
+    with pytest.raises(Exception):
+        fs.fsync(vpath, False, fh)
+
+    monkeypatch.undo()
+    fs.write(vpath, b"!", 9, fh)             # fd must still work
+    assert fs.read(vpath, 32, 0, fh) == b"important!"
+    fs.release(vpath, fh)
+    assert _read_back(fs, vpath) == b"important!"
+
+
+@pytest.mark.unit
+def test_an_unfinished_snapshot_temp_is_not_committed_by_the_orphan_scan(fs):
+    """A partial snapshot copy must never become a version; the handle's own
+    temp holds the complete bytes and is the one worth recovering."""
+    vpath = "/notes.txt"
+    snap = fs.backend.create_snapshot_temp_for(vpath)
+    with open(snap, "wb") as f:
+        f.write(b"half-copied")
+    fs._scan_orphan_temps()
+    assert _versions(fs, vpath) == []
+    assert os.path.exists(snap)
+
+
+@pytest.mark.unit
+def test_orphan_recovery_uses_the_whole_logical_name(fs):
+    """A crashed write to notes.txt must recover as notes.txt, not notes."""
+    import ffsfs as m
+    other = "/notes"
+    fh = fs.create(other, 0)
+    fs.write(other, b"unrelated file", 0, fh)
+    fs.release(other, fh)
+
+    temp = fs.backend.create_temp_for("/notes.txt")
+    with open(temp, "wb") as f:
+        f.write(b"crashed edit")
+    fs._scan_orphan_temps()
+
+    assert _read_back(fs, "/notes.txt") == b"crashed edit"
+    assert _read_back(fs, other) == b"unrelated file"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["roadmap-journal.md", "design-lock-free.md",
+                                  "well-locked.md", "my-shmoo.txt"])
+def test_sidecar_markers_do_not_match_ordinary_documents(name):
+    assert not fv.looks_like_live_data(name)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["main.db-wal", "data.mdb-lock",
+                                  "store.sqlite3-journal"])
+def test_real_sidecars_still_match(name):
+    assert fv.looks_like_live_data(name)

@@ -393,6 +393,9 @@ def latest_version_path(dirpath: str, logical_name: str) -> Optional[str]:
 
 
 _TEMP_SEQ = itertools.count()
+# Per-write ticket, so a snapshot can tell whether a write slipped past it.
+# next() on a count is a single C call: no lost increments, no lock needed.
+_WRITE_SEQ = itertools.count(1)
 
 
 def temp_name_for(logical_name: str) -> str:
@@ -411,6 +414,18 @@ def temp_name_for(logical_name: str) -> str:
     uniq = base32_crockford(
         (os.getpid() << 40) | (next(_TEMP_SEQ) & 0xFFFFF) << 20 | random.getrandbits(20))
     return f"{logical_name}.{NULL_HASH}.{stamp}X{uniq}"
+
+
+def snapshot_temp_name_for(logical_name: str) -> str:
+    """Temp name for an fsync snapshot: a COPY of a live temp, mid-session.
+
+    Marked SNAP so the startup orphan scan ignores it. A crash during the copy
+    leaves a partial file, and committing that would publish a truncated
+    version — while the handle's own temp, which the scan does commit, holds
+    the complete bytes. The marker stays uppercase-alphanumeric for _TEMP_RE.
+    """
+    return temp_name_for(logical_name).replace(f".{NULL_HASH}.",
+                                               f".{NULL_HASH}.SNAP", 1)
 
 
 def _apply_flag_perms(st_mode: int, parsed: dict) -> int:
@@ -674,6 +689,14 @@ class StorageBackend:
         make_dirs(d)
         temp = os.path.join(d, temp_name_for(os.path.basename(vpath)))
         # create empty file
+        with open(temp, "wb"):
+            pass
+        return temp
+
+    def create_snapshot_temp_for(self, vpath: str) -> str:
+        d = real_dir_for_vpath(self._write_base(), vpath)
+        make_dirs(d)
+        temp = os.path.join(d, snapshot_temp_name_for(os.path.basename(vpath)))
         with open(temp, "wb"):
             pass
         return temp
@@ -1269,9 +1292,9 @@ class FFSFS(Operations):
                         to_commit.append(fh)
                 for fh in to_commit:
                     try:
-                        # keep_writable: the application still holds this fd
-                        # and may write again after the idle commit.
-                        self._commit_fh_locked(fh, keep_writable=True)
+                        # The application still holds this fd and may write
+                        # again, so snapshot rather than retire the handle.
+                        self._snapshot_fh_locked(fh)
                     except Exception:
                         pass
             self._stop_evt.wait(OPEN_MAP_MONITOR_PERIOD)
@@ -1287,11 +1310,18 @@ class FFSFS(Operations):
                 # skip if it matches editor/lock junk
                 if _is_ephemeral_name(fn):
                     continue
+                # A snapshot copy that never finished; the handle's own temp
+                # holds the same bytes, complete. See snapshot_temp_name_for.
+                if f".{NULL_HASH}.SNAP" in fn:
+                    continue
 
                 absf = os.path.join(dirpath, fn)
                 try:
-                    # reconstruct vpath: strip off everything after first dot
-                    base, _rest = fn.split(".", 1)
+                    # Reconstruct the logical name the way readdir does: split
+                    # on the temp marker, NOT on the first dot. "notes.txt" is
+                    # not "notes" — that committed recovered data under the
+                    # wrong name, over the top of whatever lived there.
+                    base = fn.split(f".{NULL_HASH}.", 1)[0]
                     vdir = os.path.relpath(dirpath, root)
                     if vdir == ".":
                         vpath = base
@@ -1316,16 +1346,12 @@ class FFSFS(Operations):
 
     # commit logic (handle-based)
 
-    def _commit_fh_locked(self, fh: int, keep_writable: bool = False):
-        """Commit temp for fh.
+    def _commit_fh_locked(self, fh: int):
+        """Commit temp for fh and convert handle to read-open on the final.
 
-        Without `keep_writable` the handle becomes a read handle on the
-        committed version — right at release(), where the caller is done with
-        it. With it, the caller is STILL WRITING (an fsync mid-session, the
-        lazy-commit monitor): the version is committed and the handle is given
-        a fresh temp seeded from it, so the next write() continues the file
-        instead of failing EBADF. That reseed is a whole-file copy, which is
-        why should_snapshot_on_fsync() gates how often this path runs.
+        For release() only: the caller is done with the fd. A handle that is
+        still in use must go through _snapshot_fh_locked instead, which never
+        closes or replaces the file object.
         """
         f = self.fh_map.get(fh)
         meta = self.fh_meta.get(fh)
@@ -1346,36 +1372,57 @@ class FFSFS(Operations):
             self.fh_map.pop(fh, None)
 
         final_abspath = self.backend.commit_temp(vpath, temp_path, mode)
-
-        if keep_writable and mode in ("write", "append", "copy"):
-            new_temp = self.backend.create_temp_for(vpath)
-            try:
-                self.backend._copy_file_chunked(final_abspath, new_temp,
-                                                self.rate_limits.disk_fg)
-            except OSError as e:
-                # The version is safely committed; only the ability to keep
-                # writing is lost. Say so rather than hand back a temp holding
-                # a truncated copy that would commit over the good version.
-                ffslog.warn(f"fsync reseed failed for {vpath}: {e}")
-                try:
-                    os.remove(new_temp)
-                except OSError:
-                    pass
-                raise FuseOSError(e.errno or errno.EIO)
-            self.fh_map[fh] = open(new_temp, "r+b")
-            meta["temp_path"] = new_temp
-            meta["committed_once"] = True
-            meta["dirty"] = False
-            # Nothing written since this commit: stops the lazy monitor from
-            # re-committing the same bytes every time it wakes up.
-            meta["last_write_ts"] = 0.0
-            meta["last_snapshot_ts"] = now_ts()
-            return
-
         # re-open as read handle so subsequent reads (if any) still work
         rf = open(final_abspath, "rb")
         self.fh_map[fh] = rf
         self.fh_meta[fh] = {"mode": "read", "vpath": vpath, "temp_path": None}
+
+    def _snapshot_fh_locked(self, fh: int):
+        """Commit a version WITHOUT disturbing a handle the caller still holds.
+
+        The obvious implementation — commit the live temp, then reseed a fresh
+        one — is wrong, and was shipped and reverted: it closes the file object
+        and removes the fh from fh_map for the whole commit (a full-file hash)
+        plus a full-file copy. read/write/fsync resolve fh_map without the
+        lock, so every op on a valid fd returned EBADF for seconds, and a
+        failed reseed killed the fd for good.
+
+        So copy first, commit the copy, and leave the handle alone. Same cost,
+        no window: the application's fd, its temp and its position are never
+        touched, and a failure here costs a version, not the open file.
+        """
+        f = self.fh_map.get(fh)
+        meta = self.fh_meta.get(fh)
+        if not f or not meta:
+            return
+        vpath = meta["vpath"]
+        mode = meta["mode"]
+        # Writes do not take the lock, so record what we are about to capture:
+        # anything written after this point must keep the handle dirty, or
+        # release() would drop those bytes as "already committed".
+        seq = meta.get("write_seq", 0)
+
+        f.flush()
+        os.fsync(f.fileno())
+
+        snap = self.backend.create_snapshot_temp_for(vpath)
+        try:
+            self.backend._copy_file_chunked(meta["temp_path"], snap,
+                                            self.rate_limits.disk_fg)
+            self.backend.commit_temp(vpath, snap, mode)
+        except OSError as e:
+            ffslog.warn(f"fsync snapshot failed for {vpath}: {e}")
+            try:
+                os.remove(snap)
+            except OSError:
+                pass
+            raise FuseOSError(e.errno or errno.EIO)
+
+        meta["committed_once"] = True
+        meta["last_snapshot_ts"] = now_ts()
+        if meta.get("write_seq", 0) == seq:
+            meta["dirty"] = False
+            meta["last_write_ts"] = 0.0
 
     # path resolution preserving vdir structure
 
@@ -2061,6 +2108,10 @@ class FFSFS(Operations):
         while n < len(view):
             n += os.pwrite(fd, view[n:], offset + n)
         meta["last_write_ts"] = now_ts()
+        # Order matters: seq first, then dirty. A snapshot that samples seq
+        # before this write and clears dirty after it would otherwise drop
+        # these bytes at release().
+        meta["write_seq"] = next(_WRITE_SEQ)
         meta["dirty"] = True
         return n
 
@@ -2178,7 +2229,7 @@ class FFSFS(Operations):
             if ffsversioning.should_snapshot_on_fsync(
                     meta["vpath"], size, policy,
                     meta.get("last_snapshot_ts", 0.0), now_ts()):
-                self._commit_fh_locked(fh, keep_writable=True)
+                self._snapshot_fh_locked(fh)
         return 0
     
 

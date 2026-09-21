@@ -120,8 +120,10 @@ LIVE_DATA_SUFFIXES = (
     ".sst", ".log", ".journal", ".wal", ".shm", ".frm", ".ibd", ".myd", ".myi",
     ".qcow2", ".vdi", ".vmdk", ".vhd", ".vhdx", ".img",
 )
-# SQLite/LMDB sidecars: "main.db-wal", "data.mdb-lock".
-LIVE_DATA_INFIXES = ("-wal", "-shm", "-journal", "-lock")
+# SQLite/LMDB sidecars: "main.db-wal", "data.mdb-lock". These are only
+# recognised when the part BEFORE the marker is itself a live-data name, so
+# "roadmap-journal.md" and "design-lock-free.md" stay ordinary documents.
+LIVE_DATA_SIDECARS = ("-wal", "-shm", "-journal", "-lock")
 
 
 def looks_like_live_data(vpath: str) -> bool:
@@ -129,7 +131,10 @@ def looks_like_live_data(vpath: str) -> bool:
     name = os.path.basename(vpath or "").lower()
     if name.endswith(LIVE_DATA_SUFFIXES):
         return True
-    return any(marker in name for marker in LIVE_DATA_INFIXES)
+    for marker in LIVE_DATA_SIDECARS:
+        if name.endswith(marker) and name[:-len(marker)].endswith(LIVE_DATA_SUFFIXES):
+            return True
+    return False
 
 
 def should_snapshot_on_fsync(vpath: str, size: int, policy: str,
