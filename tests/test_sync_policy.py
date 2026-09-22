@@ -1,3 +1,5 @@
+import types
+
 import pytest
 
 from ffssync import SyncPolicy, SYNC_MODE_LAZY, SYNC_MODE_ACTIVE
@@ -101,3 +103,32 @@ def test_to_dict_round_trip():
 def test_default_node_role_when_missing():
     p = SyncPolicy.from_config(None, None)
     assert p.role == NODE_ROLE_CACHE_LIMITED
+
+
+# ---- eviction must never be the thing that destroys the last copy ----------
+
+@pytest.mark.unit
+def test_eviction_does_not_count_the_node_itself_as_a_peer(tmp_path, monkeypatch):
+    """A single node with no peers holds the only copy of everything it wrote.
+
+    ffspeers._index_add_local_version files every local commit under the
+    "self" key of _peer_cache. Counting that as "a peer holds it" let eviction
+    delete committed versions that existed nowhere else.
+    """
+    import ffspeers
+    import ffssync
+
+    worker = ffssync.SyncWorker.__new__(ffssync.SyncWorker)
+    worker.peers = ffspeers
+    worker.backend = types.SimpleNamespace(_find_version_source=lambda *a, **k: None)
+
+    name = "history.txt.ABCDEFGHJKMNPQRSTVWXYZ01.write.0.1700000000"
+    monkeypatch.setattr(ffspeers, "_peer_cache", {
+        ffspeers.SELF_CACHE_KEY: {"files": {"history.txt": [{"name": name, "size": 3}]}},
+    })
+    vol = types.SimpleNamespace(vol_id="only-volume")
+    assert worker._exists_elsewhere("/history.txt", name, vol) is False
+
+    # a genuine peer holding it still counts
+    ffspeers._peer_cache["peerA:1"] = {"files": {"history.txt": [{"name": name, "size": 3}]}}
+    assert worker._exists_elsewhere("/history.txt", name, vol) is True

@@ -1047,6 +1047,13 @@ def get_remote_head_meta(vpath: str):
 
 # -------------------- Client-side notify/actions --------------------
 
+# The node's own entry in _peer_cache. It exists so local versions are
+# visible to code that walks one uniform structure — it is NOT evidence that
+# another node holds a copy, and anything deciding whether bytes are safe to
+# delete must skip it. See SyncWorker._exists_elsewhere.
+SELF_CACHE_KEY = "self"
+
+
 def _index_add_local_version(versioned_name: str, size: int, mtime: int) -> None:
     parsed = parse_versioned_filename(versioned_name)
     if not parsed:
@@ -1056,7 +1063,7 @@ def _index_add_local_version(versioned_name: str, size: int, mtime: int) -> None
     lst = _local_file_index.setdefault(vpath, [])
     lst[:] = [x for x in lst if x.get("name") != versioned_name]
     lst.append(entry)
-    self_cache = _ensure_peer_cache_entry("self")
+    self_cache = _ensure_peer_cache_entry(SELF_CACHE_KEY)
     self_cache["last_sync"] = time.time()
     versions = self_cache["files"].setdefault(vpath, [])
     versions[:] = [x for x in versions if isinstance(x, dict) and x.get("name") != versioned_name]

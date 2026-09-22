@@ -585,10 +585,21 @@ class SyncWorker:
             pass
         # Peer cache best-effort check (vpath in eviction has a leading "/",
         # while peer cache keys are typically bare; try both forms).
+        #
+        # "self" is NOT a peer. ffspeers._index_add_local_version files every
+        # version this node commits under the "self" key of the very same
+        # cache, so including it made the node read its own store back as
+        # proof that somebody else holds the bytes — and evict the last copy
+        # of a file from a single-node realm. Eviction reclaims space that
+        # exists elsewhere; it is never allowed to be the thing that destroys
+        # the only copy.
         peers = self.peers
         cache = getattr(peers, "_peer_cache", {}) if peers is not None else {}
         keys_to_try = {vpath, vpath.lstrip("/")}
+        self_key = getattr(peers, "SELF_CACHE_KEY", "self") if peers is not None else "self"
         for _peer, peer_data in (cache or {}).items():
+            if _peer == self_key:
+                continue
             files = (peer_data or {}).get("files") or {}
             for key in keys_to_try:
                 for entry in files.get(key, []) or []:
