@@ -18,6 +18,7 @@ import json
 import shutil
 import random
 import itertools
+import contextlib
 from typing import Dict, List, Optional, Tuple
 from crossfuse import FUSE, Operations, FuseOSError
 
@@ -1439,6 +1440,69 @@ class FFSFS(Operations):
         self.fh_map[fh] = rf
         self.fh_meta[fh] = {"mode": "read", "vpath": vpath, "temp_path": None}
 
+    def _seal_fh_locked(self, fh: int):
+        """Commit the handle's own temp, keeping the fd valid for reads.
+
+        commit_temp renames the temp into its versioned name, so the open fd
+        keeps referring to the very same inode — reads through it stay correct
+        and cost nothing. What the fd must NOT do afterwards is write, since
+        those bytes are now an immutable version that a reader may already
+        have hashed; the handle is marked sealed and write() takes a fresh
+        temp before touching anything. That keeps the common case — write a
+        file, close it once — at exactly one rename, as it always was.
+        """
+        f = self.fh_map.get(fh)
+        meta = self.fh_meta.get(fh)
+        if not f or not meta:
+            return
+        temp_path = meta.get("temp_path")
+        if not temp_path:
+            return
+        io_lock = meta.get("io_lock")
+        with io_lock if io_lock is not None else contextlib.nullcontext():
+            seq = meta.get("write_seq", 0)
+            f.flush()
+            os.fsync(f.fileno())
+            # Errors propagate: that is the whole point of committing here.
+            self.backend.commit_temp(meta["vpath"], temp_path, meta["mode"])
+            meta["temp_path"] = None
+            meta["sealed"] = True
+            meta["committed_once"] = True
+            meta["last_snapshot_ts"] = now_ts()
+            if meta.get("write_seq", 0) == seq:
+                meta["dirty"] = False
+                meta["last_write_ts"] = 0.0
+
+    def _reseed_sealed_locked(self, fh: int):
+        """Give a sealed handle a private temp again, seeded from its version.
+
+        Called from write() under the handle's io_lock. The old file object is
+        retired rather than closed, so a concurrent read still holding it keeps
+        reading the committed version — correct bytes — instead of racing a
+        closed fd whose number may have been reused.
+        """
+        meta = self.fh_meta.get(fh)
+        if not meta or not meta.get("sealed"):
+            return
+        vpath = meta["vpath"]
+        temp = self.backend.create_temp_for(vpath)
+        try:
+            if not self._seed_temp_from_latest(vpath, temp):
+                pass                      # nothing committed yet: start empty
+        except Exception:
+            try:
+                os.remove(temp)
+            except OSError:
+                pass
+            raise
+        newf = open(temp, "r+b")
+        oldf = self.fh_map.get(fh)
+        self.fh_map[fh] = newf
+        if oldf:
+            meta.setdefault("retired", []).append(oldf)
+        meta["temp_path"] = temp
+        meta["sealed"] = False
+
     def _snapshot_fh_locked(self, fh: int):
         """Commit a version WITHOUT disturbing a handle the caller still holds.
 
@@ -2026,7 +2090,8 @@ class FFSFS(Operations):
         if mode == "append":
             f.seek(0, io.SEEK_END)
         fh = self._alloc_fh(f)
-        self.fh_meta[fh] = {"mode": mode, "vpath": vpath, "temp_path": temp, "last_write_ts": 0.0}
+        self.fh_meta[fh] = {"mode": mode, "vpath": vpath, "temp_path": temp,
+                            "last_write_ts": 0.0, "io_lock": threading.Lock()}
         return fh
 
     def _seed_temp_from_latest(self, vpath: str, temp: str) -> bool:
@@ -2147,7 +2212,8 @@ class FFSFS(Operations):
         temp = self.backend.create_temp_for(vpath)
         f = open(temp, "r+b")
         fh = self._alloc_fh(f)
-        self.fh_meta[fh] = {"mode": "write", "vpath": vpath, "temp_path": temp, "last_write_ts": 0.0}
+        self.fh_meta[fh] = {"mode": "write", "vpath": vpath, "temp_path": temp,
+                            "last_write_ts": 0.0, "io_lock": threading.Lock()}
         return fh
 
     def read(self, path, size, offset, fh):
@@ -2169,35 +2235,75 @@ class FFSFS(Operations):
         return os.pread(f.fileno(), size, offset)
 
     def write(self, path, data, offset, fh):
-        f = self.fh_map.get(fh)
         meta = self.fh_meta.get(fh) or {}
-        if not f or meta.get("mode") not in ("write", "append", "copy"):
+        if not self.fh_map.get(fh) or meta.get("mode") not in ("write", "append", "copy"):
             raise FuseOSError(errno.EBADF)
-        # Positional, like read(). All data I/O on a handle goes through
-        # pread/pwrite, so the buffered file object never holds unflushed data.
-        # Append handles are no exception: the temp fd is not O_APPEND, and the
-        # kernel already passes an O_APPEND write's offset as the file's end.
+        # Rate limiting first, OUTSIDE the handle lock: consume() sleeps when
+        # throttled, and holding a lock across a sleep is how the original
+        # position race became easy to hit.
         self.rate_limits.disk_fg.consume(len(data))
-        fd = f.fileno()
-        view = memoryview(data)
-        n = 0
-        while n < len(view):
-            n += os.pwrite(fd, view[n:], offset + n)
-        meta["last_write_ts"] = now_ts()
-        # Order matters: seq first, then dirty. A snapshot that samples seq
-        # before this write and clears dirty after it would otherwise drop
-        # these bytes at release().
-        meta["write_seq"] = next(_WRITE_SEQ)
-        meta["dirty"] = True
+
+        io_lock = meta.get("io_lock")
+        with io_lock if io_lock is not None else contextlib.nullcontext():
+            if meta.get("sealed"):
+                # flush() committed this handle's temp and the fd now refers to
+                # an immutable version. Writing through it would mutate bytes a
+                # reader is entitled to trust, so take a fresh temp first. Only
+                # a write AFTER a close pays this copy, which is rare — the
+                # ordinary single-close write pays nothing.
+                self._reseed_sealed_locked(fh)
+            f = self.fh_map.get(fh)
+            if not f:
+                raise FuseOSError(errno.EBADF)
+            # Positional, like read(). All data I/O on a handle goes through
+            # pread/pwrite, so the buffered file object never holds unflushed
+            # data. Append handles are no exception: the temp fd is not
+            # O_APPEND, and the kernel already passes an O_APPEND write's
+            # offset as the file's end.
+            fd = f.fileno()
+            view = memoryview(data)
+            n = 0
+            while n < len(view):
+                n += os.pwrite(fd, view[n:], offset + n)
+            meta["last_write_ts"] = now_ts()
+            # Order matters: seq first, then dirty. A commit that samples seq
+            # before this write and clears dirty after it would otherwise drop
+            # these bytes at release().
+            meta["write_seq"] = next(_WRITE_SEQ)
+            meta["dirty"] = True
+            meta["sealed"] = False
         return n
 
     def flush(self, path, fh):
+        """Commit here, not in release(): this is the call close(2) reports.
+
+        The kernel DISCARDS release()'s return value, so committing there made
+        every commit failure invisible. A full disk meant write() and close()
+        both succeeding, the application reporting the file saved, and the
+        next read returning the previous content — the worst shape a storage
+        bug can take, because the user has already moved on.
+
+        flush() can be called more than once per open (each close of a dup'd
+        fd), which is why the handle tracks whether anything was written since
+        the last commit. A flush with nothing new is free.
+        """
         meta = self.fh_meta.get(fh) or {}
-        if meta.get("mode") in ("write", "append", "copy"):
-            f = self.fh_map.get(fh)
-            if f:
-                f.flush()
-                os.fsync(f.fileno())
+        if meta.get("mode") not in ("write", "append", "copy"):
+            return 0
+        f = self.fh_map.get(fh)
+        if not f:
+            return 0
+        f.flush()
+        os.fsync(f.fileno())
+
+        if not should_commit_now(meta.get("mode", "write")):
+            return 0          # lazy modes commit on their own schedule
+        if meta.get("committed_once") and not meta.get("dirty"):
+            return 0          # already committed, nothing written since
+        with self._lock:
+            if self.fh_map.get(fh) is not f:
+                return 0
+            self._seal_fh_locked(fh)
         return 0
 
 
@@ -2226,9 +2332,13 @@ class FFSFS(Operations):
                 self.fh_meta.pop(fh, None)
                 return 0
 
-            # write/append/copy
+            # write/append/copy. flush() has normally committed already and
+            # reported any error to close(2); what is left here is a handle
+            # with unflushed changes (a lazy mode, or a release with no flush).
             try:
-                if meta.get("committed_once") and not meta.get("dirty"):
+                if meta.get("sealed") and not meta.get("dirty"):
+                    pass                      # committed at flush; nothing to do
+                elif meta.get("committed_once") and not meta.get("dirty"):
                     # An fsync already committed these exact bytes and nothing
                     # was written since; a second identical version at close
                     # would be pure write amplification.
@@ -2250,11 +2360,12 @@ class FFSFS(Operations):
             finally:
                 # Always close and clean up handle and meta even if commit/flush failed
                 f = self.fh_map.pop(fh, None)
-                if f:
-                    try:
-                        f.close()
-                    except Exception:
-                        pass
+                for rf in [f] + meta.get("retired", []):
+                    if rf:
+                        try:
+                            rf.close()
+                        except Exception:
+                            pass
                 self.fh_meta.pop(fh, None)
             return 0
 
@@ -2296,6 +2407,8 @@ class FFSFS(Operations):
                 return 0                      # committed by another thread
             if not meta.get("dirty", True):
                 return 0                      # nothing new since the last version
+            if meta.get("sealed") or not meta.get("temp_path"):
+                return 0          # already a committed version, nothing to copy
             try:
                 size = os.fstat(fd).st_size
             except OSError:
