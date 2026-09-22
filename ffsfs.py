@@ -723,7 +723,7 @@ class StorageBackend:
 
         # Crockford-32 (truncated)
         b32hash = base32_crockford(int.from_bytes(h.digest(), "big"))[:HASH_BASE32_LEN]
-        ts = int(time.time())
+        ts = self._commit_timestamp(vpath)
 
         # Inherit permission bits from the version being superseded, so a
         # `chmod +x` survives the next edit. `flags` is the schema's reserved
@@ -897,6 +897,61 @@ class StorageBackend:
                               logical_name, final_abspath)
         return final_abspath
 
+    def _inherited_flags(self, vpath: str) -> int:
+        """Permission bits recorded on the newest live version, or 0."""
+        prev = self.pick_latest(vpath)
+        parsed = parse_versioned_filename(os.path.basename(prev)) if prev else None
+        if not parsed or is_hidden_mode(parsed.get("mode")):
+            return 0
+        try:
+            return int(parsed.get("flags") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _commit_timestamp(self, vpath: str) -> int:
+        """A version timestamp strictly greater than every version already there.
+
+        pick_latest orders by timestamp first, so a commit that lands on or
+        below the newest existing stamp is invisible the moment it is written.
+        Two ordinary events do exactly that:
+
+          - the clock steps backwards (NTP correction, VM restore, a dual-boot
+            machine with local-time BIOS). The write succeeds, reads keep
+            returning the old content, and the next in-place edit seeds from
+            the old version — so the new work is discarded on the NEXT save.
+          - a rename reuses the source version's stamp (see rename_version),
+            which can be older than what sits at the destination, including a
+            delete tombstone. The moved bytes then exist at neither path.
+
+        Tombstones and markers count: a rename must be able to land on top of a
+        deleted name, which is what `mv` over a just-deleted file does.
+
+        The cost is that a stamp may run ahead of the wall clock after a
+        backwards step. That is the right trade: the stamp's job is ordering
+        versions of one logical file, and "newer than what I can see" is the
+        property everything downstream relies on.
+        """
+        ts = int(time.time())
+        newest = 0
+        logical = os.path.basename(vpath)
+        vpath_norm = normalize_vpath(vpath)
+        for root in self.data_roots():
+            dirpath = os.path.abspath(os.path.join(root, os.path.dirname(vpath_norm)))
+            try:
+                ensure_within_base(root, dirpath)
+                entries = os.listdir(dirpath)
+            except Exception:
+                continue
+            for name in entries:
+                parsed = parse_versioned_filename(name)
+                if not parsed or parsed["logical_name"] != logical:
+                    continue
+                try:
+                    newest = max(newest, int(parsed["timestamp"]))
+                except (TypeError, ValueError):
+                    continue
+        return max(ts, newest + 1) if newest else ts
+
     def commit_delete(self, vpath: str) -> str:
         """
         Record a logical deletion as a committed tombstone version.
@@ -915,12 +970,13 @@ class StorageBackend:
         from ffsutils import build_versioned_filename
 
         logical_name = os.path.basename(vpath)
-        ts = int(time.time())
+        ts = self._commit_timestamp(vpath)
         final_name = build_versioned_filename(
             logical_name=logical_name,
             content_hash=content_hash,
             mode=mode,
             timestamp=ts,
+            flags=self._inherited_flags(vpath),
         )
         target_vol = self.pool.write_target(size=size)
         if target_vol is None:
@@ -949,11 +1005,17 @@ class StorageBackend:
             return None
 
         new_logical = os.path.basename(new_vpath)
+        # A fresh stamp, above anything already at the destination. Reusing the
+        # source's stamp put the moved file UNDER the destination's newest
+        # version — `mv backup.txt notes.txt` kept serving the old notes.txt
+        # and lost the backup, and under a tombstone the bytes disappeared from
+        # both paths. flags carry across so `chmod +x` survives a move.
         new_name = build_versioned_filename(
             logical_name=new_logical,
             content_hash=parsed["content_hash"],
             mode=parsed["mode"],
-            timestamp=parsed["timestamp"],
+            timestamp=self._commit_timestamp(new_vpath),
+            flags=int(parsed.get("flags") or 0),
         )
 
         target_vol = self.pool.write_target(size=0)
@@ -979,7 +1041,7 @@ class StorageBackend:
         from ffsutils import build_versioned_filename
 
         logical_name = os.path.basename(vpath)
-        ts = int(time.time())
+        ts = self._commit_timestamp(vpath)
         final_name = build_versioned_filename(
             logical_name=logical_name,
             content_hash=content_hash,
@@ -1691,9 +1753,23 @@ class FFSFS(Operations):
                             lname = parsed["logical_name"]
                             ts = int(parsed["timestamp"])
                             is_del = is_hidden_mode(parsed.get("mode"))
+                            # Order EXACTLY as pick_latest does: (ts, mtime_ns,
+                            # path). The old key was (ts, is_del), which made a
+                            # tombstone win every same-second tie, so
+                            # `rm -f out; generate > out` produced a file cat
+                            # could read and ls never listed — invisible to
+                            # rsync, tar, find and every file manager. Two
+                            # orderings for "which version is current" is one
+                            # too many; ffsversioning says so in its own
+                            # retention comment.
+                            try:
+                                mtime_ns = de.stat(follow_symlinks=False).st_mtime_ns
+                            except OSError:
+                                mtime_ns = 0
+                            key = (ts, mtime_ns, name)
                             prev = latest_local.get(lname)
-                            if prev is None or (ts, int(is_del)) > (prev[0], int(prev[1])):
-                                latest_local[lname] = (ts, is_del)
+                            if prev is None or key > prev[0]:
+                                latest_local[lname] = (key, is_del)
                             continue
 
                         # If it's a temp, expose the logical name so GUI sees it during copy
@@ -1711,7 +1787,7 @@ class FFSFS(Operations):
             # Empty/nonexistent dir -> just ". .."
             pass
 
-        for lname, (ts, is_del) in latest_local.items():
+        for lname, (_key, is_del) in latest_local.items():
             if not is_del:
                 logicals.add(lname)
             
