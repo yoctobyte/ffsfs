@@ -189,7 +189,15 @@ class SyncWorker:
         remote_best = {}
         remote_tombstones = {}
 
+        self_key = getattr(peers, "SELF_CACHE_KEY", "self")
         for peer_id, peer_data in list(cache.items()):
+            if peer_id == self_key:
+                # Not a peer: ffspeers files this node's own commits under the
+                # same structure. Pulling from it is at best a no-op, and at
+                # worst it MASKS a real peer — an equal-stamped self entry can
+                # win the remote_best slot and make a genuine divergence look
+                # like agreement. Same trap as the eviction guard.
+                continue
             files = (peer_data or {}).get("files") or {}
             for vpath, versions in files.items():
                 # Always pull federated node-status files regardless of policy,
@@ -224,13 +232,29 @@ class SyncWorker:
                 skipped_backoff += 1
                 continue
             local_ts = self._local_latest_ts(vpath)
-            if local_ts is not None and local_ts >= newest_ts:
-                self._clear_failure(vpath)
+            if local_ts is not None and local_ts > newest_ts:
+                self._clear_failure(vpath)          # local is strictly newer
                 continue
             local_hash = self._local_latest_hash(vpath)
             remote_parsed = parse_versioned_filename(_newest_name)
             remote_hash = remote_parsed.get("content_hash") if remote_parsed else None
             if local_hash and remote_hash and local_hash == remote_hash:
+                self._clear_failure(vpath)          # same bytes, nothing to do
+                continue
+            if local_ts is not None and local_ts == newest_ts:
+                # Same second, different bytes: NEITHER side is newer. Version
+                # stamps are whole seconds and clocks across nodes are not
+                # exact, so there is no honest ordering to appeal to here —
+                # refining the stamp would only move the tie, not settle it.
+                # This used to take the `>=` branch above and silently keep the
+                # local copy: the remote edit was never fetched and nothing was
+                # recorded, so a genuine divergence looked like agreement.
+                # Record it and leave both sides intact; a conflict is the
+                # user's to resolve, and the .CONFLICT. entry is how they see
+                # that there is something to resolve.
+                if local_hash and remote_hash:
+                    self._record_conflict(vpath, local_hash, local_ts,
+                                          remote_hash, newest_ts)
                 self._clear_failure(vpath)
                 continue
             if local_hash and remote_hash and local_hash != remote_hash:

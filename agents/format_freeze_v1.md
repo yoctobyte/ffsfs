@@ -99,21 +99,38 @@ depends on how many dots the logical name has. That suffix goes on the wire in
 name that then fails to parse. `tests/test_ffsutils.py:110` asserts the broken
 form, so the bug is currently the contract and the test must change with it.
 
-### 4.3 The version timestamp is one second wide
+### 4.3 The version timestamp: seconds, frozen — DECIDED
 
-Ordering is `(timestamp, mtime_ns, path)`. The second and third components are
-local: `mtime_ns` is not comparable across nodes, and `path` is a tie-break of
-last resort. So for two versions committed in the same second on two nodes,
-the realm has no defined winner.
+Ordering is `(timestamp, mtime_ns, path)`. The last two are local: `mtime_ns`
+is not comparable across nodes. So two versions committed in the same second
+on two nodes have no realm-wide winner.
 
-Today's commit floor (`max(now, newest+1)`) hides this locally by pushing
-stamps forward, at the cost of stamps drifting ahead of the wall clock — one
-poisoned future-stamped file drags a file's whole history with it, permanently.
+A finer stamp was considered and **rejected**, for the right reason: a
+millisecond stamp assumes a clock accurate to the millisecond, and nodes do
+not have one. It would refine the tie rather than settle it — the same
+divergence, at a smaller window, now wearing a precision it has not earned.
+FFSFS is also a single-user system for now: two nodes writing the same file in
+the same second is rare, and when it does happen it is a genuine divergence
+that a stamp of any width cannot adjudicate. Conflicts are resolved by the
+conflict machinery, not by arithmetic on clocks.
 
-**Recommendation: widen to milliseconds before freezing.** The parser already
-accepts an unbounded `\d+`, so a 13-digit stamp parses today; only the builder
-and the human-facing formatting change. Doing it after the freeze means either
-a format break or living with second-granularity ordering forever.
+**So seconds are frozen.** What had to change is what happens at the tie, and
+that was the actual defect. Active pull skipped on `local_ts >= newest_ts`, so
+a remote version from the same second was dropped: not fetched, not recorded,
+not surfaced. Two nodes each kept their own edit and each believed itself in
+sync — divergence indistinguishable from agreement. That is fixed: equal
+stamp plus different content hash is recorded as a conflict and left for the
+user, and neither copy is overwritten.
+
+The rule the freeze states, then:
+
+> A version stamp orders versions of one logical file on one node. Across
+> nodes it is advisory. Equal stamp plus equal hash is agreement; equal stamp
+> plus different hash is a conflict, never a silent win.
+
+Which also means the conflict path is load-bearing protocol, not a corner: it
+needs the `.CONFLICT.` entry naming fixed (§4.8, it is matched as a bare
+substring today) and its store needs the durability the rest of §5 asks for.
 
 ### 4.4 Peer-supplied names must not build paths (SECURITY)
 
@@ -211,9 +228,8 @@ reason to decide it before freezing rather than after.
 
 ## 7. Decisions needed
 
-1. **Timestamp granularity** — seconds (freeze as-is, live with undefined
-   cross-node same-second ordering) or milliseconds (recommended, one-line
-   builder change now, format break later).
+1. ~~Timestamp granularity~~ — **decided: seconds, frozen.** A finer stamp
+   would assume clock accuracy no node has. See §4.3.
 2. **Metadata log** — debug artifact or real journal (§5).
 3. **Legacy 64-hex hashes** — read-only or dropped.
 4. **`mode` set** — confirm the five, and confirm L2's unknown-mode rule,
@@ -253,7 +269,8 @@ not HMAC. Proposed additions, all cheap:
 1. §4.4, §4.5, §4.6 — the security-visible ones; they change what a peer can
    do to you, and they are cheapest before anyone deploys.
 2. §4.1, §4.2, §4.9 — one builder, one derivation, one grammar.
-3. §7.1 and §7.2 decisions, then §4.3 and §6 together.
+3. §7.2 (metadata log), then §6 — the name-length bound is now free of the
+   stamp-width question that was blocking it.
 4. §4.7, §4.8 — close the grammar and the packet rules.
 5. §8 conformance suite, which is what actually ends the freeze process.
 6. Tag v1. After the tag, changes are additive only and must pass the suite
