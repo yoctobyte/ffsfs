@@ -227,3 +227,25 @@ class TestMissingHeaders:
         ok, err = v.verify("GET", "/x", {}, b"", headers)
         assert not ok
         assert "missing auth headers" in err
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw,expected", [
+    ("::1", "::1"),                       # IPv6 loopback must survive intact
+    ("fe80::1", "fe80::1"),
+    ("::ffff:127.0.0.1", "127.0.0.1"),    # IPv4-in-IPv6 unwrapped
+    ("fe80::1%eth0", "fe80::1"),          # zone id dropped
+    ("127.0.0.1", "127.0.0.1"),
+    ("ffff::f", "ffff::f"),               # leading f's are address, not prefix
+])
+def test_normalize_remote_addr_strips_a_prefix_not_a_character_set(raw, expected):
+    import ffspeers
+    assert ffspeers._normalize_remote_addr(raw) == expected
+
+
+@pytest.mark.unit
+def test_ipv6_loopback_counts_as_loopback():
+    """The dashboard and the reduce endpoint are gated on this."""
+    import ffspeers
+    addr = ffspeers._normalize_remote_addr("::1")
+    assert addr in ("127.0.0.1", "::1", "localhost") or addr.startswith("127.")

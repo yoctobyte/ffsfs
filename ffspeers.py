@@ -915,8 +915,16 @@ def _log(msg: str) -> None:
     ffslog.record("info", msg, source="peer", echo=VERBOSE)
 
 def _normalize_remote_addr(addr: str) -> str:
+    """Bare IP for an incoming request: drop a zone id, unwrap IPv4-in-IPv6.
+
+    lstrip() takes a SET OF CHARACTERS, not a prefix, so the old
+    `lstrip('::ffff:')` ate every leading ':' and 'f': "::1" became "1" and
+    "fe80::1" became "e80::1". IPv6 loopback therefore failed the loopback
+    check, and every IPv6 peer id was mangled at the point it is used as a
+    dictionary key.
+    """
     try:
-        return addr.split('%')[0].lstrip('::ffff:')
+        return addr.split('%')[0].removeprefix('::ffff:')
     except Exception:
         return addr
 
